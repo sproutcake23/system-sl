@@ -246,7 +246,7 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Notification Sound",
-            DEFAULT_SOUNDS_DIR,
+            str(DEFAULT_SOUNDS_DIR),
             "Audio Files (*.wav *.mp3)",
         )
         if file_path:
