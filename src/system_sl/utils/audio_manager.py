@@ -42,21 +42,14 @@ def get_current_sound() -> str:
     data = load_data(SETTINGS_FILE)
     sound_setting = data.get("notification_sound", "default.mp3")
     
-    # If it's just a filename (no path separators), resolve it in the sounds dir
-    if os.path.basename(sound_setting) == sound_setting:
-        sounds_dir = get_sounds_dir()
-        resolved = os.path.join(sounds_dir, sound_setting)
-        if os.path.exists(resolved):
-            return resolved
-        # Fall back to default.mp3 in sounds dir
-        return os.path.join(sounds_dir, "default.mp3")
-    
-    # Legacy absolute path - check if it exists, else fall back
-    if os.path.exists(sound_setting):
-        return sound_setting
+    # Resolve filename against sounds directory
+    sounds_dir = get_sounds_dir()
+    resolved = os.path.join(sounds_dir, sound_setting)
+    if os.path.exists(resolved):
+        return resolved
     
     # Fall back to default.mp3 in sounds dir
-    return os.path.join(get_sounds_dir(), "default.mp3")
+    return os.path.join(sounds_dir, "default.mp3")
 
 def play_sound(file_path: str):
     player = _get_player()

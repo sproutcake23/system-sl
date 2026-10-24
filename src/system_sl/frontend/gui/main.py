@@ -133,6 +133,9 @@ class MainWindow(QMainWindow):
         sound_button = QPushButton("Set Notification Sound")
         sound_button.clicked.connect(self.change_notification_sound)
 
+        install_desktop_btn = QPushButton("Install App Shortcut")
+        install_desktop_btn.clicked.connect(self.install_desktop_shortcut)
+
         profile_button = QPushButton("Edit Player Profile")
         profile_button.clicked.connect(self.open_onboarding)
 
@@ -150,6 +153,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(task_button)
         left_layout.addWidget(google_button)
         left_layout.addWidget(sound_button)
+        left_layout.addWidget(install_desktop_btn)
 
         # Ranking now degrades gracefully without a profile, so a player who
         # skipped onboarding is no longer blocked from the app. They would
@@ -256,6 +260,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Success", "Notification sound updated!")
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to set sound:\n{str(e)}")
+
+    def install_desktop_shortcut(self):
+        """Install the .desktop entry for the AppImage."""
+        import subprocess
+        result = install_desktop_entry()
+        if result == 0:
+            QMessageBox.information(self, "Success", "App shortcut installed!\nYou may need to log out/in or run 'update-desktop-database ~/.local/share/applications'")
+        else:
+            QMessageBox.warning(self, "Failed", "Could not install shortcut.\nMake sure you're running from the AppImage.")
 
     # --- NEW: Theme Manager Methods ---
     def on_theme_toggle_changed(self):
