@@ -29,7 +29,7 @@ jobs:
       - name: Build binary with PyInstaller
         run: |
           uv run python -m PyInstaller --name system-sl --windowed --noconsole --onefile \
-            --add-binary "spellchecker/resources/en.json.gz:spellchecker/resources" \
+            --collect-binaries spellchecker \
             --add-data "src/system_sl/assets:assets" \
             --collect-all en_core_web_md \
             src/system_sl/frontend/gui/main.py
@@ -82,7 +82,7 @@ jobs:
         shell: pwsh
         run: |
           uv run python -m PyInstaller --name system-sl --windowed --noconsole --onefile `
-            --add-binary "spellchecker/resources/en.json.gz:spellchecker/resources" `
+            --collect-binaries spellchecker `
             --add-data "src/system_sl/assets;assets" `
             --collect-all en_core_web_md `
             src/system_sl/frontend/gui/main.py
