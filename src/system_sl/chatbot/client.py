@@ -1,12 +1,78 @@
 """Chat session management for System-SL."""
 
 import json
-from typing import Union, List
+from typing import Callable, Iterator, List, Optional, Union
 
-from system_sl.chatbot.system_adi import get_system_agent, reset_agent_cache
+from langchain_core.messages import AIMessageChunk
+
+from system_sl.chatbot.system import (
+    get_system_agent,
+    reset_agent_cache,
+    set_turn_context,
+    clear_turn_context,
+)
 from system_sl.chatbot.config import ChatConfig, load_config, save_config
 
 from langsmith import uuid7
+
+
+def _content_text(content) -> str:
+    """Extract plain text from a message chunk's ``content`` payload."""
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                # Anthropic-style thinking blocks are not answer text
+                if block.get("type") in ("thinking", "reasoning"):
+                    continue
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+
+    return ""
+
+
+def _reasoning_text(chunk: AIMessageChunk) -> str:
+    """Extract reasoning/thinking text from a message chunk, if any.
+
+    Providers disagree on where this lives: OpenAI-compatible servers
+    (LM Studio, vLLM, DeepSeek) use ``additional_kwargs["reasoning_content"]``,
+    some use ``reasoning``, and others send a ``thinking`` content block.
+    """
+    additional = getattr(chunk, "additional_kwargs", None) or {}
+    for key in ("reasoning_content", "reasoning"):
+        value = additional.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, list):
+            joined = "".join(
+                part.get("text", "") for part in value if isinstance(part, dict)
+            )
+            if joined:
+                return joined
+
+    content = getattr(chunk, "content", None)
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in ("thinking", "reasoning"):
+                parts.append(block.get("text") or block.get("thinking") or "")
+        return "".join(parts)
+
+    return ""
+
+
+def _user_text(user_msg: Union[str, List[str]]) -> str:
+    """Flatten a turn's input into the text the task gate inspects."""
+    if isinstance(user_msg, str):
+        return user_msg
+    return "\n".join(str(part) for part in user_msg)
 
 
 class ChatSession:
@@ -60,21 +126,31 @@ class ChatSession:
         else:
             return [{"role": "user", "content": msg} for msg in user_msg]
 
-    def run_turn(self, user_msg: Union[str, List[str]]) -> str:
+    def run_turn(
+        self,
+        user_msg: Union[str, List[str]],
+        on_proposal: Optional[Callable[[dict], None]] = None,
+    ) -> str:
         """Executes a single conversational turn with the agent.
 
         Args:
             user_msg (Union[str, List[str]]): The input text message(s) from the user.
+            on_proposal (Callable[[dict], None], optional): Receives tasks the
+                agent tried to add without an explicit request.
 
         Returns:
             str: The extracted plain text content of the agent's reply.
         """
         formatted_messages = self.wrap_message(user_msg)
 
-        response = self.agent.invoke(
-            {"messages": formatted_messages},
-            config=self.config
-        )
+        set_turn_context(_user_text(user_msg), on_proposal)
+        try:
+            response = self.agent.invoke(
+                {"messages": formatted_messages},
+                config=self.config
+            )
+        finally:
+            clear_turn_context()
 
         if response is not None and "messages" in response:
             last_message = response["messages"][-1]
@@ -103,6 +179,48 @@ class ChatSession:
                 return str(content)
 
         return "[The System failed to reply]"
+
+    def stream_turn(
+        self,
+        user_msg: Union[str, List[str]],
+        on_proposal: Optional[Callable[[dict], None]] = None,
+    ) -> Iterator[tuple[str, str]]:
+        """Executes a single turn, yielding text as it is produced.
+
+        Yields:
+            ``("reasoning", delta)`` for reasoning/thinking text and
+            ``("content", delta)`` for answer text. Models that do not expose
+            reasoning simply never yield the former.
+
+        ``on_proposal`` receives any task the agent tried to add without the
+        Player explicitly asking for it, so the UI can confirm it.
+        """
+        formatted_messages = self.wrap_message(user_msg)
+
+        set_turn_context(_user_text(user_msg), on_proposal)
+        try:
+            for chunk, metadata in self.agent.stream(
+                {"messages": formatted_messages},
+                config=self.config,
+                stream_mode="messages",
+            ):
+                # Tool results and other graph chatter are not model output.
+                if not metadata or metadata.get("langgraph_node") != "model":
+                    continue
+                if not isinstance(chunk, AIMessageChunk):
+                    continue
+
+                reasoning = _reasoning_text(chunk)
+                if reasoning:
+                    yield "reasoning", reasoning
+                    # A chunk can carry reasoning and answer text at once.
+                    # Fall through only when there is content as well.
+
+                text = _content_text(chunk.content)
+                if text:
+                    yield "content", text
+        finally:
+            clear_turn_context()
 
     @classmethod
     def create_with_model(cls, model_name: str, thread_id: str | None = None) -> "ChatSession":

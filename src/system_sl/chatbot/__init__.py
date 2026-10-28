@@ -4,7 +4,7 @@ Exports the system agent, prompts, and session management.
 """
 
 from system_sl.chatbot.system_prompts import SYSTEM_MENTOR_PROMPT
-from system_sl.chatbot.system_adi import get_system_agent, reset_agent_cache
+from system_sl.chatbot.system import get_system_agent, reset_agent_cache
 from system_sl.chatbot.client import ChatSession, reload_agent
 from system_sl.chatbot.config import (
     ChatConfig,

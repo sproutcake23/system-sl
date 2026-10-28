@@ -107,6 +107,17 @@ QLineEdit:disabled, QDateEdit:disabled, QComboBox:disabled {{
     border: 1px solid {t['sys_color_border_muted']};
 }}
 
+/* --- Inline task confirmation bar --- */
+QFrame#taskConfirmBar {{
+    background-color: {t['sys_color_surface_raised']};
+    border: 1px solid {t['sys_color_primary']};
+}}
+QFrame#taskConfirmBar QLabel {{
+    color: {t['sys_color_text_main']};
+    border: none;
+    background: transparent;
+}}
+
 /* --- List widget (task list) --- */
 QListWidget {{
     background-color: {t['sys_color_surface_raised']};

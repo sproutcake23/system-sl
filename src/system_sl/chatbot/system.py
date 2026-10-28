@@ -4,8 +4,10 @@ Provides a LangGraph agent with tools for task management,
 using a configurable LLM backend (Google Gemini or OpenAI-compatible).
 """
 
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 from functools import lru_cache
+import re
 
 # LangChain imports
 from langchain.agents import create_agent
@@ -26,9 +28,63 @@ from system_sl.utils import (
     get_tasks_file_path,
 )
 
-from system_sl.chatbot import SYSTEM_MENTOR_PROMPT
+from system_sl.chatbot.system_prompts import SYSTEM_MENTOR_PROMPT
 from system_sl.chatbot.config import ChatConfig, load_config
 from system_sl.chatbot.llm_factory import create_llm_from_config, LLMFactoryError
+
+
+# =============================================================================
+# TURN CONTEXT — who is asking, and where task proposals go
+# =============================================================================
+
+# A task may only be created without asking when the Player's own message
+# contains a direct instruction. The match must start a clause, so advice and
+# questions ("you could add a task", "should I add a task?") do not count.
+_CLAUSE_START = r"(?:^|[.!?;\n]|,\s*|\b(?:and|then|also)\s+)\s*"
+_EXPLICIT_ADD = re.compile(
+    _CLAUSE_START
+    + r"(?:please\s+)?(?:"
+    r"(?:add|create)\b[^.?!\n]{0,60}\b(?:tasks?|list)\b"
+    r"|remind\s+me\s+to\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_explicit_task_request(text: str) -> bool:
+    """Return True when the Player directly asked for a task to be added.
+
+    Deliberately strict: only clause-initial commands count ("add a task X",
+    "please create task X", "remind me to X"). Suggestions, questions and
+    hypotheticals fall through to the confirmation prompt.
+    """
+    return bool(text and _EXPLICIT_ADD.search(text))
+
+
+@dataclass
+class _TurnContext:
+    """The user message (and proposal sink) for the turn currently running."""
+
+    user_text: str
+    on_proposal: Optional[Callable[[dict], None]] = None
+
+
+_turn_context: Optional[_TurnContext] = None
+
+
+def set_turn_context(
+    user_text: str,
+    on_proposal: Optional[Callable[[dict], None]] = None,
+) -> None:
+    """Scope a user message to the tools that run during this turn."""
+    global _turn_context
+    _turn_context = _TurnContext(user_text=user_text or "", on_proposal=on_proposal)
+
+
+def clear_turn_context() -> None:
+    """Drop the turn context once the turn has finished or been abandoned."""
+    global _turn_context
+    _turn_context = None
 
 
 # =============================================================================
@@ -49,7 +105,29 @@ def load_completed_tasks() -> Any:
 
 @tool
 def add_task(category: str, title: str, deadline: Optional[str] = None) -> Any:
-    """Add a brand new task to a specific category."""
+    """Add a brand new task to a specific category.
+
+    The task is only created when the Player explicitly asked for it in their
+    latest message. Otherwise it is queued for a Yes/No confirmation and the
+    result is ``pending_confirmation`` — do not claim it was added.
+    """
+    context = _turn_context
+    if context is None or not is_explicit_task_request(context.user_text):
+        proposal = {"category": category, "title": title, "deadline": deadline}
+        if context is not None and context.on_proposal is not None:
+            try:
+                context.on_proposal(proposal)
+            except Exception:
+                pass
+        return {
+            "status": "pending_confirmation",
+            "message": (
+                "The task was NOT added. The Player has been shown a Yes/No "
+                "prompt and must confirm it. Do not tell them it was added."
+            ),
+            **proposal,
+        }
+
     try:
         return add_tasks(category, title, deadline)
     except ValueError as e:

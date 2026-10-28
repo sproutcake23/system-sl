@@ -24,6 +24,40 @@ except ImportError:
     ChatOpenAI = None  # type: ignore
 
 
+if ChatOpenAI is not None:
+
+    class ReasoningChatOpenAI(ChatOpenAI):  # type: ignore[misc,valid-type]
+        """ChatOpenAI that keeps provider-specific reasoning text.
+
+        langchain-openai targets the official OpenAI schema and deliberately
+        drops non-standard fields such as ``reasoning_content``. Servers like
+        LM Studio, vLLM, DeepSeek and Ollama send their thinking there, so we
+        lift it into ``additional_kwargs`` where the chat panel can render it.
+        """
+
+        def _convert_chunk_to_generation_chunk(
+            self, chunk, default_chunk_class, base_generation_info
+        ):
+            generation_chunk = super()._convert_chunk_to_generation_chunk(
+                chunk, default_chunk_class, base_generation_info
+            )
+            if generation_chunk is None:
+                return None
+
+            choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices") or []
+            if not choices:
+                return generation_chunk
+
+            delta = choices[0].get("delta") or {}
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+            if reasoning:
+                generation_chunk.message.additional_kwargs["reasoning_content"] = reasoning
+            return generation_chunk
+
+else:  # pragma: no cover - optional dependency
+    ReasoningChatOpenAI = None  # type: ignore[assignment]
+
+
 Provider = Literal["google", "openai"]
 
 
@@ -168,7 +202,7 @@ def create_llm(
         if not base_url:
             raise LLMFactoryError("OpenAI-compatible provider requires base_url")
         # api_key can be empty/dummy for local servers (Ollama, LM Studio)
-        return ChatOpenAI(
+        return ReasoningChatOpenAI(
             model=model,
             temperature=temperature,
             base_url=base_url,

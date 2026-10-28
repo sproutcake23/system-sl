@@ -1,10 +1,11 @@
 """Chat panel widget for System-SL GUI."""
 
 import os
+import re
 import html
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Signal, Qt
+from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QTextEdit,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
     QMenu,
@@ -28,7 +30,14 @@ from PySide6.QtWidgets import (
     QSplitter,
     QFrame,
 )
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QTextBlockFormat,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocumentFragment,
+)
 
 from system_sl.chatbot import (
     ChatSession,
@@ -50,13 +59,75 @@ from system_sl.chatbot import (
     fetch_models_for_provider,
 )
 # --- Dynamic Theming Utilities ---
+from system_sl.core import add_tasks, load_tasks
 from system_sl.utils import get_wallpaper_path
 from system_sl.utils.theme_gen import generate_dynamic_tokens, DEFAULT_TOKENS
+
+
+def _colorize_markdown_html(body: str, color: str) -> str:
+    """Give every markdown element an explicit theme colour.
+
+    Wrapping the whole body in one ``<span>`` makes Qt's rich-text parser fold
+    the trailing list into the answer paragraph (the label ends up bulleted),
+    so the colour is applied per style attribute instead.
+    """
+
+    def add_color(match: re.Match) -> str:
+        style = match.group(1)
+        if "color:" in style:
+            return match.group(0)  # the [SYSTEM] label keeps its own colour
+        return f'style="color:{color};{style}"'
+
+    return re.sub(r'style="([^"]*)"', add_color, body)
 
 
 # =============================================================================
 # MODEL FETCH WORKER
 # =============================================================================
+
+_MD_BLOCK_PREFIXES = ("- ", "* ", "+ ", "> ", "|", "#")
+_MD_ORDERED = re.compile(r"^\d+\.\s")
+
+_DOT_COUNT = 4
+_DOT_CHAR = "•"
+
+
+def _preserve_line_breaks(text: str) -> str:
+    """Turn single newlines into markdown hard breaks.
+
+    Standard markdown collapses a lone newline into a space, which would merge
+    consecutive lines the model wrote (task lists, addresses) into one
+    paragraph. Chat replies are written expecting the newline to show, so each
+    continuation line gets the two trailing spaces that mean "hard break".
+    Fenced code and block constructs are left untouched.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    in_fence = False
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+
+        following = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        continues = (
+            bool(stripped)
+            and bool(following)
+            and not stripped.startswith(_MD_BLOCK_PREFIXES)
+            and not following.startswith(_MD_BLOCK_PREFIXES)
+            and not _MD_ORDERED.match(stripped)
+            and not _MD_ORDERED.match(following)
+        )
+        out.append(line.rstrip() + "  " if continues else line)
+
+    return "\n".join(out)
 
 class _ModelFetchWorker(QObject):
     """Background worker for fetching models from provider API."""
@@ -519,8 +590,12 @@ class SettingsDialog(QDialog):
 # =============================================================================
 
 class _ChatWorker(QObject):
+    reasoning = Signal(str)
+    chunk = Signal(str)
     finished = Signal(str)
     failed = Signal(str)
+    cancelled = Signal()
+    proposal = Signal(dict)
 
     def __init__(self, session: ChatSession, user_msg: str):
         super().__init__()
@@ -528,12 +603,41 @@ class _ChatWorker(QObject):
         self.user_msg = user_msg
 
     def run(self):
+        thread = QThread.currentThread()
+        collected: list[str] = []
+
         try:
-            reply = self.session.run_turn(self.user_msg)
+            for kind, delta in self.session.stream_turn(
+                self.user_msg, on_proposal=self.proposal.emit
+            ):
+                if thread.isInterruptionRequested():
+                    self.cancelled.emit()
+                    return
+                if kind == "reasoning":
+                    self.reasoning.emit(delta)
+                else:
+                    collected.append(delta)
+                    self.chunk.emit(delta)
+        except NotImplementedError:
+            # Provider or model cannot stream; fall back to a blocking turn.
+            try:
+                reply = self.session.run_turn(
+                    self.user_msg, on_proposal=self.proposal.emit
+                )
+            except Exception as e:
+                self.failed.emit(f"{type(e).__name__}: {e}")
+                return
+            collected.append(reply)
+            self.chunk.emit(reply)
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
             return
-        self.finished.emit(reply)
+
+        if thread.isInterruptionRequested():
+            self.cancelled.emit()
+            return
+
+        self.finished.emit("".join(collected))
 
 
 # =============================================================================
@@ -548,6 +652,37 @@ class ChatPanel(QWidget):
         self._current_model: str = ""
         self._thread: QThread | None = None
         self._worker: _ChatWorker | None = None
+
+        # Live-streaming state
+        self._answer_open: bool = False       # the [SYSTEM] line exists
+        self._streamed_any: bool = False      # any answer text arrived
+        self._reasoning_shown: bool = False   # the thinking view is populated
+        self._halted: bool = False            # user pressed Stop
+
+        self._answer_text: str = ""           # raw markdown accumulated this turn
+        self._answer_start: int | None = None # doc position of the [SYSTEM] line
+        self._last_rendered_html: str = ""
+        self._stream_tokens: dict = {}        # theme captured once per turn
+
+        # Four-dot loading indicator beside the label while the model works.
+        # One bright dot travels left to right through a fixed-width field.
+        self._dots_start: int | None = None
+        self._dots_frame: int = 0
+        self._dots_bright: str = "#00d9ff"
+        self._dots_dim: str = "#9ab8e5"
+        self._dots_timer = QTimer(self)
+        self._dots_timer.setInterval(200)
+        self._dots_timer.timeout.connect(self._tick_dots)
+
+        # Throttled markdown re-render while streaming
+        self._md_timer = QTimer(self)
+        self._md_timer.setSingleShot(True)
+        self._md_timer.setInterval(120)
+        self._md_timer.timeout.connect(self._render_answer)
+
+        # Task proposals awaiting the Player's Yes/No
+        self._pending_proposals: list[dict] = []
+        self._current_proposal: dict | None = None
 
         root = QVBoxLayout(self)
 
@@ -577,10 +712,42 @@ class ChatPanel(QWidget):
         root.addLayout(header)
 
         # --- Transcript ---
-        self.transcript = QTextEdit()
+        self.transcript = QTextBrowser()
         self.transcript.setReadOnly(True)
+        self.transcript.setOpenExternalLinks(True)
         self.transcript.setPlaceholderText("[ awaiting Player input — channel: SYSTEM ]")
         root.addWidget(self.transcript, stretch=1)
+
+        # --- Live reasoning ("thinking") view ---
+        # Only shown while a reasoning model is thinking; cleared as soon as
+        # real answer text starts arriving.
+        self.reasoning_view = QTextEdit()
+        self.reasoning_view.setReadOnly(True)
+        self.reasoning_view.setVisible(False)
+        self.reasoning_view.setMaximumHeight(96)
+        self.reasoning_view.setMinimumHeight(48)
+        root.addWidget(self.reasoning_view)
+
+        # --- Task confirmation bar (Yes/No, inline like a permission prompt) ---
+        self.confirm_bar = QFrame()
+        self.confirm_bar.setObjectName("taskConfirmBar")
+        bar_layout = QHBoxLayout(self.confirm_bar)
+        bar_layout.setContentsMargins(8, 6, 8, 6)
+        self.confirm_label = QLabel("")
+        self.confirm_label.setWordWrap(True)
+        self.confirm_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.confirm_yes = QPushButton("Yes")
+        self.confirm_yes.setFixedWidth(64)
+        self.confirm_yes.clicked.connect(self._on_confirm_yes)
+        self.confirm_no = QPushButton("No")
+        self.confirm_no.setFixedWidth(64)
+        self.confirm_no.clicked.connect(self._on_confirm_no)
+        bar_layout.addWidget(self.confirm_label, stretch=1)
+        bar_layout.addWidget(self.confirm_yes)
+        bar_layout.addWidget(self.confirm_no)
+        root.addWidget(self.confirm_bar)
+        # addWidget() re-parents and hides, so visibility is set afterwards.
+        self.confirm_bar.setVisible(False)
 
         # --- Input Row ---
         input_row = QHBoxLayout()
@@ -589,8 +756,13 @@ class ChatPanel(QWidget):
         self.input_box.returnPressed.connect(self._on_send)
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self._on_send)
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.setToolTip("Interrupt the reply")
+        self.stop_button.clicked.connect(self._on_stop)
         input_row.addWidget(self.input_box, stretch=1)
         input_row.addWidget(self.send_button)
+        input_row.addWidget(self.stop_button)
         root.addLayout(input_row)
 
         # Initialize model list
@@ -670,6 +842,7 @@ class ChatPanel(QWidget):
         # Clear session cache for new model
         self._sessions.clear()
         self._current_model = model_id
+        self._clear_proposals()
 
         self._append_alert(f"Switched to model: {model_id}")
 
@@ -726,10 +899,8 @@ class ChatPanel(QWidget):
         self._append_html(self._format_line("PLAYER", label_color, body_color, text))
 
     def _append_bot(self, text: str) -> None:
-        tokens = self._get_live_tokens()
-        label_color = tokens.get("sys_color_primary", "#00d9ff")
-        body_color = tokens.get("sys_color_text_main", "#d6e7ff")
-        self._append_html(self._format_line("SYSTEM", label_color, body_color, text))
+        """Append a complete (non-streamed) SYSTEM message, rendered as markdown."""
+        self._append_html(self._answer_html(text))
 
     def _append_alert(self, text: str) -> None:
         safe = html.escape(text).replace("\n", "<br>")
@@ -737,6 +908,277 @@ class ChatPanel(QWidget):
         self._append_html(
             f'<span style="color:{alert_color}; font-weight:bold">[ALERT]</span> '
             f'<span style="color:{alert_color}">{safe}</span>'
+        )
+
+    # ----- Streaming Rendering -----
+
+    def _reset_stream_state(self) -> None:
+        self._answer_open = False
+        self._streamed_any = False
+        self._reasoning_shown = False
+        self._halted = False
+        self._answer_text = ""
+        self._answer_start = None
+        self._last_rendered_html = ""
+        self._stream_tokens = {}
+        self._dots_frame = 0
+        self._md_timer.stop()
+        self._stop_dots()
+        self.reasoning_view.clear()
+        self.reasoning_view.setVisible(False)
+
+    # --- markdown ---
+
+    def _answer_html(self, text: str) -> str:
+        """Render markdown to themed HTML with the [SYSTEM] label inline."""
+        tokens = self._stream_tokens or self._get_live_tokens()
+        body_color = tokens.get("sys_color_text_main", "#d6e7ff")
+        label_color = tokens.get("sys_color_primary", "#00d9ff")
+        label = f'<span style="color:{label_color}; font-weight:bold">[SYSTEM]</span>'
+
+        if not text.strip():
+            return f'<span style="color:{body_color}">{label}</span>'
+
+        fragment = QTextDocumentFragment.fromMarkdown(_preserve_line_breaks(text)).toHtml()
+        body = fragment.split("<body>", 1)[-1].rsplit("</body>", 1)[0]
+        body = (
+            body.replace("<!--StartFragment-->", "")
+            .replace("<!--EndFragment-->", "")
+            .strip()
+        )
+        if not body:
+            return f'<span style="color:{body_color}">{label}</span>'
+
+        if body.startswith("<p"):
+            # Keep the label on the same line as the first paragraph.
+            close = body.find(">")
+            body = body[: close + 1] + label + " " + body[close + 1 :]
+        else:
+            # Answer starts with a list/table/code block: label gets its own line.
+            body = label + body
+
+        return _colorize_markdown_html(body, body_color)
+
+    def _replace_answer_region(self, rendered: str) -> None:
+        """Rewrite the [SYSTEM] block with freshly rendered HTML."""
+        if self._answer_start is None:
+            return
+
+        doc = self.transcript.document()
+        end = doc.characterCount() - 1
+        if end <= self._answer_start:
+            return
+
+        cursor = QTextCursor(doc)
+        cursor.setPosition(self._answer_start)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        cursor.removeSelectedText()
+
+        # Deleting multi-block content can leave the surviving block attached to
+        # a list from the previous render (the label would end up bulleted), so
+        # detach it and reset the block format before re-inserting.
+        block = doc.findBlock(self._answer_start)
+        text_list = block.textList()
+        if text_list is not None:
+            text_list.remove(block)
+
+        cursor = QTextCursor(doc)
+        cursor.setPosition(self._answer_start)
+        cursor.setBlockFormat(QTextBlockFormat())
+        cursor.insertHtml(rendered)
+
+        # Keep the view pinned to the newest text.
+        self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+        self.transcript.ensureCursorVisible()
+
+    def _render_answer(self) -> None:
+        """Re-render the streamed answer, skipping no-op rewrites."""
+        rendered = self._answer_html(self._answer_text)
+        if rendered == self._last_rendered_html:
+            return
+        self._last_rendered_html = rendered
+        self._replace_answer_region(rendered)
+
+    def _start_answer_line(self) -> None:
+        """Insert the [SYSTEM] label and its loading dots immediately on Send."""
+        self._stream_tokens = self._get_live_tokens()
+        tokens = self._stream_tokens
+        label_color = tokens.get("sys_color_primary", "#00d9ff")
+        label = f'<span style="color:{label_color}; font-weight:bold">[SYSTEM]</span>'
+        self.transcript.append(label)
+
+        doc = self.transcript.document()
+        self._answer_start = doc.lastBlock().position()
+        self._last_rendered_html = ""
+        self._answer_open = True
+
+        # The dots live inside the answer region, so the first markdown render
+        # replaces them along with the label; they can never leak into the reply.
+        self._dots_bright = label_color
+        self._dots_dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
+
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(self._dots_dim))
+        cursor.insertText(" " + _DOT_CHAR * _DOT_COUNT, fmt)
+
+        self._dots_start = doc.characterCount() - 1 - _DOT_COUNT
+        self._dots_frame = 0
+        self._tick_dots()  # paint the first frame without waiting 200 ms
+        self._dots_timer.start()
+
+    # --- loading dots ---
+
+    def _tick_dots(self) -> None:
+        """Advance the bright dot one step along the fixed-width dot field."""
+        if self._dots_start is None:
+            return
+
+        doc = self.transcript.document()
+        if self._dots_start + _DOT_COUNT > doc.characterCount() - 1:
+            self._stop_dots()
+            return
+
+        bright = QColor(self._dots_bright)
+        dim = QColor(self._dots_dim)
+        for offset in range(_DOT_COUNT):
+            cursor = QTextCursor(doc)
+            cursor.setPosition(self._dots_start + offset)
+            cursor.setPosition(self._dots_start + offset + 1, QTextCursor.KeepAnchor)
+            fmt = QTextCharFormat()
+            fmt.setForeground(bright if offset == self._dots_frame else dim)
+            cursor.mergeCharFormat(fmt)
+
+        self._dots_frame = (self._dots_frame + 1) % _DOT_COUNT
+
+    def _stop_dots(self) -> None:
+        self._dots_timer.stop()
+        self._dots_start = None
+
+    # --- reasoning ---
+
+    def _show_reasoning(self) -> None:
+        if self._reasoning_shown:
+            return
+        self._reasoning_shown = True
+        tokens = self._stream_tokens or self._get_live_tokens()
+        dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
+        self.reasoning_view.setStyleSheet(
+            f"QTextEdit {{ color: {dim}; font-style: italic;"
+            f" border: none; border-left: 2px solid {dim};"
+            f" background: transparent; padding-left: 6px; }}"
+        )
+        self.reasoning_view.setVisible(True)
+
+    def _on_reasoning(self, delta: str) -> None:
+        """Stream reasoning text into the dimmed thinking view."""
+        if self._halted:
+            return
+        self._show_reasoning()
+        cursor = self.reasoning_view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(delta)
+        self.reasoning_view.setTextCursor(cursor)
+        self.reasoning_view.ensureCursorVisible()
+
+    # --- answer ---
+
+    def _on_chunk(self, delta: str) -> None:
+        """Append one streamed answer delta and schedule a re-render."""
+        if self._halted:
+            return
+
+        first = not self._answer_text
+        self._answer_text += delta
+        self._streamed_any = True
+
+        if first:
+            # The answer has started: drop the loading dots and the reasoning
+            # pane, show the first token immediately, then throttle renders.
+            self._stop_dots()
+            self.reasoning_view.clear()
+            self.reasoning_view.setVisible(False)
+            self._reasoning_shown = False
+            self._render_answer()
+        elif not self._md_timer.isActive():
+            self._md_timer.start()
+
+    def _mark_stopped(self) -> None:
+        if not self._answer_open:
+            return
+        self._answer_text += " [stopped]"
+        self._render_answer()
+        self._answer_open = False
+
+    # ----- Task Confirmation -----
+
+    def _on_proposal(self, proposal: dict) -> None:
+        """Queue a task the agent tried to add without being asked."""
+        if self._halted:
+            return  # the Player abandoned this turn; drop late proposals
+        self._pending_proposals.append(dict(proposal))
+        self._show_next_proposal()
+
+    def _show_next_proposal(self) -> None:
+        """Show the next queued proposal, or hide the bar when none remain."""
+        if self._current_proposal is not None:
+            return  # one is already on screen; the new one is queued behind it
+        if not self._pending_proposals:
+            self.confirm_bar.setVisible(False)
+            return
+
+        proposal = self._pending_proposals.pop(0)
+        self._current_proposal = proposal
+
+        title = str(proposal.get("title") or "(untitled)")
+        category = str(proposal.get("category") or "none")
+        queued = len(self._pending_proposals)
+        suffix = f"   (+{queued} more queued)" if queued else ""
+        self.confirm_label.setText(f'Add "{title}" to {category}?{suffix}')
+        self.confirm_bar.setVisible(True)
+
+    def _on_confirm_yes(self) -> None:
+        proposal = self._current_proposal
+        self._current_proposal = None
+
+        if proposal is not None:
+            title = str(proposal.get("title") or "").strip()
+            category = str(proposal.get("category") or "none")
+            deadline = proposal.get("deadline")
+
+            existing = {str(task.get("title", "")) for task in load_tasks()}
+            if not title:
+                self._append_alert("cannot add a task without a title")
+            elif title in existing:
+                self._append_alert(f"task '{title}' already exists")
+            else:
+                try:
+                    add_tasks(category, title, deadline)
+                except ValueError as e:
+                    self._append_alert(str(e))
+                else:
+                    self._append_confirmation(f'Added "{title}" to {category}.')
+
+        self._show_next_proposal()
+
+    def _on_confirm_no(self) -> None:
+        self._current_proposal = None
+        self._show_next_proposal()
+
+    def _clear_proposals(self) -> None:
+        self._pending_proposals.clear()
+        self._current_proposal = None
+        self.confirm_bar.setVisible(False)
+
+    def _append_confirmation(self, text: str) -> None:
+        tokens = self._get_live_tokens()
+        label_color = tokens.get("sys_color_primary", "#00d9ff")
+        body_color = tokens.get("sys_color_text_main", "#d6e7ff")
+        safe = html.escape(text)
+        self._append_html(
+            f'<span style="color:{label_color}; font-weight:bold">[SYSTEM]</span> '
+            f'<span style="color:{body_color}">{safe}</span>'
         )
 
     # ----- Input Flow -----
@@ -747,6 +1189,7 @@ class ChatPanel(QWidget):
         self.model_combo.setEnabled(not busy)
         self.refresh_btn.setEnabled(not busy)
         self.settings_btn.setEnabled(not busy)
+        self.stop_button.setEnabled(busy)
 
     def _on_send(self) -> None:
         if self._thread is not None:
@@ -762,31 +1205,96 @@ class ChatPanel(QWidget):
 
         self.input_box.clear()
         self._append_player(text)
+        self._reset_stream_state()
         self._set_busy(True)
+        self._start_answer_line()
 
         self._thread = QThread(self)
         self._worker = _ChatWorker(session, text)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
+        self._worker.reasoning.connect(self._on_reasoning)
+        self._worker.chunk.connect(self._on_chunk)
         self._worker.finished.connect(self._on_reply)
         self._worker.failed.connect(self._on_failure)
+        self._worker.cancelled.connect(self._on_cancelled)
+        self._worker.proposal.connect(self._on_proposal)
         self._worker.finished.connect(self._thread.quit)
         self._worker.failed.connect(self._thread.quit)
+        self._worker.cancelled.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup_thread)
         self._thread.start()
 
+    def _on_stop(self) -> None:
+        """Stop showing the reply immediately and abandon it in the worker."""
+        if self._thread is None or self._halted:
+            return
+        had_output = self._streamed_any
+        self._halted = True
+        self._md_timer.stop()
+        self._stop_dots()
+        self._mark_stopped()
+        self.reasoning_view.clear()
+        self.reasoning_view.setVisible(False)
+        self._reasoning_shown = False
+        if not had_output:
+            self._append_alert("stopped before any reply")
+        self._thread.requestInterruption()
+        self.stop_button.setEnabled(False)
+        self.stop_button.setText("Stopping...")
+
     def _on_reply(self, reply: str) -> None:
-        self._append_bot(reply or "[empty reply]")
+        self._md_timer.stop()
+        self._stop_dots()
+        if self._halted:
+            return
+
+        # Prefer the authoritative reply text when the fallback path produced it.
+        if reply and reply != self._answer_text:
+            self._answer_text = reply
+            self._last_rendered_html = ""
+        if not self._answer_text:
+            self._answer_text = "[empty reply]"
+            self._last_rendered_html = ""
+
+        self._render_answer()
+        self._answer_open = False
+        self.reasoning_view.clear()
+        self.reasoning_view.setVisible(False)
+        self._reasoning_shown = False
+        self._stop_dots()
 
     def _on_failure(self, message: str) -> None:
+        self._md_timer.stop()
+        self._stop_dots()
+        self._render_answer()  # clears the loading dots if no token ever arrived
+        self.reasoning_view.clear()
+        self.reasoning_view.setVisible(False)
+        self._reasoning_shown = False
+        self._answer_open = False
+        if self._halted:
+            return
         self._append_alert(message)
 
+    def _on_cancelled(self) -> None:
+        self._md_timer.stop()
+        self._stop_dots()
+        if not self._halted:
+            # Interrupted without a Stop press (e.g. shutdown).
+            self._mark_stopped()
+        self.reasoning_view.clear()
+        self.reasoning_view.setVisible(False)
+        self._reasoning_shown = False
+
     def _cleanup_thread(self) -> None:
+        self._md_timer.stop()
+        self._stop_dots()
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
         if self._thread is not None:
             self._thread.deleteLater()
             self._thread = None
+        self.stop_button.setText("Stop")
         self._set_busy(False)
         self.input_box.setFocus()
