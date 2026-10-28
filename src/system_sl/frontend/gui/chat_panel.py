@@ -882,35 +882,94 @@ class ChatPanel(QWidget):
             pass
         return DEFAULT_TOKENS
 
-    def _append_html(self, html_line: str) -> None:
-        self.transcript.append(html_line)
-
-    def _format_line(self, label: str, label_color: str, body_color: str, text: str) -> str:
-        safe = html.escape(text).replace("\n", "<br>")
-        return (
-            f'<span style="color:{label_color}; font-weight:bold">[{label}]</span> '
-            f'<span style="color:{body_color}">{safe}</span>'
-        )
-
     def _append_player(self, text: str) -> None:
+        """Append a user (PLAYER) message as a right-aligned bubble, no label."""
         tokens = self._get_live_tokens()
-        label_color = tokens.get("sys_color_text_secondary", "#9ab8e5")
-        body_color = tokens.get("sys_color_text_main", "#d6e7ff")
-        self._append_html(self._format_line("PLAYER", label_color, body_color, text))
+        bg = tokens.get("sys_color_primary", "#00d9ff")
+        fg = "#000000"
+        self._append_bubble(text, align_right=True, bg_color=bg, text_color=fg, escape=True)
 
     def _append_bot(self, text: str) -> None:
-        """Append a complete (non-streamed) SYSTEM message, rendered as markdown."""
-        self._append_html(self._answer_html(text))
+        """Append a complete SYSTEM message as a left-aligned bubble, no label."""
+        tokens = self._get_live_tokens() or self._stream_tokens
+        body_color = tokens.get("sys_color_text_main", "#d6e7ff")
+        bg = tokens.get("sys_color_surface", "#2a2a40")
+        self._append_markdown_bubble(text, align_right=False, bg_color=bg, text_color=body_color)
+
+    def _append_bubble(self, text: str, align_right: bool, bg_color: str, text_color: str, escape: bool = True) -> None:
+        """Insert a chat bubble using QTextCursor + QTextBlockFormat for proper alignment."""
+        safe = html.escape(text).replace("\n", "<br>") if escape else text.replace("\n", "<br>")
+        
+        cursor = QTextCursor(self.transcript.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        
+        # Block format for alignment (right for user, left for system)
+        block_fmt = QTextBlockFormat()
+        block_fmt.setAlignment(Qt.AlignmentFlag.AlignRight if align_right else Qt.AlignmentFlag.AlignLeft)
+        block_fmt.setTopMargin(4)
+        block_fmt.setBottomMargin(4)
+        cursor.insertBlock(block_fmt)
+        
+        # Char format for bubble background + text color
+        char_fmt = QTextCharFormat()
+        char_fmt.setBackground(QColor(bg_color))
+        char_fmt.setForeground(QColor(text_color))
+        char_fmt.setFontFamily("Segoe UI, Helvetica Neue, DejaVu Sans, sans-serif")
+        char_fmt.setFontPointSize(13)
+        
+        # Set char format on cursor, then insert HTML
+        cursor.setCharFormat(char_fmt)
+        cursor.insertHtml(safe)
+        
+        # Ensure scroll to bottom
+        self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+        self.transcript.ensureCursorVisible()
+
+    def _append_markdown_bubble(self, markdown_text: str, align_right: bool, bg_color: str, text_color: str, escape: bool = False) -> None:
+        """Render markdown and insert as a styled bubble block."""
+        if not markdown_text.strip():
+            self._append_bubble("", align_right, bg_color, text_color, escape=False)
+            return
+        
+        # Convert markdown to HTML
+        fragment = QTextDocumentFragment.fromMarkdown(_preserve_line_breaks(markdown_text)).toHtml()
+        body = fragment.split("<body>", 1)[-1].rsplit("</body>", 1)[0]
+        body = (
+            body.replace("<!--StartFragment-->", "")
+            .replace("<!--EndFragment-->", "")
+            .strip()
+        )
+        if not body:
+            self._append_bubble("", align_right, bg_color, text_color, escape=False)
+            return
+        
+        body = _colorize_markdown_html(body, text_color)
+        
+        cursor = QTextCursor(self.transcript.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        
+        block_fmt = QTextBlockFormat()
+        block_fmt.setAlignment(Qt.AlignmentFlag.AlignRight if align_right else Qt.AlignmentFlag.AlignLeft)
+        block_fmt.setTopMargin(4)
+        block_fmt.setBottomMargin(4)
+        cursor.insertBlock(block_fmt)
+        
+        char_fmt = QTextCharFormat()
+        char_fmt.setBackground(QColor(bg_color))
+        char_fmt.setForeground(QColor(text_color))
+        char_fmt.setFontFamily("Segoe UI, Helvetica Neue, DejaVu Sans, sans-serif")
+        char_fmt.setFontPointSize(13)
+        
+        cursor.setCharFormat(char_fmt)
+        cursor.insertHtml(body)
+        
+        self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+        self.transcript.ensureCursorVisible()
 
     def _append_alert(self, text: str) -> None:
         safe = html.escape(text).replace("\n", "<br>")
         alert_color = "#ff6b8a"
-        self._append_html(
-            f'<span style="color:{alert_color}; font-weight:bold">[ALERT]</span> '
-            f'<span style="color:{alert_color}">{safe}</span>'
-        )
-
-    # ----- Streaming Rendering -----
+        self._append_bubble(safe, align_right=False, bg_color=alert_color, text_color="#ffffff", escape=False)
 
     def _reset_stream_state(self) -> None:
         self._answer_open = False
@@ -927,40 +986,8 @@ class ChatPanel(QWidget):
         self.reasoning_view.clear()
         self.reasoning_view.setVisible(False)
 
-    # --- markdown ---
-
-    def _answer_html(self, text: str) -> str:
-        """Render markdown to themed HTML with the [SYSTEM] label inline."""
-        tokens = self._stream_tokens or self._get_live_tokens()
-        body_color = tokens.get("sys_color_text_main", "#d6e7ff")
-        label_color = tokens.get("sys_color_primary", "#00d9ff")
-        label = f'<span style="color:{label_color}; font-weight:bold">[SYSTEM]</span>'
-
-        if not text.strip():
-            return f'<span style="color:{body_color}">{label}</span>'
-
-        fragment = QTextDocumentFragment.fromMarkdown(_preserve_line_breaks(text)).toHtml()
-        body = fragment.split("<body>", 1)[-1].rsplit("</body>", 1)[0]
-        body = (
-            body.replace("<!--StartFragment-->", "")
-            .replace("<!--EndFragment-->", "")
-            .strip()
-        )
-        if not body:
-            return f'<span style="color:{body_color}">{label}</span>'
-
-        if body.startswith("<p"):
-            # Keep the label on the same line as the first paragraph.
-            close = body.find(">")
-            body = body[: close + 1] + label + " " + body[close + 1 :]
-        else:
-            # Answer starts with a list/table/code block: label gets its own line.
-            body = label + body
-
-        return _colorize_markdown_html(body, body_color)
-
-    def _replace_answer_region(self, rendered: str) -> None:
-        """Rewrite the [SYSTEM] block with freshly rendered HTML."""
+    def _replace_answer_region(self, rendered_html: str) -> None:
+        """Rewrite the streaming answer block with freshly rendered HTML."""
         if self._answer_start is None:
             return
 
@@ -974,9 +1001,7 @@ class ChatPanel(QWidget):
         cursor.setPosition(end, QTextCursor.KeepAnchor)
         cursor.removeSelectedText()
 
-        # Deleting multi-block content can leave the surviving block attached to
-        # a list from the previous render (the label would end up bulleted), so
-        # detach it and reset the block format before re-inserting.
+        # Reset block format to avoid inheriting list formatting
         block = doc.findBlock(self._answer_start)
         text_list = block.textList()
         if text_list is not None:
@@ -985,45 +1010,82 @@ class ChatPanel(QWidget):
         cursor = QTextCursor(doc)
         cursor.setPosition(self._answer_start)
         cursor.setBlockFormat(QTextBlockFormat())
-        cursor.insertHtml(rendered)
+        cursor.insertHtml(rendered_html)
 
-        # Keep the view pinned to the newest text.
         self.transcript.moveCursor(QTextCursor.MoveOperation.End)
         self.transcript.ensureCursorVisible()
 
     def _render_answer(self) -> None:
         """Re-render the streamed answer, skipping no-op rewrites."""
-        rendered = self._answer_html(self._answer_text)
+        tokens = self._stream_tokens or self._get_live_tokens()
+        body_color = tokens.get("sys_color_text_main", "#d6e7ff")
+        bg = tokens.get("sys_color_surface", "#2a2a40")
+        
+        if not self._answer_text.strip():
+            rendered = self._empty_answer_html(bg, body_color)
+        else:
+            fragment = QTextDocumentFragment.fromMarkdown(_preserve_line_breaks(self._answer_text)).toHtml()
+            body = fragment.split("<body>", 1)[-1].rsplit("</body>", 1)[0]
+            body = (
+                body.replace("<!--StartFragment-->", "")
+                .replace("<!--EndFragment-->", "")
+                .strip()
+            )
+            if not body:
+                rendered = self._empty_answer_html(bg, body_color)
+            else:
+                body = _colorize_markdown_html(body, body_color)
+                rendered = self._wrap_answer_html(body, bg, body_color)
+        
         if rendered == self._last_rendered_html:
             return
         self._last_rendered_html = rendered
         self._replace_answer_region(rendered)
 
+    def _empty_answer_html(self, bg: str, body_color: str) -> str:
+        """HTML for an empty answer bubble."""
+        return (
+            f'<div style="background:{bg}; color:{body_color}; border-radius:12px; '
+            f'padding:6px 12px; max-width:75%; text-align:left; word-wrap:break-word;">'
+            f'<span style="color:{body_color}"> </span></div>'
+        )
+
+    def _wrap_answer_html(self, body: str, bg: str, body_color: str) -> str:
+        """Wrap rendered markdown in a left-aligned bubble div."""
+        return (
+            f'<div style="background:{bg}; color:{body_color}; border-radius:12px; '
+            f'padding:6px 12px; max-width:75%; text-align:left; word-wrap:break-word;">'
+            f'{body}</div>'
+        )
+
     def _start_answer_line(self) -> None:
-        """Insert the [SYSTEM] label and its loading dots immediately on Send."""
+        """Insert an empty left-aligned block for the streaming SYSTEM answer and start dots."""
         self._stream_tokens = self._get_live_tokens()
         tokens = self._stream_tokens
-        label_color = tokens.get("sys_color_primary", "#00d9ff")
-        label = f'<span style="color:{label_color}; font-weight:bold">[SYSTEM]</span>'
-        self.transcript.append(label)
-
-        doc = self.transcript.document()
-        self._answer_start = doc.lastBlock().position()
+        
+        # Insert an empty left-aligned block for the answer
+        cursor = QTextCursor(self.transcript.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        
+        block_fmt = QTextBlockFormat()
+        block_fmt.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        block_fmt.setTopMargin(4)
+        block_fmt.setBottomMargin(4)
+        cursor.insertBlock(block_fmt)
+        
+        self._answer_start = cursor.block().position()
         self._last_rendered_html = ""
         self._answer_open = True
 
-        # The dots live inside the answer region, so the first markdown render
-        # replaces them along with the label; they can never leak into the reply.
-        self._dots_bright = label_color
+        self._dots_bright = tokens.get("sys_color_primary", "#00d9ff")
         self._dots_dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
 
-        cursor = QTextCursor(doc)
-        cursor.movePosition(QTextCursor.MoveOperation.End)
+        # Insert loading dots in the answer block
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(self._dots_dim))
         cursor.insertText(" " + _DOT_CHAR * _DOT_COUNT, fmt)
 
-        self._dots_start = doc.characterCount() - 1 - _DOT_COUNT
+        self._dots_start = self._answer_start + 1  # after block position
         self._dots_frame = 0
         self._tick_dots()  # paint the first frame without waiting 200 ms
         self._dots_timer.start()

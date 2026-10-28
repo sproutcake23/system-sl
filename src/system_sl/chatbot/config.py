@@ -11,7 +11,7 @@ import requests
 from dataclasses import dataclass, asdict
 from typing import Literal, Optional
 
-from system_sl.utils import get_tasks_file_path
+from system_sl.utils import get_tasks_file_path, secure_storage
 from system_sl.chatbot.llm_factory import Provider, ProviderPreset, PRESETS, get_preset, list_presets
 from system_sl.chatbot.model_fetcher import (
     ModelInfo,
@@ -85,11 +85,16 @@ def load_config() -> ChatConfig:
     )
 
     # API Key
+    # Stored securely in the system keyring (KDE Wallet / GNOME Keyring /
+    # macOS Keychain / Windows Credential Manager) with an encrypted-file
+    # fallback for headless environments. Environment variables still take
+    # precedence for explicit overrides.
     api_key = (
-        data.get("api_key")
-        or os.environ.get("LLM_API_KEY")
+        os.environ.get("LLM_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
         or os.environ.get("GOOGLE_API_KEY")
+        or secure_storage.get_secret(secure_storage.SECRET_LLM_API_KEY)
+        or data.get("api_key", "")  # backward compat with existing installs
         or ""
     )
 
@@ -117,13 +122,27 @@ def _default_model_for_provider(provider: str) -> str:
 
 
 def save_config(config: ChatConfig) -> None:
-    """Save configuration to ~/.config/system-sl/llm_config.json."""
+    """Save configuration to ~/.config/system-sl/llm_config.json.
+
+    Non-secret fields (provider, base_url, system_model) are written to the
+    config file. The API key is stored separately in the system keyring so it
+    is never written to disk in plaintext.
+    """
     path = get_tasks_file_path(CONFIG_FILENAME)
     try:
+        non_secret = {
+            "provider": config.provider,
+            "base_url": config.base_url,
+            "system_model": config.system_model,
+        }
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(asdict(config), f, indent=2)
+            json.dump(non_secret, f, indent=2)
     except OSError as e:
         raise ChatConfigError(f"Failed to write {path}: {e}") from e
+
+    # Persist the API key securely, never in plaintext on disk.
+    if config.api_key:
+        secure_storage.set_secret(secure_storage.SECRET_LLM_API_KEY, config.api_key)
 
 
 def validate_config(config: ChatConfig) -> list[str]:

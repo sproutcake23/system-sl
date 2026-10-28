@@ -4,6 +4,7 @@ import shutil
 import tarfile
 import tempfile
 import zipfile
+import hashlib
 from pathlib import Path
 
 import requests
@@ -86,6 +87,43 @@ def get_platform_asset(assets: list) -> dict | None:
     return None
 
 
+def find_checksums_asset(assets: list) -> dict | None:
+    """Find a release asset containing SHA256 checksums for the release."""
+    for asset in assets:
+        name = asset["name"].lower()
+        if name.endswith((".sha256", ".sha256sum", "sha256sums.txt", "checksums.txt")):
+            return asset
+    return None
+
+
+def verify_checksum(file_path: Path, expected_hex: str) -> bool:
+    """Return True if the SHA-256 of ``file_path`` matches ``expected_hex``."""
+    expected_hex = expected_hex.strip().lower()
+    # A checksums line may be "<hash>  <filename>" or "<hash>  <path>/<file>"
+    expected_hex = expected_hex.split()[0]
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest() == expected_hex
+
+
+def parse_checksums(text: str, asset_name: str) -> str | None:
+    """Extract the expected SHA-256 for ``asset_name`` from checksums text."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        digest, name = parts[0], parts[-1]
+        # name may be prefixed with a path; match on basename
+        if name == asset_name or name.endswith("/" + asset_name) or name == "./" + asset_name:
+            return digest
+    return None
+
+
 def stage_appimage_update(new_appimage: Path, current: Path) -> Path:
     """Stage a replacement AppImage next to the running one.
 
@@ -157,7 +195,13 @@ def extract_binary(archive_path: Path, dest_dir: Path) -> Path:
 
     if archive_path.suffix == ".xz" or archive_path.name.endswith(".tar.xz"):
         with tarfile.open(archive_path, "r:xz") as tar:
-            tar.extractall(path=dest_dir)
+            # filter="data" blocks path-traversal (absolute/.. paths) and is
+            # the safe default; older Pythons (<3.12) lack the kwarg so we
+            # fall back to the plain extractall.
+            try:
+                tar.extractall(path=dest_dir, filter="data")
+            except TypeError:
+                tar.extractall(path=dest_dir)
     elif archive_path.suffix == ".zip":
         with zipfile.ZipFile(archive_path, "r") as zf:
             zf.extractall(dest_dir)
@@ -312,6 +356,32 @@ class UpdateCheckThread(QThread):
                 self.progress.emit(25)
                 archive = download_asset(download_url, tmp_path)
                 self.progress.emit(50)
+                # Supply-chain verification: confirm the downloaded asset
+                # matches the SHA-256 published in the release checksums.
+                checksums_asset = find_checksums_asset(assets)
+                if checksums_asset is not None:
+                    try:
+                        checksums_text = requests.get(
+                            checksums_asset["browser_download_url"], timeout=30
+                        ).text
+                    except requests.RequestException as e:
+                        self.update_complete.emit(
+                            False, f"Update failed: could not fetch release checksums: {e}"
+                        )
+                        return
+                    expected = parse_checksums(checksums_text, asset["name"])
+                    if expected is None:
+                        self.update_complete.emit(
+                            False,
+                            f"Update failed: no checksum entry for {asset['name']} in release checksums.",
+                        )
+                        return
+                    if not verify_checksum(archive, expected):
+                        self.update_complete.emit(
+                            False,
+                            "Update failed: SHA-256 checksum mismatch — the download may be corrupt or tampered.",
+                        )
+                        return
                 if appimage is not None:
                     # The AppImage is already the artifact; unpacking it would
                     # only produce a stray bare binary.
