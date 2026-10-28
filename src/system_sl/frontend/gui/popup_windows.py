@@ -4,6 +4,9 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QDateEdit,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -19,6 +22,7 @@ from PySide6.QtCore import QDate, QSize, Qt, Signal, QTimer
 from system_sl.core.onboarding import ONBOARDING_QUESTIONS, PersonaStorageHandler
 from system_sl.core.tasks import (
     add_tasks,
+    edit_task,
     load_tasks,
     mark_task_completed,
     remove_tasks,
@@ -95,8 +99,11 @@ class TasksWindow(QWidget):
         self.complete_button.clicked.connect(self._on_complete)
         self.remove_button = QPushButton("Remove")
         self.remove_button.clicked.connect(self._on_remove)
+        self.edit_button = QPushButton("Edit")
+        self.edit_button.clicked.connect(self._on_edit)
         action_row.addWidget(self.complete_button)
         action_row.addWidget(self.remove_button)
+        action_row.addWidget(self.edit_button)
         action_row.addStretch(1)
         root.addLayout(action_row)
 
@@ -216,16 +223,29 @@ class TasksWindow(QWidget):
             # NOTE: removed the category thing
             item.setData(Qt.UserRole, title)
             self.tasks_list_widget.addItem(item)
-            self._text_to_task[display] = task
+            self._text_to_task[title] = task
 
     def _on_reordered(self, moved_text, old_rank, new_rank, new_texts):
         # BUG: REMEBER TO DEAL WITH THIS FUNCTION CAREFULLY
 
-        # 1. Update visual order
+        # new_texts contains display strings, but _text_to_task is keyed by title.
+        # Extract titles from the display strings (format: "N. Title [extras]")
+        def extract_title(display: str) -> str:
+            # Remove leading "N. " and anything after "  →" or " [P="
+            title = display
+            if ". " in title:
+                title = title.split(". ", 1)[1]
+            for sep in ("  →", " [P="):
+                if sep in title:
+                    title = title.split(sep)[0]
+            return title.strip()
+
+        new_titles = [extract_title(t) for t in new_texts]
         new_order_dicts = [
-            self._text_to_task[t] for t in new_texts if t in self._text_to_task
+            self._text_to_task[t] for t in new_titles if t in self._text_to_task
         ]
-        moved = self._text_to_task.get(moved_text)
+        moved_title = extract_title(moved_text)
+        moved = self._text_to_task.get(moved_title)
 
         if moved is None or len(new_order_dicts) != len(new_texts):
             # Safe deferred rendering
@@ -275,6 +295,62 @@ class TasksWindow(QWidget):
         try:
             remove_tasks(task_title=title)
             self._set_status(f"Removed: {title}")
+        except ValueError as e:
+            self._set_status(str(e))
+        self._refresh_list()
+
+    def _on_edit(self):
+        """Open a dialog to edit the selected task's title and deadline."""
+        title = self._selected()
+        if title is None:
+            return
+
+        task = self._text_to_task.get(title)
+        if task is None:
+            self._set_status("Could not find task data.")
+            return
+
+        current_deadline = task.get("deadline")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Task")
+        dialog.setModal(True)
+        form = QFormLayout(dialog)
+
+        title_edit = QLineEdit(title)
+        form.addRow("Title:", title_edit)
+
+        deadline_check = QCheckBox("Set deadline:")
+        deadline_edit = QDateEdit()
+        deadline_edit.setCalendarPopup(True)
+        deadline_edit.setDisplayFormat("yyyy-MM-dd")
+        deadline_edit.setEnabled(bool(current_deadline))
+        if current_deadline:
+            from PySide6.QtCore import QDate
+            deadline_edit.setDate(QDate.fromString(current_deadline, "yyyy-MM-dd"))
+        deadline_check.toggled.connect(deadline_edit.setEnabled)
+        form.addRow(deadline_check, deadline_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        new_title = title_edit.text().strip()
+        new_deadline = (
+            deadline_edit.date().toString("yyyy-MM-dd")
+            if deadline_check.isChecked()
+            else None
+        )
+        if not new_title:
+            self._set_status("Title is required.")
+            return
+        try:
+            edit_task(title, new_title, new_deadline)
+            self._set_status(f"Edited: {new_title}")
         except ValueError as e:
             self._set_status(str(e))
         self._refresh_list()

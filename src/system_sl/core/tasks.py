@@ -1,8 +1,7 @@
+import html
 import json
 import random
-import os
 from datetime import datetime
-import platform
 from pathlib import Path
 
 from system_sl.utils import get_tasks_file_path
@@ -12,6 +11,17 @@ from system_sl.utils import load_data, save_data
 TASKS_FILE_PATH = get_tasks_file_path("tasks.json")
 TASK_ORDER_FILE_PATH = get_tasks_file_path("task_order.json")
 COMPLETED_TASKS_FILE_PATH = get_tasks_file_path("completed_tasks.json")
+
+
+def sanitize_title(title: str) -> str:
+    """Strip HTML/JS from a task title so it can never inject into rich text.
+
+    Qt rich text renders any HTML it is given, so titles that ever reach
+    ``setHtml()`` / markdown rendering must be escaped first.
+    """
+    if not isinstance(title, str):
+        return ""
+    return html.escape(title.strip())
 
 
 def load_tasks():
@@ -68,18 +78,12 @@ def add_tasks(task_type: str = "none",task_title: str = "none",  deadline: str =
     Returns:
         str: The sanitized task title string that was successfully saved.
     """
-    # if not isinstance(task_type, str) or not task_type.strip():
-    #     raise ValueError("Task type must be a non-empty string")
-
     if not isinstance(task_title, str) or not task_title.strip():
         raise ValueError("Task title must be a non-empty string")
 
     tasks = load_tasks()
 
-    task_title = task_title.strip()
-
-    # if task_type not in tasks:
-    #     tasks[task_type] = []
+    task_title = sanitize_title(task_title)
 
     for task in tasks:
         if task["title"] == task_title:
@@ -90,14 +94,13 @@ def add_tasks(task_type: str = "none",task_title: str = "none",  deadline: str =
                 print(f"Updated deadline for '{task_title}' to {deadline}")
                 return task_title
 
-            raise ValueError(f"Task '{task_title}' already exists in {task_type}")
+            raise ValueError(f"Task '{task_title}' already exists")
 
     if isinstance(task_type, str):
         task_type = task_type.lower().strip()
     else:
         task_type = "None"
 
-    # followed sriram's advise to store category if we need in future implemention (happy if one read's this)
     new_task = {
         "title": task_title,
         "created_at": datetime.now().isoformat(),
@@ -124,11 +127,7 @@ def remove_tasks(task_title: str, task_type: str = "none"):
         raise ValueError("Task title must be a non-empty string")
 
     tasks = load_tasks()
-    task_type = task_type.lower().strip()
-    task_title = task_title.strip()
-
-    # if task_type not in tasks:
-    #     raise ValueError(f"Category {task_type} does not exist")
+    task_title = sanitize_title(task_title)
 
     original_count = len(tasks)
 
@@ -136,9 +135,6 @@ def remove_tasks(task_title: str, task_type: str = "none"):
 
     if len(tasks) == original_count:
         raise ValueError(f"Task '{task_title}' not found")
-
-    # if not tasks[task_type]:
-    #     tasks.pop(task_type)
 
     save_tasks(tasks)
     _remove_from_task_order(task_title)
@@ -165,16 +161,15 @@ def _remove_from_task_order(task_title: str) -> None:
 
 
 def get_random_task():
-    """Picks an outstanding item completely at random across all non-empty active categories.
+    """Picks an outstanding item completely at random across all active tasks.
 
     Returns:
-        tuple[str, str] or None: A tuple mapping (category, task_title) if items exist, otherwise None.
+        str or None: A task title if items exist, otherwise None.
     """
     tasks = load_tasks()
-    # non_empty_cat = {k: v for k, v in tasks.items() if v}
-    # if not non_empty_cat:
-    #     return None
-    # cat_key, cat_value = random.choice(list(non_empty_cat.items()))
+    if not tasks:
+        return None
+
     rand_task_obj = random.choice(tasks)
 
     return rand_task_obj["title"]
@@ -215,15 +210,10 @@ def get_topn_task():
 
 
 def load_completed_tasks():
-    # """Fetches the complete historical array of items archived as completed.
-
-    # Returns:
-    #     dict: Parsed collection map containing log strings of finished events.
-    # """
-    """Fetches active tasks from storage and automatically processes system migrations for legacy string formats.
+    """Fetches completed tasks from storage and processes legacy string-format migrations.
 
     Returns:
-        dict: A dictionary of categorized task objects containing title, created_at, and deadline fields.
+        list: A list of completed task dicts containing title, completed_at, and category fields.
     """
     data = load_data(COMPLETED_TASKS_FILE_PATH)
     new_data = []
@@ -243,7 +233,7 @@ def load_completed_tasks():
                 else:
                     new_data.append(task)
         data = new_data
-         
+
         if migrated:
             save_completed_tasks(new_data)
     return data
@@ -261,12 +251,71 @@ def save_completed_tasks(tasks: dict):
     save_data(COMPLETED_TASKS_FILE_PATH, tasks)
 
 
+def edit_task(old_title: str, new_title: str, new_deadline: str = None, new_category: str = "none") -> str:
+    """Edit an existing task's title, deadline, and/or category.
+
+    Args:
+        old_title: The current title of the task to edit.
+        new_title: The new title for the task.
+        new_deadline: Optional new deadline.
+        new_category: Optional new category.
+
+    Returns:
+        str: The new (sanitized) task title.
+
+    Raises:
+        ValueError: If the old task is not found or the new title is empty.
+    """
+    if not isinstance(old_title, str) or not old_title.strip():
+        raise ValueError("Old task title must be a non-empty string")
+    if not isinstance(new_title, str) or not new_title.strip():
+        raise ValueError("New task title must be a non-empty string")
+
+    old_title = sanitize_title(old_title)
+    new_title = sanitize_title(new_title)
+
+    tasks = load_tasks()
+
+    found = False
+    for task in tasks:
+        if task["title"] == old_title:
+            found = True
+            # If the title changed, check for duplicates against the new title
+            if new_title != old_title:
+                for other in tasks:
+                    if other is not task and other["title"] == new_title:
+                        raise ValueError(f"Task '{new_title}' already exists")
+            task["title"] = new_title
+            if new_deadline is not None:
+                task["deadline"] = new_deadline
+            task["category"] = new_category.lower().strip() if isinstance(new_category, str) else "none"
+            break
+
+    if not found:
+        raise ValueError(f"Task '{old_title}' not found")
+
+    save_tasks(tasks)
+    # Rebuild manual order to reflect any title change
+    order_data = load_data(TASK_ORDER_FILE_PATH)
+    if isinstance(order_data, dict) and "order" in order_data:
+        order = [
+            new_title if t == old_title else t for t in order_data["order"]
+        ]
+        try:
+            with open(Path(TASK_ORDER_FILE_PATH), "w") as f:
+                json.dump({"order": order}, f)
+        except Exception:
+            pass
+
+    return new_title
+
+
 def mark_task_completed(task_title: str, task_type: str = "none"):
     """Extracts a task out of active runtime arrays and logs it as completed inside history archives.
 
     Args:
-        task_type (str): Original classification bucket tracking the item.
-        task_title (str): Unique text identity of the task being checked off.
+        task_type: Original classification bucket tracking the item.
+        task_title: Unique text identity of the task being checked off.
 
     Returns:
         str: The title of the validated task moved to historical logs.
@@ -274,15 +323,12 @@ def mark_task_completed(task_title: str, task_type: str = "none"):
     removed_title = remove_tasks(task_title, task_type)
 
     completed_tasks = load_completed_tasks()
-    # if task_type not in completed_tasks:
-    #     completed_tasks[task_type] = []
 
     completion_entry = {
-        "title": task_title, 
+        "title": task_title,
         "completed_at": datetime.now().strftime("%Y-%m-%d"),
         "category": task_type,
     }
-    print(type(completed_tasks))
     if completion_entry not in completed_tasks:
         completed_tasks.append(completion_entry)
 

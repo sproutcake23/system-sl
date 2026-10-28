@@ -299,8 +299,8 @@ QMenu::item:selected {{
 /* --- Tooltips --- */
 QToolTip {{
     background-color: {t['sys_color_surface_raised']};
-    color: {t['sys_color_text_highlight']};
-    border: 1px solid {t['sys_color_primary']};
+    color: {t['sys_color_text_main']};
+    border: 1px solid {t['sys_color_border']};
     padding: 4px 6px;
 }}
 """

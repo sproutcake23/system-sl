@@ -29,6 +29,10 @@ def main():
             # collects it explicitly and this script must too, otherwise a
             # locally built binary silently loses task ranking.
             "--collect-all", "en_core_web_md",
+            # AppImage bundles often lack a system CA bundle, which caused
+            # SSL CERTIFICATE_VERIFY_FAILED when fetching models. Ship
+            # certifi so urllib/requests can verify HTTPS certificates.
+            "--collect-all", "certifi",
             str(project_root / "src/system_sl/frontend/gui/main.py"),
         ],
         cwd=project_root,

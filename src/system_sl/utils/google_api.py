@@ -1,5 +1,6 @@
 """Module for managing authentication and data retrieval from Google APIs."""
 
+import json
 import os.path
 from typing import Any, Dict, List, Optional
 
@@ -7,6 +8,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build, Resource
+
+from system_sl.utils import secure_storage
 
 
 
@@ -30,27 +33,62 @@ class GoogleAPIClient:
     def _get_credentials(self) -> Optional[Credentials]:
         """Handles user authentication, reading cached tokens, or initiating local OAuth flows.
 
+        The access token and refresh token are stored in the system keyring
+        (KDE Wallet / GNOME Keyring / macOS Keychain / Windows Credential
+        Manager) with an encrypted-file fallback, never as plaintext
+        ``token.json`` on disk.
+
         Returns:
             Optional[Credentials]: Valid Google OAuth credentials if successful, None otherwise.
         """
         creds: Optional[Credentials] = None
-        
-        if os.path.exists(self._token_path):
-            creds = Credentials.from_authorized_user_file(self._token_path, self.scopes)
+
+        # Load cached token from secure storage.
+        token_data = secure_storage.get_json_secret(secure_storage.SECRET_GOOGLE_TOKEN)
+        if token_data:
+            try:
+                creds = Credentials.from_authorized_user_info(token_data, self.scopes)
+            except Exception:
+                creds = None
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
-                if not os.path.exists(self._creds_path):
-                    print(f"ERROR: credentials.json not found at {self._creds_path}. "
-                          f"Please download it from Google Cloud Console & run install.py.")
+                # Obtain the client config from secure storage, falling back to
+                # a legacy credentials.json file on disk.
+                client_data = secure_storage.get_json_secret(
+                    secure_storage.SECRET_GOOGLE_CREDENTIALS
+                )
+                if client_data is not None:
+                    flow = InstalledAppFlow.from_client_config(client_data, self.scopes)
+                elif os.path.exists(self._creds_path):
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        self._creds_path, self.scopes
+                    )
+                else:
+                    print(
+                        "ERROR: Google OAuth credentials not found. "
+                        "Provide credentials.json or set the google-oauth-credentials secret."
+                    )
                     return None
-                flow = InstalledAppFlow.from_client_secrets_file(self._creds_path, self.scopes)
-                creds = flow.run_local_server(port=0)
 
-            with open(self._token_path, "w") as token:
-                token.write(creds.to_json())
+                try:
+                    # Open a local browser with a timeout so the app never
+                    # hangs waiting for a redirect that never arrives.
+                    creds = flow.run_local_server(port=0, timeout_seconds=120, open_browser=True)
+                except Exception:
+                    # Headless environment (no browser / no display): fall back
+                    # to the out-of-band console flow.
+                    print("No browser available — falling back to console OAuth flow.")
+                    creds = flow.run_console()
+
+            # Persist the acquired/refreshed token securely, never in plaintext.
+            if creds:
+                secure_storage.set_json_secret(
+                    secure_storage.SECRET_GOOGLE_TOKEN,
+                    json.loads(creds.to_json()),
+                )
 
         return creds
 

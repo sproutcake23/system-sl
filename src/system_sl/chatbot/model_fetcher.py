@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import ssl
 import time
 from dataclasses import dataclass, asdict
 from typing import Optional
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+
+import certifi
+
+
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 @dataclass
@@ -58,7 +64,7 @@ def fetch_openrouter_models(api_key: str, base_url: str = "https://openrouter.ai
     req = Request(url, headers=headers)
 
     try:
-        with urlopen(req, timeout=15) as resp:
+        with urlopen(req, timeout=15, context=_SSL_CONTEXT) as resp:
             if resp.status != 200:
                 raise ModelFetcherError(f"HTTP {resp.status}: {resp.read().decode()}")
             data = json.loads(resp.read().decode())
