@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QInputDialog,
     QSizePolicy,
+    QDialog,
 )
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
 from system_sl.frontend.gui.chat_panel import ChatPanel
@@ -388,29 +389,42 @@ def main():
     # reopen it every time it was closed.
 
 
-    env_path = Path(get_tasks_file_path(".env"))
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path)
+    # Load LLM configuration
+    from system_sl.chatbot import load_config, validate_config, ChatConfig
+    from system_sl.chatbot.llm_factory import ProviderPreset
 
-    api_key = os.getenv("GOOGLE_API_KEY")
+    config = load_config()
+    errors = validate_config(config)
 
-    if not api_key:
-        key, ok = QInputDialog.getText(
-            None,
-            "Missing API Key",
-            "Paste GOOGLE_API_KEY:",
-        )
-        if not ok or not key.strip():
+    # If config is invalid or missing, show settings dialog
+    if errors or not config.system_model:
+        from system_sl.frontend.gui.chat_panel import SettingsDialog
+        dialog = SettingsDialog()
+        if dialog.exec() != QDialog.Accepted:
             QMessageBox.critical(
                 None,
-                "API Key Required",
-                "No GOOGLE_API_KEY was provided. The app cannot continue.",
+                "Configuration Required",
+                "LLM configuration is required to continue.",
             )
-        api_key = key.strip()
-        os.environ["GOOGLE_API_KEY"] = api_key
+            sys.exit(1)
+        # Reload config after dialog
+        config = load_config()
+        errors = validate_config(config)
+        if errors:
+            QMessageBox.critical(
+                None,
+                "Invalid Configuration",
+                "\n".join(errors),
+            )
+            sys.exit(1)
 
-        env_path.touch(exist_ok=True)
-        set_key(str(env_path), "GOOGLE_API_KEY", api_key)
+    # Set environment variables for the selected provider
+    if config.provider == "google":
+        os.environ["GOOGLE_API_KEY"] = config.api_key
+    elif config.provider == "openai":
+        os.environ["OPENAI_API_KEY"] = config.api_key
+        if config.base_url:
+            os.environ["OPENAI_BASE_URL"] = config.base_url
 
     try:
         storage = PersonaStorageHandler()
