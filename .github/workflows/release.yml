@@ -72,9 +72,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libegl1 libpulse0
-          mkdir -p "$RUNNER_TEMP/appimage-home"
-          HOME="$RUNNER_TEMP/appimage-home" \
-            ./dist/system-sl-*-x86_64.AppImage --appimage-extract-and-run --install-desktop
+          # --install-desktop moves the AppImage into ~/Applications, so test
+          # a copy and keep the built file in dist/ for the upload steps.
+          test_home="$RUNNER_TEMP/appimage-home"
+          mkdir -p "$test_home"
+          cp dist/system-sl-*-x86_64.AppImage "$RUNNER_TEMP/"
+          HOME="$test_home" \
+            "$RUNNER_TEMP"/system-sl-*-x86_64.AppImage --appimage-extract-and-run --install-desktop
+          ls "$test_home"/Applications/system-sl-*-x86_64.AppImage
+          grep '^Exec=' "$test_home/.local/share/applications/system-sl.desktop"
+          test -f "$test_home/.local/share/icons/hicolor/scalable/apps/system-sl.svg"
 
       - name: Upload Linux binary
         uses: actions/upload-artifact@v4
