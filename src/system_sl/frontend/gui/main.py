@@ -57,6 +57,7 @@ StartupNotify=true
         print(f"❌ Failed to create desktop entry: {e}")
         return 1
 from PySide6.QtCore import QSize, QTimer, QSettings, QFileSystemWatcher, Qt, Slot, QObject
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -71,6 +72,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QSizePolicy,
     QDialog,
+    QSystemTrayIcon,
+    QMenu,
 )
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
 from system_sl.frontend.gui.chat_panel import ChatPanel
@@ -116,6 +119,12 @@ class MainWindow(QMainWindow):
         self.tasks_window = None
         self.onboarding_window = None
         self.update_thread = None
+        self._allow_exit = False
+        self.close_to_tray_enabled = self.settings.value(
+            "close_to_tray", False, type=bool
+        )
+        self.tray_icon = None
+        self._setup_tray_icon()
 
         main_container = QWidget()
         self.setCentralWidget(main_container)
@@ -183,6 +192,16 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.check_box)
         left_layout.addWidget(self.theme_toggle) # Added to the left panel UI
 
+        self.close_to_tray_toggle = QCheckBox("Close to System Tray")
+        self.close_to_tray_toggle.setChecked(self.close_to_tray_enabled)
+        self.close_to_tray_toggle.setEnabled(self.tray_icon is not None)
+        if self.tray_icon is None:
+            self.close_to_tray_toggle.setToolTip(
+                "System tray is not available in this desktop session."
+            )
+        self.close_to_tray_toggle.toggled.connect(self._toggle_close_to_tray)
+        left_layout.addWidget(self.close_to_tray_toggle)
+
         self.auto_update_check = QCheckBox("Auto Update")
         self.auto_update_check.setChecked(load_auto_update_preference())
         self.auto_update_check.clicked.connect(self._toggle_auto_update)
@@ -197,6 +216,75 @@ class MainWindow(QMainWindow):
         # Start the background watcher if it was enabled during the last session
         if is_dynamic:
             self.start_dynamic_theming()
+
+    def _setup_tray_icon(self):
+        """Create the tray menu used to restore or fully exit the app."""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+
+        # Draw the small tray mark with Qt so it works in frozen builds even
+        # when the platform's SVG image plugin is not bundled.
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor("#10182b"))
+        painter.setPen(QColor("#00d9ff"))
+        painter.drawEllipse(3, 3, 58, 58)
+        painter.setPen(QColor("#00d9ff"))
+        painter.setFont(QFont("Arial", 19, QFont.Weight.Bold))
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "SL")
+        painter.end()
+        self.tray_icon = QSystemTrayIcon(QIcon(pixmap), self)
+        self.tray_icon.setToolTip("THE SYSTEM")
+        menu = QMenu()
+        show_action = QAction("Open THE SYSTEM", self)
+        show_action.triggered.connect(self._restore_from_tray)
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self._exit_from_tray)
+        menu.addAction(show_action)
+        menu.addSeparator()
+        menu.addAction(exit_action)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _toggle_close_to_tray(self, enabled):
+        self.close_to_tray_enabled = enabled
+        self.settings.setValue("close_to_tray", enabled)
+        self.settings.sync()
+
+    def _restore_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _exit_from_tray(self):
+        self._allow_exit = True
+        self.tray_icon.hide()
+        QApplication.instance().quit()
+
+    def _on_tray_activated(self, reason):
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._restore_from_tray()
+
+    def closeEvent(self, event):
+        if (
+            not self._allow_exit
+            and self.tray_icon is not None
+            and self.close_to_tray_enabled
+        ):
+            self.hide()
+            event.ignore()
+            return
+        event.accept()
+        if not self._allow_exit:
+            # The app disables Qt's last-window auto-quit to support tray mode,
+            # so explicitly quit when the user has opted out of tray behavior.
+            QTimer.singleShot(0, QApplication.instance().quit)
 
     def open_tasks_window(self):
         if self.tasks_window is None:
