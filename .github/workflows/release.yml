@@ -26,6 +26,16 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra build
 
+      # Qt's xcb platform plugin links against these. PyInstaller only bundles
+      # libraries present on the build machine, and without them the AppImage
+      # aborts on systems that lack libxcb-cursor0 and friends.
+      - name: Install Qt xcb libraries to bundle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-util1 \
+            libxcb-xkb1 libxkbcommon-x11-0
+
       - name: Build binary with PyInstaller
         run: |
           uv run python -m PyInstaller --name system-sl --windowed --noconsole --onefile \
@@ -33,6 +43,23 @@ jobs:
             --add-data "src/system_sl/assets:assets" \
             --collect-all en_core_web_md \
             src/system_sl/frontend/gui/main.py
+
+      - name: Check Qt xcb libraries are bundled
+        run: |
+          uv run python - <<'EOF'
+          from PyInstaller.archive.readers import CArchiveReader
+
+          bundled = {name.rsplit("/", 1)[-1] for name in CArchiveReader("dist/system-sl").toc}
+          required = [
+              "libxcb-cursor.so.0", "libxcb-icccm.so.4", "libxcb-image.so.0",
+              "libxcb-keysyms.so.1", "libxcb-render-util.so.0", "libxcb-shape.so.0",
+              "libxcb-util.so.1", "libxcb-xkb.so.1", "libxkbcommon-x11.so.0",
+          ]
+          missing = [lib for lib in required if lib not in bundled]
+          if missing:
+              raise SystemExit(f"Not bundled: {', '.join(missing)}")
+          print("All Qt xcb libraries are bundled.")
+          EOF
 
       - name: Package binary (tar.xz)
         run: tar -cJf system-sl-linux.tar.xz -C dist system-sl
