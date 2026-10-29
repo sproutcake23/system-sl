@@ -377,8 +377,15 @@ class UpdateCheckThread(QThread):
                 return
 
             current = get_current_version()
+            try:
+                release = get_latest_release_info()
+            except requests.RequestException:
+                # Offline, rate-limited or GitHub unavailable: retry on the
+                # next launch without a popup.
+                return
+            # Only a check GitHub answered counts. Saving before the request
+            # meant an offline or rate-limited launch blocked checks for a day.
             _save_last_check_time()
-            release = get_latest_release_info()
             latest_tag = release.get("tag_name", "")
             assets = release.get("assets", [])
 
