@@ -86,7 +86,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: system-sl-appimage
-          path: dist/system-sl-*-x86_64.AppImage
+          path: |
+            dist/system-sl-*-x86_64.AppImage
+            dist/system-sl-*-x86_64.AppImage.zsync
 
   build-windows:
     runs-on: windows-latest
@@ -185,6 +187,7 @@ jobs:
           gh release create "${{ github.ref_name }}"
           system-sl-linux.tar.xz
           system-sl-*.AppImage
+          system-sl-*.AppImage.zsync
           system-sl-windows.zip
           system-sl-setup.exe
           --title "THE SYSTEM ${{ github.ref_name }}"
