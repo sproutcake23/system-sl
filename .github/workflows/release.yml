@@ -187,6 +187,17 @@ jobs:
         with:
           name: system-sl-setup
 
+      # The auto-updater verifies downloads against this file.
+      - name: Write checksums
+        run: >
+          sha256sum
+          system-sl-linux.tar.xz
+          system-sl-*.AppImage
+          system-sl-*.AppImage.zsync
+          system-sl-windows.zip
+          system-sl-setup.exe
+          > SHA256SUMS.txt
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -197,6 +208,7 @@ jobs:
           system-sl-*.AppImage.zsync
           system-sl-windows.zip
           system-sl-setup.exe
+          SHA256SUMS.txt
           --title "THE SYSTEM ${{ github.ref_name }}"
           --generate-notes
           --notes-start-tag v1.1.0
