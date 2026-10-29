@@ -7,14 +7,17 @@ from pathlib import Path
 os.environ["AV_LOG_LEVEL"] = "quiet"
 os.environ["QT_LOGGING_RULES"] = "*=false"
 
-from PySide6.QtCore import QUrl, QEventLoop, QTimer, qInstallMessageHandler
+from PySide6.QtCore import QUrl, QEventLoop, QTimer, QtMsgType, qInstallMessageHandler
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from system_sl.utils.json_client import load_data, save_data
 from system_sl.utils.paths import get_tasks_file_path, get_sounds_dir
 
-# 2. Native Qt Silencer: Catches any remaining C-level logs and drops them
+# 2. Native Qt Silencer: Drops remaining C-level logs, but keeps critical and
+# fatal ones so a crash (e.g. a platform plugin failing to load) shows why.
 def _silent_qt_message_handler(mode, context, message):
-    pass
+    if mode in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+        sys.stderr.write(f"{message}\n")
+        sys.stderr.flush()
 qInstallMessageHandler(_silent_qt_message_handler)
 
 
