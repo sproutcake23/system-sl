@@ -29,7 +29,7 @@ def find_appimagetool(tools_dir: Path) -> Path:
     tool = tools_dir / "appimagetool"
     run_cmd([
         "wget", "-q", "-O", str(tool),
-        "https://github.com/AppImage/AppImageKit/releases/download/continuous/"
+        "https://github.com/AppImage/appimagetool/releases/download/continuous/"
         "appimagetool-x86_64.AppImage",
     ])
     tool.chmod(0o755)
