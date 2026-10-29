@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import shutil
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -134,17 +136,24 @@ def stage_appimage_update(new_appimage: Path, current: Path) -> Path:
     staged = current.with_name(current.name + ".new")
     shutil.copy2(new_appimage, staged)
     os.chmod(staged, 0o755)
-    _save_pending_update(staged)
+    _save_pending_update(staged, new_appimage.name)
     return staged
 
 
+# Release asset names, e.g. system-sl-1.4.3-x86_64.AppImage. An AppImage the
+# user renamed themselves keeps their name across updates.
+_VERSIONED_APPIMAGE_NAME = re.compile(r"system-sl-\d+(\.\d+)*-x86_64\.AppImage")
+
+
 def apply_pending_update() -> None:
-    """Swap in a staged AppImage replacement. Safe to call on every launch.
+    """Swap in a staged AppImage replacement and relaunch into it.
 
     Runs before any UI starts. Renaming over the old image is safe even while
     it is mounted: FUSE keeps the previous inode open for the running process.
+    That process is still the old version, so it then execs the new image;
+    otherwise the update would only take effect on the launch after next.
     """
-    staged = _load_pending_update()
+    staged, new_name = _load_pending_update()
     if staged is None:
         return
 
@@ -153,9 +162,21 @@ def apply_pending_update() -> None:
         if current is None or not staged.is_file():
             return
 
-        os.replace(staged, current)
-        os.chmod(current, 0o755)
-        print(f"[update] Applied staged update to {current}")
+        target = current
+        if (
+            new_name
+            and _VERSIONED_APPIMAGE_NAME.fullmatch(current.name)
+            and _VERSIONED_APPIMAGE_NAME.fullmatch(new_name)
+        ):
+            target = current.with_name(new_name)
+
+        os.replace(staged, target)
+        os.chmod(target, 0o755)
+        if target != current:
+            current.unlink(missing_ok=True)
+            from system_sl.utils.appimage_install import appimage_moved
+            appimage_moved(target)
+        print(f"[update] Applied staged update to {target}")
     except OSError as e:
         # Leave the staged file alone so the next launch can retry.
         print(f"[update] Could not apply staged update: {e}")
@@ -163,18 +184,40 @@ def apply_pending_update() -> None:
     finally:
         _clear_pending_update()
 
-
-def _save_pending_update(staged: Path) -> None:
-    _write_settings({"pending_appimage_update": str(staged)})
+    _relaunch(target)
 
 
-def _load_pending_update() -> Path | None:
-    raw = _read_settings().get("pending_appimage_update")
-    return Path(raw) if raw else None
+def _relaunch(appimage: Path) -> None:
+    """Replace this process with ``appimage``, keeping the arguments."""
+    env = os.environ.copy()
+    # This process runs inside a PyInstaller onefile bundle. Without a reset,
+    # the new bundle's bootloader inherits our state and does not unpack itself.
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    if "LD_LIBRARY_PATH_ORIG" in env:
+        env["LD_LIBRARY_PATH"] = env.pop("LD_LIBRARY_PATH_ORIG")
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.execve(appimage, [str(appimage), *sys.argv[1:]], env)
+    except OSError as e:
+        # The update is on disk either way; it runs from the next launch.
+        print(f"[update] Could not relaunch {appimage}: {e}")
+
+
+def _save_pending_update(staged: Path, new_name: str) -> None:
+    _write_settings({"pending_appimage_update": str(staged), "pending_appimage_name": new_name})
+
+
+def _load_pending_update() -> tuple[Path | None, str | None]:
+    settings = _read_settings()
+    raw = settings.get("pending_appimage_update")
+    return (Path(raw) if raw else None), settings.get("pending_appimage_name")
 
 
 def _clear_pending_update() -> None:
-    _write_settings({"pending_appimage_update": None})
+    _write_settings({"pending_appimage_update": None, "pending_appimage_name": None})
 
 
 def download_asset(url: str, dest_dir: Path) -> Path:
