@@ -13,6 +13,12 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# Lets AppImageUpdate and similar tools find newer releases. appimagetool
+# writes the matching .zsync file next to the AppImage; publish both.
+UPDATE_INFORMATION = (
+    "gh-releases-zsync|sproutcake23|system-sl|latest|system-sl-*-x86_64.AppImage.zsync"
+)
+
 
 def run_cmd(cmd, *, cwd=None, env=None):
     print(f"Running: {' '.join(map(str, cmd))}")
@@ -100,10 +106,12 @@ def main() -> None:
         # appimagetool is itself an AppImage. Extract-and-run works on CI and
         # developer machines even when FUSE 2 is unavailable.
         env.setdefault("APPIMAGE_EXTRACT_AND_RUN", "1")
-        run_cmd([appimagetool, appdir, output], env=env)
+        run_cmd([appimagetool, "-u", UPDATE_INFORMATION, appdir, output], env=env)
 
     if not output.is_file() or not os.access(output, os.X_OK):
         raise SystemExit("appimagetool did not produce an executable AppImage.")
+    if not output.with_name(output.name + ".zsync").is_file():
+        raise SystemExit("appimagetool did not produce the .zsync file.")
     print(f"Created {output} ({output.stat().st_size / 1024 / 1024:.1f} MiB)")
 
 
