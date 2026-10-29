@@ -106,7 +106,13 @@ def main() -> None:
         # appimagetool is itself an AppImage. Extract-and-run works on CI and
         # developer machines even when FUSE 2 is unavailable.
         env.setdefault("APPIMAGE_EXTRACT_AND_RUN", "1")
-        run_cmd([appimagetool, "-u", UPDATE_INFORMATION, appdir, output], env=env)
+        # appimagetool writes the .zsync file into its working directory, so
+        # run it from dist/ to keep the .zsync next to the AppImage.
+        run_cmd(
+            [appimagetool, "-u", UPDATE_INFORMATION, appdir, output],
+            cwd=output.parent,
+            env=env,
+        )
 
     if not output.is_file() or not os.access(output, os.X_OK):
         raise SystemExit("appimagetool did not produce an executable AppImage.")
