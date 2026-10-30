@@ -23,7 +23,7 @@ def main():
             # prompt, so the build is reproducible in CI and locally.
             "--noconfirm",
             "--clean",
-            "--collect-binaries", "spellchecker",
+            "--collect-data", "spellchecker",
             "--add-data", "src/system_sl/assets:assets",
             # The prioritisation engine needs the spaCy model at runtime. CI
             # collects it explicitly and this script must too, otherwise a

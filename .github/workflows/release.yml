@@ -54,7 +54,7 @@ jobs:
       - name: Build binary with PyInstaller
         run: |
           uv run python -m PyInstaller --name system-sl --windowed --noconsole --onefile \
-            --collect-binaries spellchecker \
+            --collect-data spellchecker \
             --add-data "src/system_sl/assets:assets" \
             --collect-all en_core_web_md \
             src/system_sl/frontend/gui/main.py
@@ -148,7 +148,7 @@ jobs:
         shell: pwsh
         run: |
           uv run python -m PyInstaller --name system-sl --windowed --noconsole --onefile `
-            --collect-binaries spellchecker `
+            --collect-data spellchecker `
             --add-data "src/system_sl/assets;assets" `
             --collect-all en_core_web_md `
             src/system_sl/frontend/gui/main.py
