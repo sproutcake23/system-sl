@@ -96,16 +96,10 @@ class GoogleAPIClient:
 
     def _run_sign_in_flow(self) -> Credentials:
         """Runs the browser OAuth consent flow and returns the new credentials."""
-        # A client the user configured themselves wins over the bundled one:
-        # first secure storage, then a credentials.json in the data directory,
-        # and only then the app's own client shipped with release builds.
-        client_data = secure_storage.get_json_secret(
-            secure_storage.SECRET_GOOGLE_CREDENTIALS
-        )
+        # A credentials.json the user set up themselves wins over the app's
+        # own client shipped with release builds.
         bundled_path = _bundled_client_path()
-        if client_data is not None:
-            flow = InstalledAppFlow.from_client_config(client_data, self.scopes)
-        elif os.path.exists(self._creds_path):
+        if os.path.exists(self._creds_path):
             flow = InstalledAppFlow.from_client_secrets_file(
                 self._creds_path, self.scopes
             )

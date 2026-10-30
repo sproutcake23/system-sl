@@ -20,9 +20,8 @@ https://www.googleapis.com/auth/tasks.readonly
 An OAuth client identifies the app to Google. The SYSTEM uses the first one
 it finds:
 
-1. A client stored in the system keyring (`google-oauth-credentials`)
-2. `credentials.json` in the system-sl data directory: your own client
-3. The app's own client, bundled with the release AppImage and Windows
+1. `credentials.json` in the system-sl data directory: your own client
+2. The app's own client, bundled with the release AppImage and Windows
    builds
 
 Release builds therefore need no setup. Running from source or a pip
