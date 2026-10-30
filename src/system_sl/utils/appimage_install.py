@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from system_sl.utils.autostart import CrossPlatformAutostart
+from system_sl.utils.host_env import host_env
 
 APPLICATIONS_DIR = Path.home() / "Applications"
 DESKTOP_FILE = Path.home() / ".local" / "share" / "applications" / "system-sl.desktop"
@@ -65,8 +66,15 @@ def _refresh_kde_menu_cache() -> None:
     # Try kbuildsycoca6 first (KDE Plasma 6), then kbuildsycoca5 (Plasma 5)
     for cmd in ("kbuildsycoca6", "kbuildsycoca5"):
         try:
-            # Run in background, don't wait for it
-            subprocess.Popen([cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Run in background, don't wait for it. kbuildsycoca is a Qt
+            # program, so it must not see our bundled Qt (see host_env).
+            subprocess.Popen(
+                [cmd],
+                env=host_env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
             break
         except FileNotFoundError:
             continue
