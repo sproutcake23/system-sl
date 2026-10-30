@@ -15,17 +15,33 @@ Only one read-only scope is requested:
 https://www.googleapis.com/auth/tasks.readonly
 ```
 
+## Which OAuth client is used
+
+An OAuth client identifies the app to Google. The SYSTEM uses the first one
+it finds:
+
+1. A client stored in the system keyring (`google-oauth-credentials`)
+2. `credentials.json` in the system-sl data directory: your own client
+3. The app's own client, bundled with the release AppImage and Windows
+   builds
+
+Release builds therefore need no setup. Running from source or a pip
+install has no bundled client, so you set up your own (below).
+
 ## Who can sign in
 
 Google only lets an account sign in if it is listed as a **test user** on the
 OAuth client being used, while that client's consent screen is in **Testing**
-mode. Any other account gets Google's "Access blocked" page. With your own
-client (below), that means adding your own Google account in step 4.
+mode. Any other account gets Google's "Access blocked" page.
 
-## Setup
+The app's bundled client is currently in Testing, so it only works for
+accounts the maintainer has added. Anyone else can set up their own client
+below; with your own client, you add your own Google account in step 4.
 
-The app does not ship its own Google OAuth client yet, so you create one in
-your own Google Cloud project. This is free and takes about five minutes.
+## Using your own OAuth client
+
+Create one in your own Google Cloud project. This is free and takes about
+five minutes, and it overrides the bundled client.
 
 1. **Create a project.** Open the [Google Cloud Console](https://console.cloud.google.com/),
    pick the project dropdown at the top, and choose **New project**.

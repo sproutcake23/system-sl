@@ -36,6 +36,21 @@ jobs:
             libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-util1 \
             libxcb-xkb1 libxkbcommon-x11-0
 
+      # The app's Google OAuth client is a repository secret, not a committed
+      # file, so it stays out of git history and can be rotated. Fail rather
+      # than ship a build where Google sync can never sign in.
+      - name: Bundle Google OAuth client
+        env:
+          GOOGLE_OAUTH_CLIENT: ${{ secrets.GOOGLE_OAUTH_CLIENT }}
+        run: |
+          if [ -z "$GOOGLE_OAUTH_CLIENT" ]; then
+            echo "::error::The GOOGLE_OAUTH_CLIENT repository secret is not set."
+            exit 1
+          fi
+          printf '%s' "$GOOGLE_OAUTH_CLIENT" > src/system_sl/assets/google_oauth_client.json
+          python -c "import json, sys; assert 'installed' in json.load(open(sys.argv[1])), 'not a Desktop app OAuth client'" \
+            src/system_sl/assets/google_oauth_client.json
+
       - name: Build binary with PyInstaller
         run: |
           uv run python -m PyInstaller --name system-sl --windowed --noconsole --onefile \
@@ -44,7 +59,7 @@ jobs:
             --collect-all en_core_web_md \
             src/system_sl/frontend/gui/main.py
 
-      - name: Check Qt xcb libraries are bundled
+      - name: Check Qt xcb libraries and OAuth client are bundled
         run: |
           uv run python - <<'EOF'
           from PyInstaller.archive.readers import CArchiveReader
@@ -56,9 +71,11 @@ jobs:
               "libxcb-util.so.1", "libxcb-xkb.so.1", "libxkbcommon-x11.so.0",
           ]
           missing = [lib for lib in required if lib not in bundled]
+          if "google_oauth_client.json" not in bundled:
+              missing.append("google_oauth_client.json")
           if missing:
               raise SystemExit(f"Not bundled: {', '.join(missing)}")
-          print("All Qt xcb libraries are bundled.")
+          print("All Qt xcb libraries and the Google OAuth client are bundled.")
           EOF
 
       - name: Package binary (tar.xz)
@@ -113,6 +130,19 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --extra build
+
+      - name: Bundle Google OAuth client
+        shell: pwsh
+        env:
+          GOOGLE_OAUTH_CLIENT: ${{ secrets.GOOGLE_OAUTH_CLIENT }}
+        run: |
+          if (-not $env:GOOGLE_OAUTH_CLIENT) {
+            Write-Output "::error::The GOOGLE_OAUTH_CLIENT repository secret is not set."
+            exit 1
+          }
+          Set-Content -Path src/system_sl/assets/google_oauth_client.json -Value $env:GOOGLE_OAUTH_CLIENT -NoNewline -Encoding utf8NoBOM
+          python -c "import json, sys; assert 'installed' in json.load(open(sys.argv[1])), 'not a Desktop app OAuth client'" `
+            src/system_sl/assets/google_oauth_client.json
 
       - name: Build binary with PyInstaller
         shell: pwsh

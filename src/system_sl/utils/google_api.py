@@ -2,6 +2,8 @@
 
 import json
 import os.path
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from google.auth.exceptions import RefreshError
@@ -11,6 +13,19 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build, Resource
 
 from system_sl.utils import secure_storage
+
+# Release builds ship the app's own OAuth client under this name in the
+# bundled assets. CI writes it from the GOOGLE_OAUTH_CLIENT repository secret;
+# it is gitignored and never committed.
+BUNDLED_CLIENT_FILE = "google_oauth_client.json"
+
+
+def _bundled_client_path() -> Path:
+    """Returns where the bundled OAuth client lives for this kind of install."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller copies src/system_sl/assets to <bundle>/assets.
+        return Path(sys._MEIPASS) / "assets" / BUNDLED_CLIENT_FILE
+    return Path(__file__).parent.parent / "assets" / BUNDLED_CLIENT_FILE
 
 
 class GoogleSyncError(Exception):
@@ -81,16 +96,22 @@ class GoogleAPIClient:
 
     def _run_sign_in_flow(self) -> Credentials:
         """Runs the browser OAuth consent flow and returns the new credentials."""
-        # Obtain the client config from secure storage, falling back to
-        # a legacy credentials.json file on disk.
+        # A client the user configured themselves wins over the bundled one:
+        # first secure storage, then a credentials.json in the data directory,
+        # and only then the app's own client shipped with release builds.
         client_data = secure_storage.get_json_secret(
             secure_storage.SECRET_GOOGLE_CREDENTIALS
         )
+        bundled_path = _bundled_client_path()
         if client_data is not None:
             flow = InstalledAppFlow.from_client_config(client_data, self.scopes)
         elif os.path.exists(self._creds_path):
             flow = InstalledAppFlow.from_client_secrets_file(
                 self._creds_path, self.scopes
+            )
+        elif bundled_path.exists():
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(bundled_path), self.scopes
             )
         else:
             raise GoogleSyncError(
