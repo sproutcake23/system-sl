@@ -2,7 +2,9 @@
 
 import json
 import os.path
+import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -13,6 +15,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build, Resource
 
 from system_sl.utils import secure_storage
+from system_sl.utils.host_env import host_env
 
 # Release builds ship the app's own OAuth client under this name in the
 # bundled assets. CI writes it from the GOOGLE_OAUTH_CLIENT repository secret;
@@ -26,6 +29,36 @@ def _bundled_client_path() -> Path:
         # PyInstaller copies src/system_sl/assets to <bundle>/assets.
         return Path(sys._MEIPASS) / "assets" / BUNDLED_CLIENT_FILE
     return Path(__file__).parent.parent / "assets" / BUNDLED_CLIENT_FILE
+
+
+class _HostBrowser(webbrowser.BaseBrowser):
+    """Opens URLs with xdg-open, outside the PyInstaller bundle's environment.
+
+    ``webbrowser`` launches the browser with our own environment, so in the
+    frozen Linux build it loads the bundled Qt libraries and dies before a
+    window appears. ``host_env()`` gives it the user's environment back.
+    """
+
+    def open(self, url: str, new: int = 0, autoraise: bool = True) -> bool:
+        try:
+            subprocess.Popen(
+                ["xdg-open", url],
+                env=host_env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            return False
+        return True
+
+
+def _sign_in_browser() -> Optional[str]:
+    """Name of the ``webbrowser`` entry to open the sign-in page with."""
+    if not (getattr(sys, "frozen", False) and sys.platform.startswith("linux")):
+        return None  # the default browser lookup works fine
+    webbrowser.register("system-sl-host", None, _HostBrowser("xdg-open"))
+    return "system-sl-host"
 
 
 class GoogleSyncError(Exception):
@@ -120,7 +153,12 @@ class GoogleAPIClient:
         try:
             # Opens the browser and waits for the localhost redirect. The
             # sign-in URL is also printed to stdout in case no browser opens.
-            return flow.run_local_server(port=0, timeout_seconds=120, open_browser=True)
+            return flow.run_local_server(
+                port=0,
+                timeout_seconds=120,
+                open_browser=True,
+                browser=_sign_in_browser(),
+            )
         except Exception as e:
             raise GoogleSyncError(
                 "Google sign-in did not complete.\n\n"
