@@ -40,8 +40,8 @@ All local data lives in a platform-native directory:
 | Linux/macOS | `~/.config/system-sl/`        |
 | Windows   | `%APPDATA%\system-sl\`        |
 
-This directory holds your tasks (`tasks.json`), persona (`persona.json`), completed tasks, notifications sounds (`sounds/`), and Google credentials (`credentials.json`, `token.json`).
+This directory holds your tasks (`tasks.json`), persona (`persona.json`), completed tasks, notifications sounds (`sounds/`), and your Google OAuth client (`credentials.json`).
 
 ## Google integration
 
-For Google Calendar and Tasks sync, see [Google Calendar Sync](Google-Calendar-Sync).
+For Google Tasks sync, see [Google Tasks Sync](Google-Tasks-Sync).

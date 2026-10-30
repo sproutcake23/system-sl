@@ -23,7 +23,7 @@ def install_desktop_entry() -> int:
     print(f"✅ Installed to: {installed}")
     print(f"   Menu entry: {DESKTOP_FILE}")
     return 0
-from PySide6.QtCore import QSize, QTimer, QSettings, QFileSystemWatcher, Qt, Slot, QObject
+from PySide6.QtCore import QSize, QTimer, QSettings, QFileSystemWatcher, Qt, Slot, QObject, QThread, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -50,8 +50,9 @@ from system_sl.utils import (
     SystemNotification,
     get_tasks_file_path,
     get_wallpaper_path,
+    GoogleSyncError,
 )
-from system_sl.core import GoogleSyncEngine, CalendarProvider, TasksProvider
+from system_sl.core import GoogleSyncEngine, TasksProvider
 from system_sl.core.onboarding import PersonaStorageHandler
 from system_sl.services import BackgroundServiceController
 from system_sl.utils.audio_manager import (
@@ -70,6 +71,22 @@ from system_sl.utils.auto_updater import (
 )
 
 
+class _GoogleSyncWorker(QObject):
+    """Runs the Google Tasks sync off the UI thread, since sign-in can wait on the browser."""
+    finished = Signal(int, int)
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            engine = GoogleSyncEngine()
+            imported, skipped = engine.execute_sync(TasksProvider(engine.client))
+            self.finished.emit(imported, skipped)
+        except GoogleSyncError as e:
+            self.failed.emit(str(e))
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -86,6 +103,8 @@ class MainWindow(QMainWindow):
         self.tasks_window = None
         self.onboarding_window = None
         self.update_thread = None
+        self._sync_thread = None
+        self._sync_worker = None
         self._allow_exit = False
         self.close_to_tray_enabled = self.settings.value(
             "close_to_tray", False, type=bool
@@ -104,8 +123,8 @@ class MainWindow(QMainWindow):
         task_button = QPushButton("Tasks")
         task_button.clicked.connect(self.open_tasks_window)
 
-        google_button = QPushButton("Google")
-        google_button.clicked.connect(self.sync_calendar)
+        self.google_button = QPushButton("Google")
+        self.google_button.clicked.connect(self.sync_google_tasks)
 
         sound_button = QPushButton("Set Notification Sound")
         sound_button.clicked.connect(self.change_notification_sound)
@@ -128,7 +147,7 @@ class MainWindow(QMainWindow):
         self.theme_toggle.clicked.connect(self.on_theme_toggle_changed)
 
         left_layout.addWidget(task_button)
-        left_layout.addWidget(google_button)
+        left_layout.addWidget(self.google_button)
         left_layout.addWidget(sound_button)
         left_layout.addWidget(install_desktop_btn)
 
@@ -291,16 +310,42 @@ class MainWindow(QMainWindow):
             message_box.setText("Disabled AutoStart")
         message_box.exec()
 
-    def sync_calendar(self):
-        message_box = QMessageBox(self)
-        try:
-            engine = GoogleSyncEngine()
-            engine.execute_sync(CalendarProvider(engine.client))
-            engine.execute_sync(TasksProvider(engine.client))
-        except Exception as e:
-            message_box.setWindowTitle("Error")
-            message_box.setText(str(e))
-            message_box.exec()
+    def sync_google_tasks(self):
+        if self._sync_thread is not None:
+            return
+        self.google_button.setEnabled(False)
+        self.google_button.setText("Syncing...")
+
+        self._sync_thread = QThread(self)
+        self._sync_worker = _GoogleSyncWorker()
+        self._sync_worker.moveToThread(self._sync_thread)
+        self._sync_thread.started.connect(self._sync_worker.run)
+        self._sync_worker.finished.connect(self._on_google_sync_finished)
+        self._sync_worker.failed.connect(self._on_google_sync_failed)
+        self._sync_worker.finished.connect(self._sync_thread.quit)
+        self._sync_worker.failed.connect(self._sync_thread.quit)
+        self._sync_thread.finished.connect(self._cleanup_google_sync)
+        self._sync_thread.start()
+
+    def _on_google_sync_finished(self, imported: int, skipped: int):
+        if imported == 0 and skipped == 0:
+            text = "No upcoming Google Tasks found."
+        else:
+            text = f"Imported {imported} task(s) from Google Tasks."
+            if skipped:
+                text += f"\n{skipped} already in your quest list were skipped."
+        QMessageBox.information(self, "Google Sync", text)
+
+    def _on_google_sync_failed(self, error: str):
+        QMessageBox.warning(self, "Google Sync Failed", error)
+
+    def _cleanup_google_sync(self):
+        self.google_button.setEnabled(True)
+        self.google_button.setText("Google")
+        self._sync_worker.deleteLater()
+        self._sync_thread.deleteLater()
+        self._sync_worker = None
+        self._sync_thread = None
 
     def change_notification_sound(self):
         file_path, _ = QFileDialog.getOpenFileName(

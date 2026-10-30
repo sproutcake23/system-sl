@@ -1,4 +1,4 @@
-from system_sl.core.sync_service import GoogleSyncEngine, CalendarProvider, TasksProvider
+from system_sl.core.sync_service import GoogleSyncEngine, TasksProvider
 from system_sl.core.tasks import (
     load_tasks,
     add_tasks,
@@ -14,7 +14,6 @@ from system_sl.core.user_info import user_goal_check, user_edit_goal
 
 __all__ = [
     "GoogleSyncEngine",
-    "CalendarProvider",
     "TasksProvider",
     "add_tasks",
     "load_tasks",

@@ -20,7 +20,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 
 - [Installation](Installation)
 - [Features](Features)
-- [Google Calendar Sync](Google-Calendar-Sync)
+- [Google Tasks Sync](Google-Tasks-Sync)
 - [CLI Usage](CLI-Usage)
 - [Background Service](Background-Service)
 - [Building and Releasing](Building-and-Releasing)

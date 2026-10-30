@@ -43,9 +43,9 @@ Talk to the SYSTEM — an AI mentor powered by Gemini (via LangChain) with task-
 - Help you prioritize
 - Give motivation in either System or Friend mode
 
-## Google Calendar Sync
+## Google Tasks Sync
 
-Import upcoming events from Google Calendar and tasks from Google Tasks. See [Google Calendar Sync](Google-Calendar-Sync).
+Import upcoming tasks from Google Tasks. See [Google Tasks Sync](Google-Tasks-Sync).
 
 ## Native Notifications
 
