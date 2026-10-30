@@ -142,7 +142,13 @@ def stage_appimage_update(new_appimage: Path, current: Path) -> Path:
 
 # Release asset names, e.g. system-sl-1.4.3-x86_64.AppImage. An AppImage the
 # user renamed themselves keeps their name across updates.
-_VERSIONED_APPIMAGE_NAME = re.compile(r"system-sl-\d+(\.\d+)*-x86_64\.AppImage")
+_VERSIONED_APPIMAGE_NAME = re.compile(r"system-sl-(\d+(?:\.\d+)*)-x86_64\.AppImage")
+
+
+def appimage_version(name: str) -> tuple | None:
+    """Return the version in a release AppImage name, or None if renamed."""
+    match = _VERSIONED_APPIMAGE_NAME.fullmatch(name)
+    return parse_version(match.group(1)) if match else None
 
 
 def apply_pending_update() -> None:
@@ -157,32 +163,37 @@ def apply_pending_update() -> None:
     if staged is None:
         return
 
+    current = running_appimage()
+    if current is None or not staged.is_file():
+        _clear_pending_update()
+        return
+
+    target = current
+    if (
+        new_name
+        and _VERSIONED_APPIMAGE_NAME.fullmatch(current.name)
+        and _VERSIONED_APPIMAGE_NAME.fullmatch(new_name)
+    ):
+        target = current.with_name(new_name)
+
     try:
-        current = running_appimage()
-        if current is None or not staged.is_file():
-            return
-
-        target = current
-        if (
-            new_name
-            and _VERSIONED_APPIMAGE_NAME.fullmatch(current.name)
-            and _VERSIONED_APPIMAGE_NAME.fullmatch(new_name)
-        ):
-            target = current.with_name(new_name)
-
         os.replace(staged, target)
+    except OSError as e:
+        # Keep the pending record and the staged file so the next launch can
+        # retry. Clearing the record here used to strand the .new file.
+        print(f"[update] Could not apply staged update: {e}")
+        return
+    _clear_pending_update()
+
+    try:
         os.chmod(target, 0o755)
         if target != current:
             current.unlink(missing_ok=True)
             from system_sl.utils.appimage_install import appimage_moved
             appimage_moved(target)
-        print(f"[update] Applied staged update to {target}")
     except OSError as e:
-        # Leave the staged file alone so the next launch can retry.
-        print(f"[update] Could not apply staged update: {e}")
-        return
-    finally:
-        _clear_pending_update()
+        print(f"[update] Applied update but could not tidy up: {e}")
+    print(f"[update] Applied staged update to {target}")
 
     _relaunch(target)
 
@@ -258,33 +269,65 @@ def extract_binary(archive_path: Path, dest_dir: Path) -> Path:
     raise FileNotFoundError(f"Binary '{binary_name}' not found inside {archive_path.name}")
 
 
+def binary_install_path() -> Path:
+    """Where a bare-binary update is written.
+
+    A frozen build replaces the copy that is running, so shortcuts and the
+    autostart entry stay valid. Updates used to go to a fixed folder, and on
+    Windows that was %APPDATA% while the installer uses %LOCALAPPDATA%: every
+    update left a second copy of the app behind.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+    if os.name == "nt":
+        return Path(os.environ["LOCALAPPDATA"]) / "system-sl" / "system-sl.exe"
+    return Path.home() / ".local" / "bin" / "system-sl"
+
+
+def write_windows_shortcut(shortcut_file: Path, target: Path) -> None:
+    """Create or overwrite a .lnk shortcut that launches ``target``."""
+    import subprocess
+    ps_script = f"""
+    $WshShell = New-Object -ComObject WScript.Shell
+    $Shortcut = $WshShell.CreateShortcut("{shortcut_file}")
+    $Shortcut.TargetPath = "{target}"
+    $Shortcut.WorkingDirectory = "{target.parent}"
+    $Shortcut.Save()
+    """
+    subprocess.run(
+        ["powershell.exe", "-Command", ps_script], capture_output=True, shell=True
+    )
+
+
 def install_update(new_binary: Path) -> None:
-    """Copy the new binary and update the desktop shortcut."""
-    binary_name = "system-sl" if os.name != "nt" else "system-sl.exe"
+    """Replace the installed binary and update the desktop shortcut."""
+    target_path = binary_install_path()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Copy beside the target, then rename over it. Writing into a running
+    # executable fails on Linux ("Text file busy") and on Windows.
+    staged = target_path.with_name(target_path.name + ".new")
+    shutil.copy2(new_binary, staged)
     if os.name != "nt":
-        install_dir = Path.home() / ".local" / "bin"
-        shortcut_dir = Path.home() / ".local" / "share" / "applications"
+        os.chmod(staged, 0o755)
     else:
-        install_dir = Path(os.environ["APPDATA"]) / "system-sl"
-        shortcut_dir = Path(os.environ["USERPROFILE"]) / "Desktop"
-
-    install_dir.mkdir(parents=True, exist_ok=True)
-    target_path = install_dir / binary_name
-
-    shutil.copy2(new_binary, target_path)
-    if os.name != "nt":
-        os.chmod(target_path, 0o755)
+        # Windows will not replace a running executable but will rename it.
+        # The .old file is deleted on the next launch.
+        old = target_path.with_name(target_path.name + ".old")
+        old.unlink(missing_ok=True)
+        if target_path.exists():
+            os.replace(target_path, old)
+    os.replace(staged, target_path)
 
     if os.name != "nt":
-        shortcut_file = shortcut_dir / "system-sl.desktop"
-        work_dir = target_path.parent
+        shortcut_file = Path.home() / ".local" / "share" / "applications" / "system-sl.desktop"
+        shortcut_file.parent.mkdir(parents=True, exist_ok=True)
         content = [
             "[Desktop Entry]",
             "Type=Application",
             "Name=THE SYSTEM",
             f"Exec={target_path}",
-            f"Path={work_dir}",
+            f"Path={target_path.parent}",
             "Terminal=false",
             "Icon=utilities-terminal",
             "Categories=Utility;",
@@ -294,18 +337,8 @@ def install_update(new_binary: Path) -> None:
             f.write("\n".join(content))
         os.chmod(shortcut_file, 0o755)
     else:
-        shortcut_file = shortcut_dir / "THE SYSTEM.lnk"
-        import subprocess
-        ps_script = f"""
-        $WshShell = New-Object -ComObject WScript.Shell
-        $Shortcut = $WshShell.CreateShortcut("{shortcut_file}")
-        $Shortcut.TargetPath = "{target_path}"
-        $Shortcut.WorkingDirectory = "{install_dir}"
-        $Shortcut.Save()
-        """
-        subprocess.run(
-            ["powershell.exe", "-Command", ps_script], capture_output=True, shell=True
-        )
+        desktop = Path(os.environ["USERPROFILE"]) / "Desktop"
+        write_windows_shortcut(desktop / "THE SYSTEM.lnk", target_path)
 
 
 def _settings_path() -> Path:

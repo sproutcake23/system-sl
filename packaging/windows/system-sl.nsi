@@ -100,6 +100,8 @@ SectionEnd
 Section "Uninstall"
     ; Remove files
     Delete "$INSTDIR\system-sl.exe"
+    Delete "$INSTDIR\system-sl.exe.old"
+    Delete "$INSTDIR\system-sl.exe.new"
     Delete "$INSTDIR\uninstall.exe"
 
     ; Remove sounds directory
@@ -113,6 +115,9 @@ Section "Uninstall"
     Delete "$SMPROGRAMS\THE SYSTEM\Uninstall.lnk"
     RMDir "$SMPROGRAMS\THE SYSTEM"
     Delete "$DESKTOP\THE SYSTEM.lnk"
+
+    ; Remove the autostart entry, or Windows keeps launching a deleted exe
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SL-Notifier"
 
     ; Remove registry
     DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\system-sl"

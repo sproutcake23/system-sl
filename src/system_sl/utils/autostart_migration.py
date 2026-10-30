@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 from system_sl.utils.autostart import CrossPlatformAutostart # Assuming you saved the new code here
+from system_sl.utils.install_cleanup import cleanup_previous_installs
 
 def run_legacy_cleanup():
     """
@@ -51,6 +52,10 @@ def initialize_application_autostart():
     """
     # Step 1: Wipe the old systemd footprints cleanly
     run_legacy_cleanup()
+
+    # Step 1b: Remove old copies and update leftovers, and repoint autostart
+    # and menu entries that still launch them
+    cleanup_previous_installs()
 
     # Step 2: Initialize the new architecture
     autostart = CrossPlatformAutostart("SL-Notifier")
