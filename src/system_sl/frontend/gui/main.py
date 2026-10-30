@@ -494,11 +494,13 @@ class MainWindow(QMainWindow):
         QApplication.instance().setStyleSheet(get_stylesheet()) # Reset to fallback Theme
 
     def check_wallpaper_update(self):
-        # Prefer Aether's already-computed palette: when you change the wallpaper,
-        # Aether writes the new colors to ~/.local/state/omarchy/current/theme/colors.toml.
-        # SL reads that file directly instead of re-extracting colors from the image.
-        aether_applied = self.check_aether_theme_update()
-        if aether_applied:
+        # Aether writes the live palette to colors.toml when you change the wallpaper.
+        # If Aether is active, its QFileSystemWatcher handles updates instantly — do NOT
+        # fall through to the wallpaper-polling fallback here, otherwise it would overwrite
+        # the Aether-applied colors with locally-extracted ColorThief colors every 5s
+        # (causing the "rolls back to defaults" behavior).
+        if find_aether_colors_toml():
+            self.check_aether_theme_update()  # apply once if watcher missed an event
             return
 
         # Fallback: poll the wallpaper path and extract colors locally (for systems
