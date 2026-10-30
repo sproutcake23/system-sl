@@ -188,6 +188,21 @@ class MainWindow(QMainWindow):
         self.close_to_tray_toggle.toggled.connect(self._toggle_close_to_tray)
         left_layout.addWidget(self.close_to_tray_toggle)
 
+        # Google sign-in only works for accounts allowed on the OAuth client,
+        # so the sync button stays hidden until the player opts in.
+        google_sync_enabled = self.settings.value(
+            "google_sync_enabled", False, type=bool
+        )
+        self.google_sync_toggle = QCheckBox("Google Tasks Sync")
+        self.google_sync_toggle.setChecked(google_sync_enabled)
+        self.google_sync_toggle.setToolTip(
+            "Show the Google button to import Google Tasks as quests."
+        )
+        self.google_sync_toggle.toggled.connect(self._toggle_google_sync)
+        left_layout.addWidget(self.google_sync_toggle)
+        # Set after addWidget: re-parenting resets visibility to hidden.
+        self.google_button.setVisible(google_sync_enabled)
+
         self.auto_update_check = QCheckBox("Auto Update")
         self.auto_update_check.setChecked(load_auto_update_preference())
         self.auto_update_check.clicked.connect(self._toggle_auto_update)
@@ -239,6 +254,10 @@ class MainWindow(QMainWindow):
         self.close_to_tray_enabled = enabled
         self.settings.setValue("close_to_tray", enabled)
         self.settings.sync()
+
+    def _toggle_google_sync(self, enabled):
+        self.settings.setValue("google_sync_enabled", enabled)
+        self.google_button.setVisible(enabled)
 
     def _restore_from_tray(self):
         self.showNormal()

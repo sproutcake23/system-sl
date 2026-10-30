@@ -41,7 +41,8 @@ your own Google Cloud project. This is free and takes about five minutes.
 
 ## First sync
 
-Click **Google** in the main window. Your browser opens a Google sign-in page:
+Google sync is off by default. Tick **Google Tasks Sync** in the main window
+to show the **Google** button, then click it. Your browser opens a Google sign-in page:
 
 1. Choose the account you added as a test user.
 2. Google warns that it **hasn't verified this app**. That is expected for
