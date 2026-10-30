@@ -196,7 +196,9 @@ class MainWindow(QMainWindow):
         self.google_sync_toggle = QCheckBox("Google Tasks Sync")
         self.google_sync_toggle.setChecked(google_sync_enabled)
         self.google_sync_toggle.setToolTip(
-            "Show the Google button to import Google Tasks as quests."
+            "Show the Google button to import Google Tasks as quests.\n"
+            "Sign-in currently works only for Google accounts added as "
+            "test users on the app's Google OAuth client."
         )
         self.google_sync_toggle.toggled.connect(self._toggle_google_sync)
         left_layout.addWidget(self.google_sync_toggle)
