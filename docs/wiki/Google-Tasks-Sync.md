@@ -75,9 +75,9 @@ five minutes, and it overrides the bundled client.
 Google sync is off by default. Tick **Google Tasks Sync** in the main window
 to show the **Google** button, then click it. Your browser opens a Google sign-in page:
 
-1. Choose the account you added as a test user.
-2. Google warns that it **hasn't verified this app**. That is expected for
-   your own project: click **Continue**.
+1. Choose a Google account that is a test user on the client in use.
+2. Google warns that it **hasn't verified this app**. That is expected while
+   the client is unverified: click **Continue**.
 3. Allow read access to your tasks. The browser then says the authentication
    flow has completed, and the app shows how many tasks were imported.
 
@@ -90,10 +90,11 @@ file if no keyring is available. It is never written to disk in plaintext.
 
 ## Weekly re-sign-in in Testing mode
 
-While your consent screen's publishing status is **Testing**, Google expires
-the token after 7 days. The app notices and opens the sign-in page again. To
-avoid this, go to **Google Auth Platform → Audience** and click
-**Publish app**. You'll still see the unverified-app warning at sign-in, but
+While the client's consent screen is in **Testing**, Google expires the
+token after 7 days. The app notices and opens the sign-in page again. This
+applies to the bundled client too until the maintainer publishes it. If you
+use your own client, you can avoid it: go to **Google Auth Platform →
+Audience** and click **Publish app**. You'll still see the unverified-app warning at sign-in, but
 the token no longer expires weekly. Google review is only needed if you share
 the client with more than 100 people.
 
