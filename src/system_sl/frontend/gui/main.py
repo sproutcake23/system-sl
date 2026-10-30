@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 import subprocess
+from typing import Dict, Optional
 
 from dotenv import load_dotenv, set_key
 
@@ -52,6 +53,10 @@ from system_sl.utils import (
     get_wallpaper_path,
     GoogleSyncError,
 )
+from system_sl.utils.aether_theme import (
+    generate_aether_tokens,
+    find_aether_colors_toml,
+)
 from system_sl.core import GoogleSyncEngine, TasksProvider
 from system_sl.core.onboarding import PersonaStorageHandler
 from system_sl.services import BackgroundServiceController
@@ -101,6 +106,16 @@ class MainWindow(QMainWindow):
         self.last_wallpaper_path = None
         self.wallpaper_timer = QTimer(self)
         self.wallpaper_timer.timeout.connect(self.check_wallpaper_update)
+
+        # --- NEW: Aether theme file watcher ---
+        # Aether writes the live palette to ~/.local/state/omarchy/current/theme/colors.toml.
+        # We watch that file so SL recolors instantly when Aether applies a new theme.
+        self.aether_theme_watcher = QFileSystemWatcher()
+        self.aether_theme_watcher.fileChanged.connect(
+            self.check_aether_theme_update
+        )
+        self.last_aether_tokens: Optional[Dict[str, str]] = None
+        self._aether_theme_path: Optional[str] = None
 
         self.autostart = CrossPlatformAutostart()
         self.notifier_view = None
@@ -465,22 +480,73 @@ class MainWindow(QMainWindow):
         self.wallpaper_timer.start(5000) # Poll every 5 seconds
         self.check_wallpaper_update() # Instantly check when toggled on
 
+        # Start watching Aether's live theme file for instant updates.
+        self._refresh_aether_watch()
+
     def stop_dynamic_theming(self):
         self.wallpaper_timer.stop()
         self.last_wallpaper_path = None
+        self.aether_theme_watcher.removePaths(
+            self.aether_theme_watcher.files()
+        )
+        self._aether_theme_path = None
+        self.last_aether_tokens = None
         QApplication.instance().setStyleSheet(get_stylesheet()) # Reset to fallback Theme
 
     def check_wallpaper_update(self):
+        # Prefer Aether's already-computed palette: when you change the wallpaper,
+        # Aether writes the new colors to ~/.local/state/omarchy/current/theme/colors.toml.
+        # SL reads that file directly instead of re-extracting colors from the image.
+        aether_applied = self.check_aether_theme_update()
+        if aether_applied:
+            return
+
+        # Fallback: poll the wallpaper path and extract colors locally (for systems
+        # where Aether is not running or does not write a colors.toml).
         current_path = get_wallpaper_path()
         if current_path and current_path != self.last_wallpaper_path and "Error" not in current_path:
             self.last_wallpaper_path = current_path
-            
+
             # Safely expand paths like ~/Pictures/wallpaper.jpg
             expanded_path = os.path.expanduser(current_path)
-            
+
             # Generate new semantic tokens and inject them into the stylesheet
             new_tokens = generate_dynamic_tokens(expanded_path)
             QApplication.instance().setStyleSheet(get_stylesheet(new_tokens))
+
+    def check_aether_theme_update(self) -> bool:
+        """Read Aether's live colors.toml and apply it to SL if it changed.
+
+        Returns ``True`` if a new theme was applied, ``False`` otherwise.
+        """
+        theme_path = find_aether_colors_toml()
+        if not theme_path:
+            return False
+
+        # Re-watch the file if Aether moved it to a new location.
+        if theme_path != self._aether_theme_path:
+            self.aether_theme_watcher.removePaths(
+                self.aether_theme_watcher.files()
+            )
+            if theme_path:
+                self.aether_theme_watcher.addPath(theme_path)
+            self._aether_theme_path = theme_path
+
+        new_tokens = generate_aether_tokens(theme_path)
+        if new_tokens == self.last_aether_tokens:
+            return False
+
+        self.last_aether_tokens = new_tokens
+        QApplication.instance().setStyleSheet(get_stylesheet(new_tokens))
+        return True
+
+    def _refresh_aether_watch(self):
+        """(Re)start watching Aether's live theme file if it exists."""
+        theme_path = find_aether_colors_toml()
+        if theme_path:
+            self.aether_theme_watcher.addPath(theme_path)
+            self._aether_theme_path = theme_path
+
 
     def _toggle_auto_update(self):
         enabled = self.auto_update_check.isChecked()

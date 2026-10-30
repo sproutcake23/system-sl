@@ -4,6 +4,12 @@ from system_sl.utils.autostart import CrossPlatformAutostart
 from system_sl.utils.json_client import load_data, save_data
 from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.wallpaper_path import get_wallpaper_path
+from system_sl.utils.aether_theme import (
+    generate_aether_tokens,
+    find_aether_colors_toml,
+    load_aether_palette,
+    DEFAULT_TOKENS as AETHER_DEFAULT_TOKENS,
+)
 from system_sl.utils import secure_storage
 
 
@@ -16,5 +22,9 @@ __all__ = [
     "save_data",
     "get_tasks_file_path",
     "get_wallpaper_path",
+    "generate_aether_tokens",
+    "find_aether_colors_toml",
+    "load_aether_palette",
+    "AETHER_DEFAULT_TOKENS",
     "secure_storage",
 ]
