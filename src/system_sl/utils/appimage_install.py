@@ -5,10 +5,12 @@ and an icon, and keep both pointing at the file when it moves or is renamed.
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 from system_sl.utils.autostart import CrossPlatformAutostart
+from system_sl.utils.host_env import host_env
 
 APPLICATIONS_DIR = Path.home() / "Applications"
 DESKTOP_FILE = Path.home() / ".local" / "share" / "applications" / "system-sl.desktop"
@@ -47,6 +49,37 @@ def _install_icon() -> bool:
     return True
 
 
+def _refresh_kde_menu_cache() -> None:
+    """Refresh KDE's application menu cache if running on KDE Plasma."""
+    # Detect KDE Plasma
+    xdg_current_desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    kde_session_version = os.environ.get("KDE_SESSION_VERSION", "")
+
+    is_kde = (
+        "kde" in xdg_current_desktop
+        or kde_session_version in ("5", "6")
+    )
+
+    if not is_kde:
+        return
+
+    # Try kbuildsycoca6 first (KDE Plasma 6), then kbuildsycoca5 (Plasma 5)
+    for cmd in ("kbuildsycoca6", "kbuildsycoca5"):
+        try:
+            # Run in background, don't wait for it. kbuildsycoca is a Qt
+            # program, so it must not see our bundled Qt (see host_env).
+            subprocess.Popen(
+                [cmd],
+                env=host_env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            break
+        except FileNotFoundError:
+            continue
+
+
 def write_desktop_entry(appimage: Path) -> None:
     """Write the menu entry that launches ``appimage``."""
     icon = "system-sl" if ICON_FILE.is_file() else "utilities-terminal"
@@ -62,6 +95,7 @@ def write_desktop_entry(appimage: Path) -> None:
         "Comment=Arise, Player.\n"
         "StartupNotify=true\n"
     )
+    _refresh_kde_menu_cache()
 
 
 def appimage_moved(new_path: Path, *, create_entry: bool = False) -> None:
