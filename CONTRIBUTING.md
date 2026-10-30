@@ -10,20 +10,17 @@ This project follows a standard Python package layout. Please keep this structur
 
 ```text
 System-SL
-├── .gitignore
-├── LICENSE
 ├── pyproject.toml        # Project metadata and dependencies
 ├── README.md             # User-facing documentation
 ├── CONTRIBUTING.md       # Developer documentation
+├── docs/wiki/            # Wiki pages (copied to the GitHub wiki by hand)
+├── packaging/            # AppImage and Windows installer packaging
 │
-├── assets/               # Images, logos, and demo GIFs
-├── data/                 # Local storage for user tasks (JSON)
-│
-├── src/                  # Source code
-│   │
-│   ├── core/             # Core logic (Task management, data handling)
-│   │
-│   └── cli/              # User-facing terminal interface (Menus, input handling)
-│
-└── tests/                # Unit tests
+└── src/system_sl/        # The package; imports are system_sl.*
+    ├── core/             # Tasks, onboarding, priority engine, vector fusion, Google sync
+    ├── chatbot/          # LLM providers, config and chat tools
+    ├── frontend/gui/     # PySide6 desktop app (entry point: main.py)
+    ├── services/         # Background notification controller
+    ├── utils/            # Paths, autostart, audio, notifications, auto-updater, build
+    └── assets/           # Sounds, GIFs, icons, .desktop files
 ```

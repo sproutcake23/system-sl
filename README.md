@@ -2,7 +2,7 @@
 
 > _"Arise, Player."_
 
-SL is a personal progression system inspired by Solo Leveling. You define your daily quests, and the SYSTEM keeps you on track — on your desktop or from the terminal.
+SL is a personal progression system inspired by Solo Leveling. You define your daily quests, and the SYSTEM keeps you on track from your desktop.
 
 ## Preview
 
