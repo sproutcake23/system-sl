@@ -1,7 +1,10 @@
 import os
 import platform
+import plistlib
+import shlex
 import sys
 import subprocess
+from pathlib import Path
 
 class CrossPlatformAutostart:
     def __init__(self, app_name="SL-Notifier"):
@@ -51,6 +54,42 @@ class CrossPlatformAutostart:
             return os.path.exists(plist_path)
             
         return False
+
+    def recorded_command(self) -> str | None:
+        """Return the command the existing autostart entry launches, if any."""
+        try:
+            if self.os_type == "Windows":
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+                value, _ = winreg.QueryValueEx(key, self.app_name)
+                return value
+
+            elif self.os_type == "Linux":
+                desktop_path = os.path.expanduser(f"~/.config/autostart/{self.app_name.lower()}.desktop")
+                with open(desktop_path) as f:
+                    for line in f:
+                        if line.startswith("Exec="):
+                            return line[len("Exec="):].strip()
+
+            elif self.os_type == "Darwin":  # macOS
+                plist_path = os.path.expanduser(f"~/Library/LaunchAgents/com.{self.app_name.lower()}.plist")
+                with open(plist_path, "rb") as f:
+                    return " ".join(plistlib.load(f).get("ProgramArguments", []))
+        except (OSError, plistlib.InvalidFileException):
+            pass
+        return None
+
+    def recorded_executable(self) -> Path | None:
+        """Return the program the existing autostart entry launches, if any."""
+        command = self.recorded_command()
+        if not command:
+            return None
+        # Windows paths use backslashes, which POSIX splitting would eat.
+        try:
+            parts = shlex.split(command, posix=self.os_type != "Windows")
+        except ValueError:
+            return None
+        return Path(parts[0].strip('"')) if parts else None
 
     def enable(self) -> bool:
         exec_cmd = self._get_exec_cmd()
