@@ -15,6 +15,13 @@ Only one read-only scope is requested:
 https://www.googleapis.com/auth/tasks.readonly
 ```
 
+## Who can sign in
+
+Google only lets an account sign in if it is listed as a **test user** on the
+OAuth client being used, while that client's consent screen is in **Testing**
+mode. Any other account gets Google's "Access blocked" page. With your own
+client (below), that means adding your own Google account in step 4.
+
 ## Setup
 
 The app does not ship its own Google OAuth client yet, so you create one in
@@ -38,6 +45,14 @@ your own Google Cloud project. This is free and takes about five minutes.
    directory:
    - Linux/macOS: `~/.config/system-sl/credentials.json`
    - Windows: `%APPDATA%\system-sl\credentials.json`
+
+   Google names the download `client_secret_<id>.apps.googleusercontent.com.json`.
+   Some file managers hide the `.json` extension while renaming, which leaves
+   you with `credentials.json.json`; check the full name if sync says the
+   credentials were not found.
+
+   This file identifies your OAuth client, not your Google account, but keep
+   it private anyway: never commit it or paste its contents anywhere.
 
 ## First sync
 
