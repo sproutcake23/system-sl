@@ -22,7 +22,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 
 - **Persona Builder** — A 10-step onboarding process that builds your Player Profile from your real-world ambitions.
 - **Task Management** — Add, complete, and reorder quests with deadlines and categories.
-- **Google Tasks Sync** — Import your Google Tasks as quests.
+- **Google Tasks Sync** — Import your Google Tasks as quests. Opt-in from the main window.
 - **Native Notifications** — Desktop alerts styled like the System, with custom notification sounds.
 - **AI Chatbot** — Talk to the System, an AI mentor powered by Gemini with task-aware tools, plus a friendly companion persona.
 - **Priority Engine** — Context-aware scoring (PRESSURE / GROWTH / RECOVERY) of what to work on next.
@@ -95,6 +95,8 @@ Build a standalone executable:
 ```bash
 uv run build-sl
 ```
+
+Source installs don't include the app's Google OAuth client. To use Google Tasks Sync from source, set up your own; see [Google Tasks Sync](https://github.com/sproutcake23/System-SL/wiki/Google-Tasks-Sync#using-your-own-oauth-client).
 
 ## Documentation
 
