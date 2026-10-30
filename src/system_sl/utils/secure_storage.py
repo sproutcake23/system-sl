@@ -1,6 +1,6 @@
 """Secure secret storage for System-SL.
 
-Secrets (LLM API keys, OAuth refresh tokens, client credentials) are stored
+Secrets (LLM API keys, OAuth access and refresh tokens) are stored
 in the operating system's secret service via the :mod:`keyring` library, which
 backends to:
 
@@ -37,7 +37,6 @@ SERVICE_NAME = "system-sl"
 # Logical secret names.
 SECRET_LLM_API_KEY = "llm-api-key"
 SECRET_GOOGLE_TOKEN = "google-oauth-token"
-SECRET_GOOGLE_CREDENTIALS = "google-oauth-credentials"
 SECRET_SETTINGS = "settings"
 
 # Fallback encrypted store (used only when keyring has no usable backend).

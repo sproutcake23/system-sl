@@ -21,6 +21,8 @@ system_sl.egg-info/
 .env.local
 credentials.json
 token.json
+# App OAuth client, written by the release workflow from a repository secret
+src/system_sl/assets/google_oauth_client.json
 
 # Persistent Application Data / Runtime Caches
 # (Keeps your user profiles, task logs, and vector caches out of Git)

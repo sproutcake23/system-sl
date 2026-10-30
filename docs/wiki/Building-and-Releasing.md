@@ -25,6 +25,21 @@ The result is a self-contained binary for your current OS. Build once per platfo
    - `system-sl-windows.zip`
 4. Create a [GitHub Release](https://github.com/sproutcake23/System-SL/releases/new) and attach the zips.
 
+## Google OAuth client
+
+Release builds bundle the app's Google OAuth client as
+`assets/google_oauth_client.json`. The release workflow writes it from the
+`GOOGLE_OAUTH_CLIENT` repository secret and fails if the secret is missing or
+is not a Desktop app client. Set or rotate it with:
+
+```bash
+gh secret set GOOGLE_OAUTH_CLIENT < path/to/client.json
+```
+
+The file is gitignored and must never be committed. For a local build that
+includes it, copy your client to `src/system_sl/assets/google_oauth_client.json`
+before running `uv run build-sl`.
+
 ## Development setup
 
 ```bash

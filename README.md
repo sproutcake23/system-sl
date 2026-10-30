@@ -22,7 +22,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 
 - **Persona Builder** — A 10-step onboarding process that builds your Player Profile from your real-world ambitions.
 - **Task Management** — Add, complete, and reorder quests with deadlines and categories.
-- **Google Calendar Sync** — Import tasks from Google Calendar and Tasks.
+- **Google Tasks Sync** — Import your Google Tasks as quests.
 - **Native Notifications** — Desktop alerts styled like the System, with custom notification sounds.
 - **AI Chatbot** — Talk to the System, an AI mentor powered by Gemini with task-aware tools, plus a friendly companion persona.
 - **Priority Engine** — Context-aware scoring (PRESSURE / GROWTH / RECOVERY) of what to work on next.
@@ -102,7 +102,7 @@ Full documentation lives in the wiki:
 
 - [Installation](https://github.com/sproutcake23/System-SL/wiki/Installation)
 - [Features](https://github.com/sproutcake23/System-SL/wiki/Features)
-- [Google Calendar Sync](https://github.com/sproutcake23/System-SL/wiki/Google-Calendar-Sync)
+- [Google Tasks Sync](https://github.com/sproutcake23/System-SL/wiki/Google-Tasks-Sync)
 - [CLI Usage](https://github.com/sproutcake23/System-SL/wiki/CLI-Usage)
 - [Background Service](https://github.com/sproutcake23/System-SL/wiki/Background-Service)
 - [Building and Releasing](https://github.com/sproutcake23/System-SL/wiki/Building-and-Releasing)

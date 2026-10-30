@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "system-sl"
 dynamic = ["version"]
-description = "A Solo Leveling-inspired task management system with AI chatbot, Google Calendar sync, and gamified productivity."
+description = "A Solo Leveling-inspired task management system with AI chatbot, Google Tasks sync, and gamified productivity."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = {text = "GPL-3.0-or-later"}
@@ -21,7 +21,7 @@ keywords = [
   "solo-leveling",
   "gamification",
   "ai-chatbot",
-  "google-calendar",
+  "google-tasks",
   "pyside6",
   "qt"
 ]

@@ -8,8 +8,7 @@ from system_sl.core.tasks import add_tasks
 from system_sl.utils import GoogleAPIClient
 
 SCOPES: List[str] = [
-    "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/tasks.readonly"
+    "https://www.googleapis.com/auth/tasks.readonly",
 ]
 
 
@@ -37,27 +36,6 @@ class GoogleProvider(ABC):
 # =====================================================================
 # 2. CONCRETE IMPLEMENTATIONS (Polymorphism)
 # =====================================================================
-class CalendarProvider(GoogleProvider):
-    """Concrete implementation for syncing Google Calendar Events."""
-
-    def __init__(self, client: GoogleAPIClient) -> None:
-        super().__init__(client, source_name="calendar")
-
-    def fetch_raw_data(self, time_max_iso: str, max_results: int) -> List[Dict[str, Any]]:
-        now_iso = datetime.datetime.utcnow().isoformat() + "Z"
-        return self.client.fetch_raw_calendar_events(
-            time_min_iso=now_iso, 
-            time_max_iso=time_max_iso, 
-            max_results=max_results
-        )
-
-    def extract_item_details(self, raw_item: Dict[str, Any]) -> tuple[str, Optional[str]]:
-        title = raw_item.get("summary", "Untitled Event")
-        start = raw_item.get("start", {})
-        deadline = start.get("dateTime", start.get("date"))
-        return title, deadline
-
-
 class TasksProvider(GoogleProvider):
     """Concrete implementation for syncing Google Tasks."""
 
@@ -105,12 +83,18 @@ class GoogleSyncEngine:
             print(f" [x] Skipped (Duplicate): {title}")
             return 0
 
-    def execute_sync(self, provider: GoogleProvider, max_results: int = 10) -> None:
+    def execute_sync(self, provider: GoogleProvider, max_results: int = 10) -> tuple[int, int]:
         """Executes a sync lifecycle for any provider implementing the GoogleProvider interface.
 
         Args:
             provider (GoogleProvider): The concrete data provider subclass to sync.
             max_results (int): Entry cap constraint per execution.
+
+        Returns:
+            tuple[int, int]: (imported, skipped_as_duplicate) counts.
+
+        Raises:
+            GoogleSyncError: If authentication fails or the API cannot be reached.
         """
         print(f"Connecting to Google Service for [{provider.source_name}]...")
         now = datetime.datetime.utcnow()
@@ -122,7 +106,7 @@ class GoogleSyncEngine:
 
         if not raw_items:
             print(f"No upcoming items found for {provider.source_name}.")
-            return
+            return 0, 0
 
         count = 0
         for item in raw_items:
@@ -131,6 +115,7 @@ class GoogleSyncEngine:
             count += self._process_and_add_task(provider.source_name, title, clean_deadline)
 
         print(f"\n[{provider.source_name}] Sync complete. {count} items processed.")
+        return count, len(raw_items) - count
 
 
 # Example execution block
@@ -138,11 +123,4 @@ if __name__ == "__main__":
     # Create the sync manager
     engine = GoogleSyncEngine()
     
-    # Instantiate the interchangeable providers
-    calendar_sync = CalendarProvider(engine.client)
-    tasks_sync = TasksProvider(engine.client)
-    
-    # Run the exact same method passing different providers
-    engine.execute_sync(calendar_sync)
-    print("-" * 40)
-    engine.execute_sync(tasks_sync)
+    engine.execute_sync(TasksProvider(engine.client))
