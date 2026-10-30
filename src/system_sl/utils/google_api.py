@@ -99,13 +99,16 @@ class GoogleAPIClient:
         # A credentials.json the user set up themselves wins over the app's
         # own client shipped with release builds.
         bundled_path = _bundled_client_path()
+        # PKCE is requested explicitly rather than left to the library
+        # default: the bundled client secret ships inside every release, so
+        # PKCE is what stops it being used to take over someone's sign-in.
         if os.path.exists(self._creds_path):
             flow = InstalledAppFlow.from_client_secrets_file(
-                self._creds_path, self.scopes
+                self._creds_path, self.scopes, autogenerate_code_verifier=True
             )
         elif bundled_path.exists():
             flow = InstalledAppFlow.from_client_secrets_file(
-                str(bundled_path), self.scopes
+                str(bundled_path), self.scopes, autogenerate_code_verifier=True
             )
         else:
             raise GoogleSyncError(
