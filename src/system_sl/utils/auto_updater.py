@@ -12,6 +12,8 @@ from pathlib import Path
 import requests
 from PySide6.QtCore import QThread, Signal
 
+from system_sl.utils.host_env import host_env
+
 
 GITHUB_REPO = "sproutcake23/System-SL"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -200,14 +202,10 @@ def apply_pending_update() -> None:
 
 def _relaunch(appimage: Path) -> None:
     """Replace this process with ``appimage``, keeping the arguments."""
-    env = os.environ.copy()
+    env = host_env()
     # This process runs inside a PyInstaller onefile bundle. Without a reset,
     # the new bundle's bootloader inherits our state and does not unpack itself.
     env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-    if "LD_LIBRARY_PATH_ORIG" in env:
-        env["LD_LIBRARY_PATH"] = env.pop("LD_LIBRARY_PATH_ORIG")
-    else:
-        env.pop("LD_LIBRARY_PATH", None)
     sys.stdout.flush()
     sys.stderr.flush()
     try:
