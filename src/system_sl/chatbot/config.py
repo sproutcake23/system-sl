@@ -39,7 +39,7 @@ class ChatConfig:
     provider: Provider = "google"
     base_url: Optional[str] = None
     api_key: str = ""
-    system_model: str = "gemini-1.5-flash"
+    system_model: str = "gemini-3.5-flash-lite"
 
 
 class ChatConfigError(RuntimeError):
@@ -116,7 +116,7 @@ def load_config() -> ChatConfig:
 def _default_model_for_provider(provider: str) -> str:
     """Get default model for a provider."""
     if provider == "google":
-        return "gemini-1.5-flash"
+        return "gemini-3.5-flash-lite"
     # openai-compatible defaults
     return "llama3.1"
 

@@ -215,7 +215,7 @@ class SettingsDialog(QDialog):
 
         # Model selection (manual entry, used if no model selected from table)
         self.model_edit = QLineEdit()
-        self.model_edit.setPlaceholderText("e.g., llama3.1, gemini-1.5-flash (or select from table below)")
+        self.model_edit.setPlaceholderText("e.g., llama3.1, gemini-3.5-flash-lite (or select from table below)")
         form.addRow("Model:", self.model_edit)
 
         # Test Connection Button

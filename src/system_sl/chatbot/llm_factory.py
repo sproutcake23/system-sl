@@ -82,7 +82,7 @@ PRESETS: dict[str, ProviderPreset] = {
         provider="google",
         base_url=None,
         api_key="",  # User must provide
-        default_model="gemini-1.5-flash",
+        default_model="gemini-3.5-flash-lite",
         description="Google's Gemini models (requires API key)",
     ),
     "ollama": ProviderPreset(
@@ -167,7 +167,7 @@ def create_llm(
 
     Args:
         provider: "google" or "openai"
-        model: Model name (e.g., "gemini-1.5-flash", "llama3.1")
+        model: Model name (e.g., "gemini-3.5-flash-lite", "llama3.1")
         base_url: Base URL for OpenAI-compatible APIs (required for "openai" provider)
         api_key: API key (required for "google", optional for "openai" if server doesn't need it)
         temperature: Sampling temperature (default 0.0 for deterministic output)
