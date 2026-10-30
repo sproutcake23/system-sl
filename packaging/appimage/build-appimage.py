@@ -92,6 +92,9 @@ def main() -> None:
         shutil.copy2(binary, app_bin_dir / "system-sl")
         shutil.copy2(desktop, appdir / "system-sl.desktop")
         shutil.copy2(icon, appdir / "system-sl.svg")
+        # appimagetool used to derive .DirIcon from the desktop file's icon;
+        # since its 2026-10-29 continuous build it requires one up front.
+        (appdir / ".DirIcon").symlink_to("system-sl.svg")
 
         apprun = appdir / "AppRun"
         apprun.write_text(
