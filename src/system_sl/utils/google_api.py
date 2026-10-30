@@ -4,6 +4,7 @@ import json
 import os.path
 import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build, Resource
 
 from system_sl.utils import secure_storage
+from system_sl.utils.host_env import host_env
 
 # Release builds ship the app's own OAuth client under this name in the
 # bundled assets. CI writes it from the GOOGLE_OAUTH_CLIENT repository secret;
@@ -29,9 +31,34 @@ def _bundled_client_path() -> Path:
     return Path(__file__).parent.parent / "assets" / BUNDLED_CLIENT_FILE
 
 
-def _running_in_appimage() -> bool:
-    """Return True if running inside an AppImage."""
-    return "APPIMAGE" in os.environ
+class _HostBrowser(webbrowser.BaseBrowser):
+    """Opens URLs with xdg-open, outside the PyInstaller bundle's environment.
+
+    ``webbrowser`` launches the browser with our own environment, so in the
+    frozen Linux build it loads the bundled Qt libraries and dies before a
+    window appears. ``host_env()`` gives it the user's environment back.
+    """
+
+    def open(self, url: str, new: int = 0, autoraise: bool = True) -> bool:
+        try:
+            subprocess.Popen(
+                ["xdg-open", url],
+                env=host_env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            return False
+        return True
+
+
+def _sign_in_browser() -> Optional[str]:
+    """Name of the ``webbrowser`` entry to open the sign-in page with."""
+    if not (getattr(sys, "frozen", False) and sys.platform.startswith("linux")):
+        return None  # the default browser lookup works fine
+    webbrowser.register("system-sl-host", None, _HostBrowser("xdg-open"))
+    return "system-sl-host"
 
 
 class GoogleSyncError(Exception):
@@ -124,109 +151,20 @@ class GoogleAPIClient:
             )
 
         try:
-            # In AppImage, the sandbox can prevent webbrowser.open() from working.
-            # Use open_browser=False and manually open the URL or show it to the user.
-            if _running_in_appimage():
-                return self._run_appimage_sign_in_flow(flow)
-            # Normal case: let the library open the browser automatically.
-            return flow.run_local_server(port=0, timeout_seconds=120, open_browser=True)
+            # Opens the browser and waits for the localhost redirect. The
+            # sign-in URL is also printed to stdout in case no browser opens.
+            return flow.run_local_server(
+                port=0,
+                timeout_seconds=120,
+                open_browser=True,
+                browser=_sign_in_browser(),
+            )
         except Exception as e:
             raise GoogleSyncError(
                 "Google sign-in did not complete.\n\n"
                 "Finish the sign-in in your browser within 2 minutes, then try again.\n"
                 f"({type(e).__name__}: {e})"
             ) from e
-
-    def _run_appimage_sign_in_flow(self, flow: InstalledAppFlow) -> Credentials:
-        """Run OAuth flow in AppImage: start local server, show URL to user."""
-        from urllib.parse import urlparse, parse_qs
-
-        # Get the authorization URL
-        auth_url, _ = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent",
-        )
-
-        # Start the local server in a background thread
-        from http.server import HTTPServer, BaseHTTPRequestHandler
-        import threading
-
-        # Use port 0 to let the OS pick a free port
-        server = HTTPServer(("localhost", 0), BaseHTTPRequestHandler)
-        port = server.server_port
-        redirect_uri = f"http://localhost:{port}/"
-
-        # Update the flow's redirect URI to match our server
-        flow.redirect_uri = redirect_uri
-
-        # Store the credentials result
-        result = {"creds": None, "error": None}
-
-        class CallbackHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                if self.path.startswith("/"):
-                    # Parse the authorization code from the callback
-                    query = parse_qs(urlparse(self.path).query)
-                    if "code" in query:
-                        try:
-                            flow.fetch_token(code=query["code"][0])
-                            result["creds"] = flow.credentials
-                        except Exception as e:
-                            result["error"] = e
-                    elif "error" in query:
-                        result["error"] = Exception(query["error"][0])
-
-                    # Send a simple success page
-                    self.send_response(200)
-                    self.send_header("Content-type", "text/html")
-                    self.end_headers()
-                    self.wfile.write(b"<h1>Sign-in complete. You may close this window.</h1>")
-
-            def log_message(self, format, *args):
-                # Suppress default log messages
-                pass
-
-        server.RequestHandlerClass = CallbackHandler
-
-        def run_server():
-            server.handle_request()  # Handle one request then stop
-
-        server_thread = threading.Thread(target=run_server, daemon=True)
-        server_thread.start()
-
-        # Wait a moment for server to start
-        import time
-        time.sleep(0.1)
-
-        # Try to open the browser using xdg-open (works in AppImage)
-        try:
-            subprocess.run(["xdg-open", auth_url], check=False, timeout=5)
-        except Exception:
-            pass  # Ignore if xdg-open fails
-
-        # Also copy URL to clipboard if possible
-        try:
-            subprocess.run(["wl-copy"], input=auth_url.encode(), check=False, timeout=2)
-        except Exception:
-            pass
-        try:
-            subprocess.run(["xclip", "-selection", "clipboard"], input=auth_url.encode(), check=False, timeout=2)
-        except Exception:
-            pass
-
-        # Wait for the callback (with timeout)
-        server_thread.join(timeout=120)
-
-        if result["error"]:
-            raise result["error"]
-        if result["creds"] is None:
-            raise GoogleSyncError(
-                "Google sign-in timed out or was cancelled.\n\n"
-                f"If the browser didn't open, manually visit:\n{auth_url}"
-            )
-
-        return result["creds"]
 
     def _store_token(self, creds: Credentials) -> None:
         """Persists the acquired/refreshed token securely, never in plaintext."""
