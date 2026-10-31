@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from system_sl.utils.audio_manager import play_sound, get_current_sound
+from system_sl.utils.aether_theme import get_current_tokens
 
 
 class SystemNotification(QWidget):
@@ -23,7 +24,7 @@ class SystemNotification(QWidget):
         self.setFixedSize(800, 500)
         self._center_window()
         self._setup_ui()
-        self._apply_styles()
+        self.refresh_theme()
 
     def _center_window(self):
         screen = self.screen()
@@ -106,30 +107,71 @@ class SystemNotification(QWidget):
     def keyPressEvent(self, event):
         self.hide()
 
-    def _apply_styles(self):
-        self.setStyleSheet("""
-            QWidget {
+    def refresh_theme(self, tokens=None):
+        """Re-apply the stylesheet using the current dynamic tokens.
+
+        Called on init and before every notification so the notification
+        always matches the live Aether palette.
+        """
+        if tokens is None:
+            tokens = get_current_tokens()
+
+        bg = tokens.get("sys_color_background", "#060912")
+        primary = tokens.get("sys_color_primary", "#00d9ff")
+        text_main = tokens.get("sys_color_text_main", "#d6e7ff")
+        text_secondary = tokens.get("sys_color_text_secondary", "#b3d4ff")
+        text_muted = tokens.get("sys_color_text_muted", "#3d4d68")
+        surface = tokens.get("sys_color_surface", "#0b0f1a")
+
+        self.setStyleSheet(f"""
+            QWidget {{
                 background: transparent;
                 font-family: 'Montserrat', sans-serif;
-            }
-            #systemWindow {
-                background-color: rgba(5, 10, 20, 240);
-                border: 1px solid rgba(0, 210, 255, 0.5);
-                border-radius: 2px;
-            }
-            #header {
-                border: 1px solid #00d2ff;
+            }}
+            #systemWindow {{
+                background-color: {bg};
+                border: 1px solid {primary};
+                border-radius: 8px;
+            }}
+            #header {{
+                border: 1px solid {primary};
                 margin: 40px 100px 0px 100px;
                 max-height: 50px;
-            }
-            #headerText { color: white; font-size: 20px; letter-spacing: 4px; }
-            #notifCategory { color: #00d2ff; font-weight: 700; font-size: 18px; }
-            #notifMessage { font-size: 22px; color: #e0e0e0; }
-            QPushButton {
-                border: 1px solid #00d2ff;
-                color: #00d2ff;
+            }}
+            #headerText {{ color: {text_main}; font-size: 20px; letter-spacing: 4px; }}
+            #notifCategory {{ color: {text_secondary}; font-weight: 700; font-size: 18px; }}
+            #notifMessage {{ font-size: 22px; color: {text_main}; }}
+            QPushButton {{
+                border: 1px solid {primary};
+                color: {primary};
+                background: {surface};
                 padding: 8px 35px;
                 font-weight: 700;
-            }
-            QPushButton:hover { background: rgba(0, 210, 255, 0.2); color: white; }
+            }}
+            QPushButton:hover {{ background: {primary}; color: {text_main}; }}
         """)
+
+    def display_message(self,message: list) -> None:
+        if not message or not any(m.strip() for m in message):
+            return
+        # Re-apply the live theme before showing each notification.
+        self.refresh_theme()
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        text = "Loading task"
+
+        for i in range(len(message)):
+            label = QLabel(f"{text}{i}")
+            label.setObjectName("notifMessage")  # Keeps your QSS styling consistent
+
+            self.content_layout.addWidget(label)  # Assuming self.layout is your QVBoxLayout
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.content_layout.addWidget(label)
+            label.setText(message[i])
+
+        current_sound = get_current_sound()
+        play_sound(current_sound)
+        self.show_system_style()

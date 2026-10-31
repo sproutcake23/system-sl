@@ -189,3 +189,15 @@ def generate_aether_tokens(path: Optional[str] = None) -> Dict[str, str]:
         "sys_color_text_highlight": text_highlight,
         "sys_color_text_muted": muted,
     }
+
+
+def get_current_tokens() -> Dict[str, str]:
+    """Return Aether tokens if its theme file exists, else DEFAULT_TOKENS.
+
+    This is the single source of truth for SL's dynamic colors. Every UI
+    element (main window, notifications, onboarding, chat) should read from
+    here so they all stay in sync when the wallpaper changes.
+    """
+    if find_aether_colors_toml():
+        return generate_aether_tokens()
+    return dict(DEFAULT_TOKENS)
