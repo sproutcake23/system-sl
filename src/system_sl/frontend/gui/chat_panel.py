@@ -1,6 +1,5 @@
 """Chat panel widget for System-SL GUI."""
 
-import os
 import re
 import html
 from pathlib import Path
@@ -71,8 +70,7 @@ from system_sl.chatbot import (
 )
 # --- Dynamic Theming Utilities ---
 from system_sl.core import add_tasks, load_tasks
-from system_sl.utils import get_wallpaper_path
-from system_sl.utils.theme_gen import generate_dynamic_tokens, DEFAULT_TOKENS
+from system_sl.utils.aether_theme import get_current_tokens
 
 
 def _colorize_markdown_html(body: str, color: str) -> str:
@@ -1048,14 +1046,11 @@ class ChatPanel(QWidget):
     # ----- Transcript Rendering -----
 
     def _get_live_tokens(self) -> dict:
-        """Fetches the live dynamic theme colors for the chat HTML."""
-        try:
-            path = get_wallpaper_path()
-            if path and "Error" not in path:
-                return generate_dynamic_tokens(os.path.expanduser(path))
-        except Exception:
-            pass
-        return DEFAULT_TOKENS
+        """Fetches the live dynamic theme colors from Aether's palette.
+
+        Falls back to DEFAULT_TOKENS when Aether's theme file is unavailable.
+        """
+        return get_current_tokens()
 
     def _append_player(self, text: str) -> None:
         """Append a user (PLAYER) message as a right-aligned bubble, no label."""

@@ -6,6 +6,7 @@ from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.wallpaper_path import get_wallpaper_path
 from system_sl.utils.aether_theme import (
     generate_aether_tokens,
+    get_current_tokens,
     find_aether_colors_toml,
     load_aether_palette,
     DEFAULT_TOKENS as AETHER_DEFAULT_TOKENS,
@@ -23,6 +24,7 @@ __all__ = [
     "get_tasks_file_path",
     "get_wallpaper_path",
     "generate_aether_tokens",
+    "get_current_tokens",
     "find_aether_colors_toml",
     "load_aether_palette",
     "AETHER_DEFAULT_TOKENS",
