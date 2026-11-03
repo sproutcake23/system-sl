@@ -36,6 +36,11 @@ jobs:
             libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-util1 \
             libxcb-xkb1 libxkbcommon-x11-0
 
+      # OCR support (tesseract + poppler for pdf2image)
+      - name: Install OCR system dependencies
+        run: |
+          sudo apt-get install -y tesseract-ocr poppler-utils
+
       # The app's Google OAuth client is a repository secret, not a committed
       # file, so it stays out of git history and can be rotated. Fail rather
       # than ship a build where Google sync can never sign in.
@@ -57,6 +62,14 @@ jobs:
             --collect-data spellchecker \
             --add-data "src/system_sl/assets:assets" \
             --collect-all en_core_web_md \
+            --collect-all certifi \
+            --add-binary "/usr/bin/tesseract:." \
+            --add-binary "/usr/bin/pdftoppm:." \
+            --add-binary "/usr/bin/pdfinfo:." \
+            --add-data "/usr/share/tessdata:tessdata" \
+            --hidden-import pytesseract \
+            --hidden-import pdf2image \
+            --hidden-import pdf2image.pdf2image \
             src/system_sl/frontend/gui/main.py
 
       - name: Check Qt xcb libraries and OAuth client are bundled
@@ -70,11 +83,18 @@ jobs:
               "libxcb-keysyms.so.1", "libxcb-render-util.so.0", "libxcb-shape.so.0",
               "libxcb-util.so.1", "libxcb-xkb.so.1", "libxkbcommon-x11.so.0",
           ]
+          # OCR binaries
+          ocr_required = [
+              "tesseract", "pdftoppm", "pdfinfo",
+          ]
           missing = [lib for lib in required if lib not in bundled]
+          missing_ocr = [lib for lib in ocr_required if lib not in bundled]
           if "google_oauth_client.json" not in bundled:
               missing.append("google_oauth_client.json")
           if missing:
               raise SystemExit(f"Not bundled: {', '.join(missing)}")
+          if missing_ocr:
+              print(f"Warning: OCR binaries not bundled: {', '.join(missing_ocr)}")
           print("All Qt xcb libraries and the Google OAuth client are bundled.")
           EOF
 

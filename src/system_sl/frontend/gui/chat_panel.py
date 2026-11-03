@@ -3,9 +3,10 @@
 import os
 import re
 import html
+from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer
+from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer, QMimeData, QUrl
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -29,6 +30,9 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSplitter,
     QFrame,
+    QScrollArea,
+    QFileDialog,
+    QSizePolicy,
 )
 from PySide6.QtGui import (
     QColor,
@@ -37,6 +41,8 @@ from PySide6.QtGui import (
     QTextCharFormat,
     QTextCursor,
     QTextDocumentFragment,
+    QDragEnterEvent,
+    QDropEvent,
 )
 
 from system_sl.chatbot import (
@@ -57,6 +63,11 @@ from system_sl.chatbot import (
     ModelInfo,
     ModelFetcherError,
     fetch_models_for_provider,
+    extract_document,
+    format_for_chat,
+    DocumentText,
+    UnsupportedFileError,
+    ExtractionError,
 )
 # --- Dynamic Theming Utilities ---
 from system_sl.core import add_tasks, load_tasks
@@ -597,18 +608,38 @@ class _ChatWorker(QObject):
     cancelled = Signal()
     proposal = Signal(dict)
 
-    def __init__(self, session: ChatSession, user_msg: str):
+    def __init__(self, session: ChatSession, user_msg: str, attachment_paths: list[str] | None = None):
         super().__init__()
         self.session = session
         self.user_msg = user_msg
+        self.attachment_paths = attachment_paths or []
 
     def run(self):
         thread = QThread.currentThread()
         collected: list[str] = []
 
+        # Extract text from attachments first
+        augmented_msg = self.user_msg
+        if self.attachment_paths:
+            doc_parts = []
+            for path_str in self.attachment_paths:
+                try:
+                    path = Path(path_str)
+                    doc: DocumentText = extract_document(path)
+                    doc_parts.append(format_for_chat(doc, path.name))
+                except UnsupportedFileError as e:
+                    doc_parts.append(f"[uploaded document: {Path(path_str).name} — unsupported file type: {e}]")
+                except ExtractionError as e:
+                    doc_parts.append(f"[uploaded document: {Path(path_str).name} — extraction failed: {e}]")
+                except Exception as e:
+                    doc_parts.append(f"[uploaded document: {Path(path_str).name} — error: {type(e).__name__}: {e}]")
+
+            if doc_parts:
+                augmented_msg = "\n\n".join(doc_parts) + "\n\n" + self.user_msg
+
         try:
             for kind, delta in self.session.stream_turn(
-                self.user_msg, on_proposal=self.proposal.emit
+                augmented_msg, on_proposal=self.proposal.emit
             ):
                 if thread.isInterruptionRequested():
                     self.cancelled.emit()
@@ -622,7 +653,7 @@ class _ChatWorker(QObject):
             # Provider or model cannot stream; fall back to a blocking turn.
             try:
                 reply = self.session.run_turn(
-                    self.user_msg, on_proposal=self.proposal.emit
+                    augmented_msg, on_proposal=self.proposal.emit
                 )
             except Exception as e:
                 self.failed.emit(f"{type(e).__name__}: {e}")
@@ -652,6 +683,9 @@ class ChatPanel(QWidget):
         self._current_model: str = ""
         self._thread: QThread | None = None
         self._worker: _ChatWorker | None = None
+
+        # Attachment state
+        self._attachments: list[Path] = []
 
         # Live-streaming state
         self._answer_open: bool = False       # the [SYSTEM] line exists
@@ -716,6 +750,8 @@ class ChatPanel(QWidget):
         self.transcript.setReadOnly(True)
         self.transcript.setOpenExternalLinks(True)
         self.transcript.setPlaceholderText("[ awaiting Player input — channel: SYSTEM ]")
+        # Enable drag & drop on transcript
+        self.transcript.setAcceptDrops(True)
         root.addWidget(self.transcript, stretch=1)
 
         # --- Live reasoning ("thinking") view ---
@@ -749,11 +785,25 @@ class ChatPanel(QWidget):
         # addWidget() re-parents and hides, so visibility is set afterwards.
         self.confirm_bar.setVisible(False)
 
+        # --- Attachment chips row (hidden when empty) ---
+        self.attach_chips_container = QWidget()
+        self.attach_chips_layout = QHBoxLayout(self.attach_chips_container)
+        self.attach_chips_layout.setContentsMargins(4, 2, 4, 2)
+        self.attach_chips_layout.setSpacing(4)
+        self.attach_chips_layout.addStretch(1)
+        root.addWidget(self.attach_chips_container)
+        self.attach_chips_container.setVisible(False)
+
         # --- Input Row ---
         input_row = QHBoxLayout()
         self.input_box = QLineEdit()
         self.input_box.setPlaceholderText("Speak, Player...")
         self.input_box.returnPressed.connect(self._on_send)
+        # Paperclip button for attachments
+        self.attach_btn = QPushButton("📎")
+        self.attach_btn.setFixedWidth(32)
+        self.attach_btn.setToolTip("Attach document (PDF, DOCX, HTML, TXT, MD, CSV...)")
+        self.attach_btn.clicked.connect(self._on_attach_clicked)
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self._on_send)
         self.stop_button = QPushButton("Stop")
@@ -761,9 +811,13 @@ class ChatPanel(QWidget):
         self.stop_button.setToolTip("Interrupt the reply")
         self.stop_button.clicked.connect(self._on_stop)
         input_row.addWidget(self.input_box, stretch=1)
+        input_row.addWidget(self.attach_btn)
         input_row.addWidget(self.send_button)
         input_row.addWidget(self.stop_button)
         root.addLayout(input_row)
+
+        # Enable drag & drop on the panel itself
+        self.setAcceptDrops(True)
 
         # Initialize model list
         self._populate_model_list()
@@ -855,6 +909,125 @@ class ChatPanel(QWidget):
             reload_agent()
             self._populate_model_list()
 
+    # ----- Attachment Handling -----
+
+    def _on_attach_clicked(self) -> None:
+        """Handle paperclip button click - open file dialog."""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Attach Document",
+            str(Path.home()),
+            "Documents (*.pdf *.docx *.html *.htm *.md *.txt *.csv *.log *.json *.xml *.rst *.tex);;All Files (*)",
+        )
+        if file_paths:
+            self._add_attachments([Path(p) for p in file_paths])
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        """Accept drag events with file URLs."""
+        if event.mimeData().hasUrls():
+            # Filter to only accept local file URLs
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        """Handle dropped files."""
+        urls = event.mimeData().urls()
+        paths = []
+        for url in urls:
+            if url.isLocalFile():
+                paths.append(Path(url.toLocalFile()))
+        if paths:
+            self._add_attachments(paths)
+        event.acceptProposedAction()
+
+    def _add_attachments(self, paths: list[Path]) -> None:
+        """Add file paths to attachments and update chip UI."""
+        for path in paths:
+            if path not in self._attachments:
+                self._attachments.append(path)
+        self._update_attach_chips()
+
+    def _remove_attachment(self, path: Path) -> None:
+        """Remove an attachment and update chip UI."""
+        if path in self._attachments:
+            self._attachments.remove(path)
+        self._update_attach_chips()
+
+    def _update_attach_chips(self) -> None:
+        """Rebuild the attachment chips row."""
+        # Clear existing chips
+        while self.attach_chips_layout.count() > 1:  # Keep the stretch at the end
+            item = self.attach_chips_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Add new chips
+        for path in self._attachments:
+            chip = self._create_attachment_chip(path)
+            self.attach_chips_layout.insertWidget(self.attach_chips_layout.count() - 1, chip)
+
+        self.attach_chips_container.setVisible(len(self._attachments) > 0)
+
+    def _create_attachment_chip(self, path: Path) -> QWidget:
+        """Create a chip widget for an attached file."""
+        chip = QFrame()
+        chip.setObjectName("attachmentChip")
+        chip.setFrameShape(QFrame.StyledPanel)
+        chip.setStyleSheet("""
+            QFrame#attachmentChip {
+                background-color: #3a3a50;
+                border-radius: 12px;
+                padding: 2px 8px;
+            }
+            QFrame#attachmentChip:hover {
+                background-color: #4a4a60;
+            }
+        """)
+        layout = QHBoxLayout(chip)
+        layout.setContentsMargins(8, 2, 4, 2)
+        layout.setSpacing(4)
+
+        # File name with size
+        size_kb = path.stat().st_size / 1024
+        if size_kb >= 1024:
+            size_str = f"{size_kb / 1024:.1f} MB"
+        else:
+            size_str = f"{size_kb:.0f} KB"
+        label = QLabel(f"{path.name} ({size_str})")
+        label.setStyleSheet("color: #d6e7ff; font-size: 11px;")
+        layout.addWidget(label)
+
+        # Remove button
+        remove_btn = QPushButton("✕")
+        remove_btn.setFixedSize(18, 18)
+        remove_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #9ab8e5;
+                border: none;
+                border-radius: 9px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #ff6b8a;
+                color: white;
+            }
+        """)
+        remove_btn.setToolTip("Remove attachment")
+        remove_btn.clicked.connect(lambda: self._remove_attachment(path))
+        layout.addWidget(remove_btn)
+
+        return chip
+
+    def _clear_attachments(self) -> None:
+        """Clear all attachments."""
+        self._attachments.clear()
+        self._update_attach_chips()
+
     # ----- Session Management -----
 
     def _get_session(self, model_name: str) -> ChatSession | None:
@@ -888,6 +1061,24 @@ class ChatPanel(QWidget):
         bg = tokens.get("sys_color_primary", "#00d9ff")
         fg = "#000000"
         self._append_bubble(text, align_right=True, bg_color=bg, text_color=fg, escape=True)
+
+    def _append_player_with_attachments(self, text: str, attachment_paths: list[str]) -> None:
+        """Append a user message with attachment info as a right-aligned bubble."""
+        tokens = self._get_live_tokens()
+        bg = tokens.get("sys_color_primary", "#00d9ff")
+        fg = "#000000"
+
+        # Build attachment summary
+        attach_lines = ["📎 Attached:"]
+        for path_str in attachment_paths:
+            path = Path(path_str)
+            size_kb = path.stat().st_size / 1024
+            size_str = f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.0f} KB"
+            attach_lines.append(f"  • {path.name} ({size_str})")
+        attach_summary = "\n".join(attach_lines)
+
+        combined = f"{attach_summary}\n\n{text}" if text else attach_summary
+        self._append_bubble(combined, align_right=True, bg_color=bg, text_color=fg, escape=True)
 
     def _append_bot(self, text: str) -> None:
         """Append a complete SYSTEM message as a left-aligned bubble, no label."""
@@ -1179,8 +1370,30 @@ class ChatPanel(QWidget):
         """Queue a task the agent tried to add without being asked."""
         if self._halted:
             return  # the Player abandoned this turn; drop late proposals
+
+        # Handle batch proposals from document attachments
+        if proposal.get("type") == "batch":
+            self._show_batch_proposal_dialog(proposal)
+            return
+
         self._pending_proposals.append(dict(proposal))
         self._show_next_proposal()
+
+    def _show_batch_proposal_dialog(self, proposal: dict) -> None:
+        """Show the batch task proposal dialog."""
+        from system_sl.frontend.gui.popup_windows import BatchProposalDialog
+
+        tasks = proposal.get("tasks", [])
+        if not tasks:
+            return
+
+        dialog = BatchProposalDialog(tasks, self)
+        if dialog.exec() == QDialog.Accepted:
+            # User confirmed - add the selected tasks
+            selected_tasks = dialog.get_selected_tasks()
+            if selected_tasks:
+                self._add_batch_tasks(selected_tasks)
+        # Dialog handles its own cleanup
 
     def _show_next_proposal(self) -> None:
         """Show the next queued proposal, or hide the bar when none remain."""
@@ -1233,6 +1446,37 @@ class ChatPanel(QWidget):
         self._current_proposal = None
         self.confirm_bar.setVisible(False)
 
+    def _add_batch_tasks(self, tasks: list[dict]) -> None:
+        """Add multiple tasks from batch proposal and re-prioritize."""
+        from system_sl.core.priority_engine_new import run_prioritization
+
+        added = 0
+        errors = []
+        for task in tasks:
+            title = task.get("title", "").strip()
+            category = task.get("category", "study").strip().lower()
+            deadline = task.get("deadline")
+            if not title:
+                continue
+            try:
+                add_tasks(category, title, deadline)
+                added += 1
+            except ValueError as e:
+                errors.append(f"{title}: {e}")
+
+        if added > 0:
+            # Re-prioritize after adding tasks
+            try:
+                run_prioritization()
+            except Exception as e:
+                errors.append(f"prioritization failed: {e}")
+
+        if added:
+            self._append_confirmation(f"Added {added} task(s) from document.")
+        if errors:
+            for err in errors:
+                self._append_alert(err)
+
     def _append_confirmation(self, text: str) -> None:
         tokens = self._get_live_tokens()
         label_color = tokens.get("sys_color_primary", "#00d9ff")
@@ -1265,14 +1509,24 @@ class ChatPanel(QWidget):
         if session is None:
             return
 
+        # Capture attachments before clearing
+        attachment_paths = [str(p) for p in self._attachments]
+
         self.input_box.clear()
-        self._append_player(text)
+        # Show attachments in the player message if any
+        if attachment_paths:
+            self._append_player_with_attachments(text, attachment_paths)
+        else:
+            self._append_player(text)
         self._reset_stream_state()
         self._set_busy(True)
         self._start_answer_line()
 
+        # Clear attachments after sending
+        self._clear_attachments()
+
         self._thread = QThread(self)
-        self._worker = _ChatWorker(session, text)
+        self._worker = _ChatWorker(session, text, attachment_paths)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.reasoning.connect(self._on_reasoning)

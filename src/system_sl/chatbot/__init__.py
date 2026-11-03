@@ -26,6 +26,13 @@ from system_sl.chatbot.model_fetcher import (
     ModelFetcherError,
     fetch_models_for_provider,
 )
+from system_sl.chatbot.documents import (
+    extract_document,
+    format_for_chat,
+    DocumentText,
+    UnsupportedFileError,
+    ExtractionError,
+)
 
 __all__ = [
     "SYSTEM_MENTOR_PROMPT",
@@ -50,4 +57,9 @@ __all__ = [
     "ModelInfo",
     "ModelFetcherError",
     "fetch_models_for_provider",
+    "extract_document",
+    "format_for_chat",
+    "DocumentText",
+    "UnsupportedFileError",
+    "ExtractionError",
 ]

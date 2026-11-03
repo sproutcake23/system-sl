@@ -50,6 +50,14 @@ _EXPLICIT_ADD = re.compile(
     re.IGNORECASE,
 )
 
+# Attachment marker inserted by the chat panel when a document is uploaded.
+_ATTACHMENT_MARKER = "[uploaded document:"
+
+
+def _attached_doc_present(text: str) -> bool:
+    """Return True when the user message contains an uploaded document marker."""
+    return _ATTACHMENT_MARKER in (text or "")
+
 
 def is_explicit_task_request(text: str) -> bool:
     """Return True when the Player directly asked for a task to be added.
@@ -112,7 +120,7 @@ def add_task(category: str, title: str, deadline: Optional[str] = None) -> Any:
     result is ``pending_confirmation`` — do not claim it was added.
     """
     context = _turn_context
-    if context is None or not is_explicit_task_request(context.user_text):
+    if context is None or not is_explicit_task_request(context.user_text) or _attached_doc_present(context.user_text):
         proposal = {"category": category, "title": title, "deadline": deadline}
         if context is not None and context.on_proposal is not None:
             try:
@@ -161,6 +169,65 @@ def get_random_task() -> Any:
 
 
 @tool
+def propose_tasks_batch(tasks: list[dict]) -> Any:
+    """Propose multiple tasks at once from an uploaded document.
+
+    This tool ALWAYS returns pending_confirmation and shows a preview dialog.
+    It never auto-adds tasks, even when the request looks explicit.
+    Use this when the Player uploads a document (timetable, syllabus, etc.)
+    and asks for multiple tasks to be created from it.
+
+    Args:
+        tasks: List of task dicts, each with keys:
+            - title (str, required): Task title. Should embed subject+date to avoid
+              global dedupe, e.g. "Physics — final exam prep (2026-11-17)".
+            - category (str, optional): Category name (default "study").
+            - deadline (str, optional): YYYY-MM-DD format.
+
+    Returns:
+        dict with status "pending_confirmation" and the full task list.
+    """
+    context = _turn_context
+    validated: list[dict] = []
+    errors: list[str] = []
+
+    for i, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            errors.append(f"Item {i}: not a dict")
+            continue
+        title = task.get("title")
+        if not title or not isinstance(title, str) or not title.strip():
+            errors.append(f"Item {i}: missing or empty title")
+            continue
+        category = task.get("category", "study")
+        if not isinstance(category, str):
+            category = "study"
+        deadline = task.get("deadline")
+        if deadline is not None and not isinstance(deadline, str):
+            deadline = None
+        validated.append({"title": title.strip(), "category": category.strip().lower(), "deadline": deadline})
+
+    if not validated:
+        return {"status": "error", "message": "No valid tasks in batch: " + "; ".join(errors)}
+
+    proposal = {"type": "batch", "tasks": validated}
+    if context is not None and context.on_proposal is not None:
+        try:
+            context.on_proposal(proposal)
+        except Exception:
+            pass
+
+    return {
+        "status": "pending_confirmation",
+        "message": (
+            f"Proposed {len(validated)} task(s) from document. "
+            "The Player must confirm via the preview dialog."
+        ),
+        **proposal,
+    }
+
+
+@tool
 def read_persona() -> Any:
     """Read the user's personal archetype profile configuration."""
     return load_data(get_tasks_file_path("persona.json"))
@@ -180,6 +247,7 @@ SYSTEM_TOOLS = [
     remove_task,
     mark_task_completed,
     get_random_task,
+    propose_tasks_batch,
     read_persona,
     read_user_info,
 ]
