@@ -1,6 +1,7 @@
 """Chat session management for System-SL."""
 
 import json
+from datetime import datetime
 from typing import Callable, Iterator, List, Optional, Union
 
 from langchain_core.messages import AIMessageChunk
@@ -75,6 +76,16 @@ def _user_text(user_msg: Union[str, List[str]]) -> str:
     return "\n".join(str(part) for part in user_msg)
 
 
+def _augment_with_date(user_msg: Union[str, List[str]]) -> str:
+    """Prefix the user message with today's date for the model."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    prefix = f"[Today's date: {today}]\n"
+    if isinstance(user_msg, str):
+        return prefix + user_msg
+    # For list input, join with newlines
+    return prefix + "\n".join(str(part) for part in user_msg)
+
+
 class ChatSession:
     """Manages an active multi-turn conversation session with the System agent.
 
@@ -141,9 +152,10 @@ class ChatSession:
         Returns:
             str: The extracted plain text content of the agent's reply.
         """
-        formatted_messages = self.wrap_message(user_msg)
+        augmented = _augment_with_date(user_msg)
+        formatted_messages = self.wrap_message(augmented)
 
-        set_turn_context(_user_text(user_msg), on_proposal)
+        set_turn_context(_user_text(augmented), on_proposal)
         try:
             response = self.agent.invoke(
                 {"messages": formatted_messages},
@@ -195,9 +207,10 @@ class ChatSession:
         ``on_proposal`` receives any task the agent tried to add without the
         Player explicitly asking for it, so the UI can confirm it.
         """
-        formatted_messages = self.wrap_message(user_msg)
+        augmented = _augment_with_date(user_msg)
+        formatted_messages = self.wrap_message(augmented)
 
-        set_turn_context(_user_text(user_msg), on_proposal)
+        set_turn_context(_user_text(augmented), on_proposal)
         try:
             for chunk, metadata in self.agent.stream(
                 {"messages": formatted_messages},

@@ -1,4 +1,4 @@
-from PySide6.QtCore import QDate, QSize, Qt, Signal
+from PySide6.QtCore import QDate, QSize, Qt, Signal, QTimer, QRegularExpression
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -15,10 +15,14 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QHeaderView,
+    QMessageBox,
 )
-from PySide6.QtCore import QDate, QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QRegularExpressionValidator, QColor
 from system_sl.core.onboarding import ONBOARDING_QUESTIONS, PersonaStorageHandler
 from system_sl.core.tasks import (
     add_tasks,
@@ -616,3 +620,157 @@ class OnboardingWindow(QWidget):
             self._done = True
             self.onboarding_complete.emit(False)
         super().closeEvent(event)
+
+
+class BatchProposalDialog(QDialog):
+    """Dialog for reviewing and confirming multiple tasks from a document upload."""
+
+    def __init__(self, tasks: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Confirm Tasks from Document")
+        self.setMinimumSize(700, 500)
+        self.setModal(True)
+
+        self._original_tasks = tasks
+        self._existing_titles = {str(task.get("title", "")) for task in load_tasks()}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        # Header label
+        header = QLabel(f"Review {len(tasks)} task(s) extracted from document:")
+        header.setStyleSheet("font-weight: bold; font-size: 13px; color: #d6e7ff;")
+        root.addWidget(header)
+
+        # Table widget
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["✓", "Task Title", "Category", "Deadline (YYYY-MM-DD)"])
+        self.table.setRowCount(len(tasks))
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked)
+        self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(True)
+
+        # Deadline validator
+        deadline_validator = QRegularExpressionValidator(QRegularExpression(r"^\d{4}-\d{2}-\d{2}$|^$"))
+
+        for row, task in enumerate(tasks):
+            # Checkbox column
+            checkbox_item = QTableWidgetItem()
+            checkbox_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            checkbox_item.setCheckState(Qt.Checked)  # Default checked
+            self.table.setItem(row, 0, checkbox_item)
+
+            # Title column (editable)
+            title = task.get("title", "")
+            title_item = QTableWidgetItem(title)
+            title_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+            self.table.setItem(row, 1, title_item)
+
+            # Category column (editable)
+            category = task.get("category", "study")
+            category_item = QTableWidgetItem(category)
+            category_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+            self.table.setItem(row, 2, category_item)
+
+            # Deadline column (editable, validated)
+            deadline = task.get("deadline", "") or ""
+            deadline_item = QTableWidgetItem(deadline)
+            deadline_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+            self.table.setItem(row, 3, deadline_item)
+
+            # Highlight duplicates
+            if title in self._existing_titles:
+                for col in range(4):
+                    item = self.table.item(row, col)
+                    if item:
+                        item.setBackground(QColor("#5a3a3a"))  # Reddish tint for duplicates
+                        item.setToolTip("⚠ Task with this title already exists — adding will update its deadline")
+
+        root.addWidget(self.table, stretch=1)
+
+        # Buttons row
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+
+        self.select_all_btn = QPushButton("Select All")
+        self.select_all_btn.clicked.connect(self._select_all)
+        btn_row.addWidget(self.select_all_btn)
+
+        self.deselect_all_btn = QPushButton("Deselect All")
+        self.deselect_all_btn.clicked.connect(self._deselect_all)
+        btn_row.addWidget(self.deselect_all_btn)
+
+        btn_row.addStretch(1)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self._on_accept)
+        self.button_box.rejected.connect(self.reject)
+        self.button_box.button(QDialogButtonBox.Ok).setText("Add Selected Tasks")
+        btn_row.addWidget(self.button_box)
+
+        root.addLayout(btn_row)
+
+    def _select_all(self) -> None:
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item:
+                item.setCheckState(Qt.Checked)
+
+    def _deselect_all(self) -> None:
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item:
+                item.setCheckState(Qt.Unchecked)
+
+    def _on_accept(self) -> None:
+        """Validate all selected rows before accepting."""
+        selected_tasks = self.get_selected_tasks()
+
+        # Validate deadlines for selected tasks
+        invalid_deadlines = []
+        for row, task in selected_tasks:
+            deadline_item = self.table.item(row, 3)
+            deadline = deadline_item.text().strip() if deadline_item else ""
+            if deadline:
+                # Basic format validation
+                if not QRegularExpression(r"^\d{4}-\d{2}-\d{2}$").match(deadline).hasMatch():
+                    invalid_deadlines.append(f"Row {row + 1}: invalid date format '{deadline}' (expected YYYY-MM-DD)")
+
+        if invalid_deadlines:
+            QMessageBox.warning(self, "Invalid Deadlines", "\n".join(invalid_deadlines))
+            return
+
+        self.accept()
+
+    def get_selected_tasks(self) -> list[tuple[int, dict]]:
+        """Return list of (row_index, task_dict) for checked rows."""
+        result = []
+        for row in range(self.table.rowCount()):
+            checkbox = self.table.item(row, 0)
+            if checkbox and checkbox.checkState() == Qt.Checked:
+                title_item = self.table.item(row, 1)
+                category_item = self.table.item(row, 2)
+                deadline_item = self.table.item(row, 3)
+
+                title = title_item.text().strip() if title_item else ""
+                category = category_item.text().strip().lower() if category_item else "study"
+                deadline = deadline_item.text().strip() if deadline_item else ""
+
+                if title:
+                    result.append((
+                        row,
+                        {
+                            "title": title,
+                            "category": category,
+                            "deadline": deadline if deadline else None,
+                        }
+                    ))
+        return result
