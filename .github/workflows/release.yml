@@ -39,7 +39,18 @@ jobs:
       # OCR support (tesseract + poppler for pdf2image)
       - name: Install OCR system dependencies
         run: |
-          sudo apt-get install -y tesseract-ocr poppler-utils
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils
+          # Debian/Ubuntu keep the language data in
+          # /usr/share/tesseract-ocr/<major>/tessdata, while the build passes
+          # /usr/share/tessdata (the Arch layout). Normalise the path so one
+          # build command works on both, and fail here rather than silently
+          # shipping an OCR-less binary.
+          traineddata="$(find /usr/share -maxdepth 5 -name eng.traineddata -print -quit)"
+          test -n "$traineddata"
+          if [ ! -e /usr/share/tessdata ]; then
+            sudo ln -s "$(dirname "$traineddata")" /usr/share/tessdata
+          fi
+          test -f /usr/share/tessdata/eng.traineddata
 
       # The app's Google OAuth client is a repository secret, not a committed
       # file, so it stays out of git history and can be rotated. Fail rather
@@ -82,6 +93,8 @@ jobs:
               "libxcb-cursor.so.0", "libxcb-icccm.so.4", "libxcb-image.so.0",
               "libxcb-keysyms.so.1", "libxcb-render-util.so.0", "libxcb-shape.so.0",
               "libxcb-util.so.1", "libxcb-xkb.so.1", "libxkbcommon-x11.so.0",
+              # OCR language data: without it tesseract cannot read anything.
+              "eng.traineddata",
           ]
           # OCR binaries
           ocr_required = [
