@@ -26,6 +26,22 @@ The GUI has a checkbox on the main menu that toggles autostart on login:
 
 Autostart is implemented for all three platforms but is currently tested on Linux.
 
+Autostart only controls whether the notifier is launched at login. It does
+**not** decide whether reminders are shown. The separate **Notifications**
+checkbox on the main menu does that, and its value is stored as
+`notifications_enabled` in `AppConfig.conf`:
+
+- Reminders off: the GUI starts no notifier, and `--bg` exits immediately even
+  if an autostart entry still exists.
+- Reminders on: the GUI runs the notifier while it is open; `--bg` delivers the
+  login reminder.
+- `BackgroundServiceController` re-reads the preference on every tick, so a
+  notifier that is already running stops as soon as reminders are switched off.
+
+A user upgrading from a version without `notifications_enabled` falls back to
+their autostart setting, so someone who had autostart off does not suddenly
+start receiving reminders.
+
 ## Custom notification sounds
 
 Place `.mp3` or `.wav` files in the `sounds/` folder inside the system-sl data directory:

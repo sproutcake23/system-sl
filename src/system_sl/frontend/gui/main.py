@@ -60,9 +60,12 @@ from system_sl.utils.audio_manager import (
     set_sound_setting,
     DEFAULT_SOUNDS_DIR,
 )
-from system_sl.core.priority_engine_new import run_prioritization
 from system_sl.utils.theme_gen import generate_dynamic_tokens
 from system_sl.utils.autostart_migration import initialize_application_autostart
+from system_sl.utils.notification_settings import (
+    load_notifications_enabled,
+    save_notifications_enabled,
+)
 from system_sl.utils.auto_updater import (
     UpdateCheckThread,
     apply_pending_update,
@@ -100,6 +103,8 @@ class MainWindow(QMainWindow):
         self.wallpaper_timer.timeout.connect(self.check_wallpaper_update)
 
         self.autostart = CrossPlatformAutostart()
+        self.notifier_view = None
+        self.notifier_controller = None
         self.tasks_window = None
         self.onboarding_window = None
         self.update_thread = None
@@ -138,7 +143,20 @@ class MainWindow(QMainWindow):
         self.check_box = QCheckBox("Notification AutoStart")
         initial_state = self.autostart.is_enabled()
         self.check_box.setChecked(initial_state)
+        self.check_box.setToolTip(
+            "Launch the hourly notifier at login.\n"
+            "This is separate from Notifications below: it does not turn "
+            "reminders on or off while THE SYSTEM is running."
+        )
         self.check_box.clicked.connect(self.notification_autostart)
+
+        self.notifications_check = QCheckBox("Notifications")
+        self.notifications_check.setChecked(load_notifications_enabled())
+        self.notifications_check.setToolTip(
+            "Show the hourly task reminder while THE SYSTEM is running.\n"
+            "Turn this off to stop reminders without changing login autostart."
+        )
+        self.notifications_check.toggled.connect(self._toggle_notifications)
 
         # --- NEW: Dynamic Theme Checkbox ---
         self.theme_toggle = QCheckBox("Enable Dynamic Theming")
@@ -176,6 +194,7 @@ class MainWindow(QMainWindow):
 
         left_layout.addWidget(profile_button)
         left_layout.addWidget(self.check_box)
+        left_layout.addWidget(self.notifications_check)
         left_layout.addWidget(self.theme_toggle) # Added to the left panel UI
 
         self.close_to_tray_toggle = QCheckBox("Close to System Tray")
@@ -219,6 +238,14 @@ class MainWindow(QMainWindow):
         # Start the background watcher if it was enabled during the last session
         if is_dynamic:
             self.start_dynamic_theming()
+
+        # The reminder used to start unconditionally, so merely opening the
+        # app produced a popup even with autostart off. Start it only when the
+        # user asked for reminders, and never fire at launch: the hourly timer
+        # owns the schedule. (--bg still notifies immediately; that run exists
+        # to deliver the login reminder.)
+        if self.notifications_check.isChecked():
+            self._start_notifier(notify_now=False)
 
     def _setup_tray_icon(self):
         """Create the tray menu used to restore or fully exit the app."""
@@ -330,6 +357,35 @@ class MainWindow(QMainWindow):
         else:
             message_box.setText("Disabled AutoStart")
         message_box.exec()
+
+    def _start_notifier(self, notify_now: bool = True):
+        """Run the hourly task reminder inside this process."""
+        if self.notifier_controller is not None:
+            return
+        self.notifier_view = SystemNotification()
+        self.notifier_controller = BackgroundServiceController(self.notifier_view)
+        if notify_now:
+            self.notifier_controller.poll_and_render_task()
+
+    def _stop_notifier(self):
+        """Stop reminding and tear down the HUD window."""
+        if self.notifier_controller is not None:
+            self.notifier_controller.stop()
+            self.notifier_controller.deleteLater()
+            self.notifier_controller = None
+        if self.notifier_view is not None:
+            self.notifier_view.hide()
+            self.notifier_view.deleteLater()
+            self.notifier_view = None
+
+    def _toggle_notifications(self, enabled):
+        save_notifications_enabled(enabled)
+        if enabled:
+            # The user just asked for reminders, so confirm immediately
+            # instead of leaving them waiting an hour for the first tick.
+            self._start_notifier(notify_now=True)
+        else:
+            self._stop_notifier()
 
     def sync_google_tasks(self):
         if self._sync_thread is not None:
@@ -496,6 +552,15 @@ def main():
     controller = None
     
     if "--bg" in sys.argv:
+        # An autostart entry can outlive the preference: switching reminders
+        # off does not remove it. Exit instead of idling for the whole session
+        # and holding the lock the GUI needs.
+        if not load_notifications_enabled():
+            print(
+                "[INFO] Notifications are disabled; "
+                "not starting the background notifier."
+            )
+            sys.exit(0)
         print("[INFO] Running in background notifier mode...")
         # --- NEW: Fetch live theme specifically for background notifications ---
         current_wall = get_wallpaper_path()
@@ -569,9 +634,6 @@ def main():
             main_window = MainWindow()
             main_window.show()
             main_window._check_for_updates()
-            v = SystemNotification()
-            control = BackgroundServiceController(v)
-            control.poll_and_render_task()  
 
     except Exception:
         import traceback

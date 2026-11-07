@@ -5,6 +5,7 @@ from system_sl.utils import SystemNotification
 from system_sl.core.tasks import get_random_task, get_topn_task
 from system_sl.core.priority_engine_new import run_prioritization
 from system_sl.utils.paths import get_tasks_file_path
+from system_sl.utils.notification_settings import load_notifications_enabled
 
 class BackgroundServiceController(QObject):
     """Orchestrates the background monitoring lifecycle and links business logic to the view layer."""
@@ -34,9 +35,21 @@ class BackgroundServiceController(QObject):
 
     def poll_and_render_task(self) -> None:
         """Queries core task modules and passes data changes directly to the UI panel."""
+        # The preference can change while this process is alive (the GUI
+        # writes it), so re-read it on every tick rather than only at startup.
+        # Otherwise a notifier started at login would keep interrupting a user
+        # who has since switched reminders off.
+        if not load_notifications_enabled():
+            return
         if not self.lock.isLocked() and not self.lock.tryLock(0):
             return
         run_prioritization(display=False)
         ntask = get_topn_task()
         if len(ntask) > 0:
             self.view.display_message(ntask)
+
+    def stop(self) -> None:
+        """Stop the reminder loop and release the lock for another notifier."""
+        self.timer.stop()
+        if self.lock.isLocked():
+            self.lock.unlock()
