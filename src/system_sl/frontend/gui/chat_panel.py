@@ -4,7 +4,7 @@ import os
 import re
 import html
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer, QMimeData, QUrl
 from PySide6.QtWidgets import (
@@ -758,6 +758,7 @@ class ChatPanel(QWidget):
         # Task proposals awaiting the Player's Yes/No
         self._pending_proposals: list[dict] = []
         self._current_proposal: dict | None = None
+        self._notes_after_turn: list[tuple[Callable[[str], None], str]] = []
 
         root = QVBoxLayout(self)
 
@@ -1436,7 +1437,7 @@ class ChatPanel(QWidget):
         dialog = BatchProposalDialog(tasks, self)
         if dialog.exec() == QDialog.Accepted:
             # User confirmed - add the selected tasks
-            selected_tasks = dialog.get_selected_tasks()
+            selected_tasks = [task for _row, task in dialog.get_selected_tasks()]
             if selected_tasks:
                 self._add_batch_tasks(selected_tasks)
         # Dialog handles its own cleanup
@@ -1470,16 +1471,18 @@ class ChatPanel(QWidget):
 
             existing = {str(task.get("title", "")) for task in load_tasks()}
             if not title:
-                self._append_alert("cannot add a task without a title")
+                self._show_after_turn(self._append_alert, "cannot add a task without a title")
             elif title in existing:
-                self._append_alert(f"task '{title}' already exists")
+                self._show_after_turn(self._append_alert, f"task '{title}' already exists")
             else:
                 try:
                     add_tasks(category, title, deadline)
                 except ValueError as e:
-                    self._append_alert(str(e))
+                    self._show_after_turn(self._append_alert, str(e))
                 else:
-                    self._append_confirmation(f'Added "{title}" to {category}.')
+                    self._show_after_turn(
+                        self._append_confirmation, f'Added "{title}" to {category}.'
+                    )
 
         self._show_next_proposal()
 
@@ -1518,20 +1521,32 @@ class ChatPanel(QWidget):
                 errors.append(f"prioritization failed: {e}")
 
         if added:
-            self._append_confirmation(f"Added {added} task(s) from document.")
-        if errors:
-            for err in errors:
-                self._append_alert(err)
+            self._show_after_turn(
+                self._append_confirmation, f"Added {added} task(s) from document."
+            )
+        for err in errors:
+            self._show_after_turn(self._append_alert, err)
 
     def _append_confirmation(self, text: str) -> None:
         tokens = self._get_live_tokens()
-        label_color = tokens.get("sys_color_primary", "#00d9ff")
-        body_color = tokens.get("sys_color_text_main", "#d6e7ff")
-        safe = html.escape(text)
-        self._append_html(
-            f'<span style="color:{label_color}; font-weight:bold">[SYSTEM]</span> '
-            f'<span style="color:{body_color}">{safe}</span>'
+        self._append_bubble(
+            text,
+            align_right=False,
+            bg_color=tokens.get("sys_color_surface", "#2a2a40"),
+            text_color=tokens.get("sys_color_primary", "#00d9ff"),
         )
+
+    def _show_after_turn(self, append: Callable[[str], None], text: str) -> None:
+        """Add a note to the transcript once the running reply has finished.
+
+        Agents propose tasks mid-reply, so the Player can respond while it is
+        still streaming. Each render rewrites the transcript from the start of
+        the answer to its end, which would erase a note added in the meantime.
+        """
+        if self.is_busy():
+            self._notes_after_turn.append((append, text))
+        else:
+            append(text)
 
     # ----- Input Flow -----
 
@@ -1661,6 +1676,9 @@ class ChatPanel(QWidget):
         if self._thread is not None:
             self._thread.deleteLater()
             self._thread = None
+        notes, self._notes_after_turn = self._notes_after_turn, []
+        for append, text in notes:
+            append(text)
         self.stop_button.setToolTip("Interrupt the reply")
         self._set_busy(False)
         self.input_box.setFocus()
