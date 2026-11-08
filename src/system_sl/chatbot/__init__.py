@@ -20,7 +20,7 @@ from system_sl.chatbot.config import (
     set_model_cache,
     invalidate_model_cache,
 )
-from system_sl.chatbot.llm_factory import list_presets, get_preset
+from system_sl.chatbot.llm_factory import list_presets, list_preset_items, get_preset
 from system_sl.chatbot.model_fetcher import (
     ModelInfo,
     ModelFetcherError,
@@ -49,6 +49,7 @@ __all__ = [
     "get_preset_models",
     "ProviderPreset",
     "list_presets",
+    "list_preset_items",
     "get_preset",
     "get_config_path",
     "get_model_cache",

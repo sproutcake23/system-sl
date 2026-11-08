@@ -56,7 +56,7 @@ from system_sl.chatbot import (
     get_preset_models,
     get_preset,
     ProviderPreset,
-    list_presets,
+    list_preset_items,
     get_model_cache,
     set_model_cache,
     invalidate_model_cache,
@@ -192,8 +192,14 @@ class SettingsDialog(QDialog):
 
         self.preset_combo = QComboBox()
         self.preset_combo.addItem("Custom", "custom")
-        for preset in list_presets():
-            self.preset_combo.addItem(preset.name, preset.name.lower())
+        for preset_key, preset in list_preset_items():
+            # "Custom" is already item 0; adding the custom preset again would
+            # make findData("custom") ambiguous.
+            if preset_key == "custom":
+                continue
+            # Store the preset key, not the display name: get_preset() looks up
+            # by key, and the two differ ("LM Studio (Local)" vs "lm_studio").
+            self.preset_combo.addItem(preset.name, preset_key)
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
         form.addRow("Provider:", self.preset_combo)
 
@@ -300,10 +306,12 @@ class SettingsDialog(QDialog):
         """Populate fields from current config."""
         # Find matching preset
         preset_key = "custom"
-        for preset in list_presets():
+        for key, preset in list_preset_items():
+            if key == "custom":
+                continue
             if (preset.provider == self._config.provider and
                 preset.base_url == self._config.base_url):
-                preset_key = preset.name.lower()
+                preset_key = key
                 break
 
         idx = self.preset_combo.findData(preset_key)
@@ -336,10 +344,8 @@ class SettingsDialog(QDialog):
             return
 
         preset = None
-        for p in list_presets():
-            if p.name.lower() == preset_key:
-                preset = p
-                break
+        if preset_key:
+            preset = get_preset(preset_key)
 
         if preset:
             self.base_url_edit.setText(preset.base_url or "")
@@ -348,7 +354,7 @@ class SettingsDialog(QDialog):
             self.api_key_edit.setEnabled(preset.api_key == "")
             self.model_edit.setText(preset.default_model or "")
             self.model_edit.setEnabled(True)
-            self.fetch_btn.setEnabled(preset.api_key == "" or preset.provider == "openrouter")
+            self.fetch_btn.setEnabled(preset_key in ("openrouter", "ollama", "lm_studio"))
 
     def _get_current_preset(self) -> Optional[ProviderPreset]:
         preset_key = self.preset_combo.currentData()
@@ -526,15 +532,9 @@ class SettingsDialog(QDialog):
 
     def _get_fetch_provider(self) -> str:
         """Get the model-fetching provider name (openrouter, ollama, lm_studio)."""
-        preset = self._get_current_preset()
-        if preset:
-            preset_key = preset.name.lower()
-            if "openrouter" in preset_key:
-                return "openrouter"
-            elif "ollama" in preset_key:
-                return "ollama"
-            elif "lm_studio" in preset_key or "lm studio" in preset_key:
-                return "lm_studio"
+        preset_key = self.preset_combo.currentData()
+        if preset_key in ("openrouter", "ollama", "lm_studio"):
+            return preset_key
         # Custom: infer from base_url
         base_url = self.base_url_edit.text().strip().lower()
         if "openrouter.ai" in base_url:
@@ -844,7 +844,9 @@ class ChatPanel(QWidget):
             self.model_combo.addItem(display, model_id)
 
         # 4. Cached models from OpenRouter (if any)
-        if config.provider == "openrouter":
+        # provider is only ever "google" or "openai"; the endpoint is what
+        # identifies OpenRouter.
+        if config.base_url and "openrouter.ai" in config.base_url.lower():
             cached = get_model_cache("openrouter")
             if cached:
                 self.model_combo.insertSeparator(self.model_combo.count())

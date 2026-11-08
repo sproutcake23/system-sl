@@ -608,13 +608,10 @@ def main():
             )
             sys.exit(1)
 
-    # Set environment variables for the selected provider
-    if config.provider == "google":
-        os.environ["GOOGLE_API_KEY"] = config.api_key
-    elif config.provider == "openai":
-        os.environ["OPENAI_API_KEY"] = config.api_key
-        if config.base_url:
-            os.environ["OPENAI_BASE_URL"] = config.base_url
+    # Do not copy the API key into os.environ. create_llm() is handed the key
+    # explicitly, and exporting it here froze the key loaded at startup: a key
+    # entered later in the settings dialog was ignored for the rest of the
+    # process and then written back over the stored one.
 
     try:
         storage = PersonaStorageHandler()
