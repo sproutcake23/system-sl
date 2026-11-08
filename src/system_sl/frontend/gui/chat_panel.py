@@ -293,14 +293,14 @@ class LLMSettingsPage(QWidget):
         self.model_table.itemChanged.connect(self._on_model_selection_changed)
         table_layout.addWidget(self.model_table)
 
-        # Progress bar (hidden by default)
-        self.fetch_progress = QProgressBar()
-        self.fetch_progress.setRange(0, 0)  # Indeterminate
-        self.fetch_progress.setVisible(False)
-        table_layout.addWidget(self.fetch_progress)
-
         layout.addWidget(self.model_table_frame, stretch=1)
         self.model_table_frame.setVisible(False)  # Hidden until fetch
+
+        # Outside the table frame, which a fetch hides while this is showing.
+        self.fetch_progress = QProgressBar()
+        self.fetch_progress.setRange(0, 0)  # Indeterminate
+        layout.addWidget(self.fetch_progress)
+        self.fetch_progress.setVisible(False)
 
         # --- Buttons ---
         buttons = QDialogButtonBox(
@@ -409,11 +409,15 @@ class LLMSettingsPage(QWidget):
         self._fetch_thread.started.connect(self._fetch_worker.run)
         self._fetch_worker.finished.connect(self._on_models_fetched)
         self._fetch_worker.failed.connect(self._on_fetch_failed)
-        self._fetch_worker.progress.connect(lambda msg: self.fetch_btn.setText(msg))
+        # A method rather than a lambda, so Qt delivers it on the GUI thread.
+        self._fetch_worker.progress.connect(self._on_fetch_progress)
         self._fetch_worker.finished.connect(self._fetch_thread.quit)
         self._fetch_worker.failed.connect(self._fetch_thread.quit)
         self._fetch_thread.finished.connect(self._cleanup_fetch_thread)
         self._fetch_thread.start()
+
+    def _on_fetch_progress(self, message: str) -> None:
+        self.fetch_btn.setText(message)
 
     def _on_models_fetched(self, models: list[ModelInfo]) -> None:
         """Handle successful model fetch."""
