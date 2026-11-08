@@ -95,7 +95,7 @@ class _GoogleSyncWorker(QObject):
 SIDEBAR_BUTTON_SIZE = 34
 SIDEBAR_RAIL_RIGHT_MARGIN = 4
 # Top and bottom match the chat panel, lining the toggle and the Settings button
-# up with its header and input rows. Equal values also keep the rail centred.
+# up with its header and input rows.
 SIDEBAR_VERTICAL_MARGIN = 9
 SIDEBAR_SPACING = 10
 SETTINGS_SECTION_GAP = 12
@@ -159,10 +159,6 @@ class MainWindow(QMainWindow):
         self.sidebar_toggle.setCursor(Qt.PointingHandCursor)
         self.sidebar_toggle.clicked.connect(self._toggle_sidebar)
         left_layout.addWidget(self.sidebar_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        # Given a stretch only while collapsed, to push the rail icons to centre.
-        left_layout.addStretch(0)
-        self._rail_top_stretch = left_layout.count() - 1
 
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self._toggle_sidebar)
 
@@ -403,7 +399,6 @@ class MainWindow(QMainWindow):
             self._main_layout.setStretch(0, 1)
             self._main_layout.setStretch(1, 3)
 
-        self._sidebar_layout.setStretch(self._rail_top_stretch, 1 if collapsed else 0)
 
         action = "Expand" if collapsed else "Collapse"
         self.sidebar_toggle.setIcon(
