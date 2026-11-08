@@ -168,14 +168,14 @@ class _ModelFetchWorker(QObject):
 # SETTINGS DIALOG
 # =============================================================================
 
-class SettingsDialog(QDialog):
-    """Configuration dialog for LLM provider and model settings with model fetching."""
+class LLMSettingsPage(QWidget):
+    """LLM provider and model settings form with model fetching."""
+
+    saved = Signal()
+    finished = Signal(bool)  # True for OK after a successful save, False for Cancel
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setWindowTitle("LLM Settings")
-        self.setModal(True)
-        self.resize(700, 550)
 
         self._config = load_config()
         self._fetched_models: list[ModelInfo] = []
@@ -307,9 +307,16 @@ class SettingsDialog(QDialog):
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply
         )
         buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
+        buttons.rejected.connect(lambda: self.finished.emit(False))
         buttons.button(QDialogButtonBox.Apply).clicked.connect(self._on_apply)
         layout.addWidget(buttons)
+
+    def reload(self) -> None:
+        """Discard unsaved edits and show the saved config again."""
+        self._config = load_config()
+        self._fetched_models = []
+        self.model_table_frame.setVisible(False)
+        self._load_current_config()
 
     def _load_current_config(self) -> None:
         """Populate fields from current config."""
@@ -591,18 +598,36 @@ class SettingsDialog(QDialog):
             self.test_btn.setEnabled(True)
             self.test_btn.setText("Test Connection")
 
-    def _on_apply(self) -> None:
+    def _on_apply(self) -> bool:
         config = self._collect_config()
         errors = validate_config(config)
         if errors:
             QMessageBox.warning(self, "Invalid Config", "\n".join(errors))
-            return
+            return False
         save_config(config)
         self._config = config
+        self.saved.emit()
+        return True
 
     def _on_accept(self) -> None:
-        self._on_apply()
-        self.accept()
+        if self._on_apply():
+            self.finished.emit(True)
+
+
+class SettingsDialog(QDialog):
+    """Standalone LLM settings, for first-run setup before the main window exists."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("LLM Settings")
+        self.setModal(True)
+        self.resize(700, 550)
+
+        self.page = LLMSettingsPage(self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.page)
+        self.page.finished.connect(lambda ok: self.accept() if ok else self.reject())
 
 
 # =============================================================================
@@ -685,6 +710,9 @@ class _ChatWorker(QObject):
 # =============================================================================
 
 class ChatPanel(QWidget):
+    settings_requested = Signal()
+    busy_changed = Signal(bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -918,13 +946,13 @@ class ChatPanel(QWidget):
         self._append_alert(f"Switched to model: {model_id}")
 
     def _open_settings(self) -> None:
-        """Open the settings dialog."""
-        dialog = SettingsDialog(self)
-        if dialog.exec() == QDialog.Accepted:
-            # Config was saved, reload agent and refresh models
-            from system_sl.chatbot import reload_agent
-            reload_agent()
-            self._populate_model_list()
+        self.settings_requested.emit()
+
+    def reload_llm_settings(self) -> None:
+        """Pick up a newly saved LLM config."""
+        from system_sl.chatbot import reload_agent
+        reload_agent()
+        self._populate_model_list()
 
     # ----- Attachment Handling -----
 
@@ -1510,6 +1538,10 @@ class ChatPanel(QWidget):
         self.refresh_btn.setEnabled(not busy)
         self.settings_btn.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
+        self.busy_changed.emit(busy)
+
+    def is_busy(self) -> bool:
+        return self._thread is not None
 
     def _on_send(self) -> None:
         if self._thread is not None:

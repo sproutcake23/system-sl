@@ -71,8 +71,8 @@ five minutes, and it overrides the bundled client.
 
 ## First sync
 
-Google sync is off by default. Tick **Google Tasks Sync** in the main window
-to show the **Google** button, then click it. Your browser opens a Google sign-in page:
+Google sync is off by default. Tick **Google Tasks Sync** under **Settings**
+to show the **Google** button in the sidebar, then click it. Your browser opens a Google sign-in page:
 
 1. Choose a Google account that is a test user on the client in use.
 2. Google warns that it **hasn't verified this app**. That is expected while

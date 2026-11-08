@@ -79,6 +79,38 @@ QPushButton#sidebarToggle:pressed {{
     border: 1px solid {t['sys_color_primary_light']};
 }}
 
+/* --- Settings window --- */
+QTabWidget::pane {{
+    border: 1px solid {t['sys_color_border']};
+}}
+
+QTabBar::tab {{
+    background-color: transparent;
+    color: {t['sys_color_text_secondary']};
+    border: 1px solid {t['sys_color_border_muted']};
+    padding: 7px 18px;
+    margin-right: 4px;
+}}
+
+QTabBar::tab:hover {{
+    background-color: {t['sys_color_primary_hover']};
+}}
+
+QTabBar::tab:selected {{
+    background-color: {t['sys_color_primary_dim']};
+    color: {t['sys_color_primary_light']};
+    border: 1px solid {t['sys_color_border']};
+}}
+
+QTabBar::tab:disabled {{
+    color: {t['sys_color_text_muted']};
+}}
+
+QLabel#settingsHeading {{
+    color: {t['sys_color_primary_light']};
+    font-weight: bold;
+}}
+
 /* --- Checkbox --- */
 QCheckBox {{
     color: {t['sys_color_text_secondary']};

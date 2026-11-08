@@ -38,13 +38,13 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QInputDialog,
     QSizePolicy,
-    QSpacerItem,
     QDialog,
     QSystemTrayIcon,
     QMenu,
 )
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
 from system_sl.frontend.gui.chat_panel import ChatPanel
+from system_sl.frontend.gui.settings_window import AppSettingsDialog
 from system_sl.frontend.gui.theme import get_stylesheet
 from system_sl.frontend.gui.icons import get_icon, initialize_icons
 from system_sl.utils import (
@@ -94,16 +94,21 @@ class _GoogleSyncWorker(QObject):
 
 SIDEBAR_BUTTON_SIZE = 34
 SIDEBAR_RAIL_RIGHT_MARGIN = 4
-SIDEBAR_TOP_MARGIN = 9  # Lines the toggle up with the chat panel's header row.
-SIDEBAR_BOTTOM_MARGIN = 12
+# Top and bottom match the chat panel, lining the toggle and the Settings button
+# up with its header and input rows. Equal values also keep the rail centred.
+SIDEBAR_VERTICAL_MARGIN = 9
 SIDEBAR_SPACING = 10
-SIDEBAR_SETTINGS_GAP = 12
-# Below the rail icons, matches what the toggle occupies above them, so that
-# they centre on the window (and so on the chat panel) rather than sit low.
-SIDEBAR_RAIL_BALANCE = (
-    SIDEBAR_TOP_MARGIN + SIDEBAR_BUTTON_SIZE + SIDEBAR_SPACING - SIDEBAR_BOTTOM_MARGIN
-)
+SETTINGS_SECTION_GAP = 12
 UNCONSTRAINED_WIDTH = 16777215  # QWIDGETSIZE_MAX
+
+
+class _ClickableLabel(QLabel):
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -161,7 +166,6 @@ class MainWindow(QMainWindow):
 
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self._toggle_sidebar)
 
-        # --- Buttons group ---
         self.task_button = QPushButton("Tasks")
         self.task_button.setIcon(get_icon("tasks"))
         self.task_button.clicked.connect(self.open_tasks_window)
@@ -170,69 +174,35 @@ class MainWindow(QMainWindow):
         self.google_button.setIcon(get_icon("google"))
         self.google_button.clicked.connect(self.sync_google_tasks)
 
-        self.sound_button = QPushButton("Notification Sound")
-        self.sound_button.setIcon(get_icon("sound"))
-        self.sound_button.clicked.connect(self.change_notification_sound)
-
-        self.install_desktop_btn = QPushButton("Install App")
-        self.install_desktop_btn.setIcon(get_icon("install"))
-        self.install_desktop_btn.clicked.connect(self.install_desktop_shortcut)
-
-        self.profile_button = QPushButton("Edit Player Profile")
-        self.profile_button.setIcon(get_icon("profile"))
-        self.profile_button.clicked.connect(self.open_onboarding)
+        self.settings_button = QPushButton("Settings")
+        self.settings_button.setIcon(get_icon("settings"))
+        self.settings_button.clicked.connect(lambda: self.open_settings())
 
         # These stay visible in the collapsed rail, reduced to their icons.
         self._sidebar_labels = {}
-        for btn in (self.task_button, self.google_button, self.sound_button,
-                    self.install_desktop_btn, self.profile_button):
+        for btn in (self.task_button, self.google_button, self.settings_button):
             btn.setFixedHeight(SIDEBAR_BUTTON_SIZE)
             btn.setCursor(Qt.PointingHandCursor)
             self._sidebar_labels[btn] = btn.text()
             btn.setAccessibleName(btn.text())
-            left_layout.addWidget(btn)
 
-        # Spacer between buttons and checkboxes
-        self._sidebar_gap = QSpacerItem(
-            0, SIDEBAR_SETTINGS_GAP, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        left_layout.addWidget(self.task_button)
+        left_layout.addWidget(self.google_button)
+
+        # Google sign-in only works for accounts allowed on the OAuth client,
+        # so the sync button stays hidden until the player opts in.
+        # Set after addWidget: re-parenting resets visibility to hidden.
+        self.google_button.setVisible(
+            self.settings.value("google_sync_enabled", False, type=bool)
         )
-        left_layout.addSpacerItem(self._sidebar_gap)
-
-        # Everything that has no icon form, hidden while collapsed.
-        self._sidebar_settings = QWidget()
-        settings_layout = QVBoxLayout(self._sidebar_settings)
-        settings_layout.setContentsMargins(0, 0, 0, 0)
-        settings_layout.setSpacing(10)
-        left_layout.addWidget(self._sidebar_settings)
-
-        self.check_box = QCheckBox("Notification AutoStart")
-        initial_state = self.autostart.is_enabled()
-        self.check_box.setChecked(initial_state)
-        self.check_box.setToolTip(
-            "Launch the hourly notifier at login.\n"
-            "This is separate from Notifications below: it does not turn "
-            "reminders on or off while THE SYSTEM is running."
-        )
-        self.check_box.clicked.connect(self.notification_autostart)
-
-        self.notifications_check = QCheckBox("Notifications")
-        self.notifications_check.setChecked(load_notifications_enabled())
-        self.notifications_check.setToolTip(
-            "Show the hourly task reminder while THE SYSTEM is running.\n"
-            "Turn this off to stop reminders without changing login autostart."
-        )
-        self.notifications_check.toggled.connect(self._toggle_notifications)
-
-        # --- NEW: Dynamic Theme Checkbox ---
-        self.theme_toggle = QCheckBox("Enable Dynamic Theming")
-        is_dynamic = self.settings.value("dynamic_theming", False, type=bool)
-        self.theme_toggle.setChecked(is_dynamic)
-        self.theme_toggle.clicked.connect(self.on_theme_toggle_changed)
 
         # Profile hint
-        self.profile_hint = QLabel(
-            "No player profile — tasks are ranked by urgency only."
+        self.profile_hint = _ClickableLabel(
+            "No player profile — tasks are ranked by urgency only. "
+            "<u>Set up a profile</u>"
         )
+        self.profile_hint.setTextFormat(Qt.TextFormat.RichText)
+        self.profile_hint.setCursor(Qt.PointingHandCursor)
         self.profile_hint.setWordWrap(True)
         self.profile_hint.setObjectName("profileHint")
         # A wrapped label in a QVBoxLayout otherwise expands to absorb all
@@ -243,68 +213,30 @@ class MainWindow(QMainWindow):
         self.profile_hint.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
-        settings_layout.addWidget(self.profile_hint)
-        # Set after addWidget: re-parenting resets visibility to hidden.
-        self.profile_hint.setVisible(
-            not PersonaStorageHandler().has_profile()
-        )
-
-        settings_layout.addSpacing(10)
-
-        # --- Checkboxes group ---
-        settings_layout.addWidget(self.check_box)
-        settings_layout.addWidget(self.notifications_check)
-        settings_layout.addWidget(self.theme_toggle)
-
-        settings_layout.addSpacing(10)
-
-        # --- System checkboxes ---
-        self.close_to_tray_toggle = QCheckBox("Close to System Tray")
-        self.close_to_tray_toggle.setChecked(self.close_to_tray_enabled)
-        self.close_to_tray_toggle.setEnabled(self.tray_icon is not None)
-        if self.tray_icon is None:
-            self.close_to_tray_toggle.setToolTip(
-                "System tray is not available in this desktop session."
-            )
-        self.close_to_tray_toggle.toggled.connect(self._toggle_close_to_tray)
-
-        # Google sign-in only works for accounts allowed on the OAuth client,
-        # so the sync button stays hidden until the player opts in.
-        google_sync_enabled = self.settings.value(
-            "google_sync_enabled", False, type=bool
-        )
-        self.google_sync_toggle = QCheckBox("Google Tasks Sync")
-        self.google_sync_toggle.setChecked(google_sync_enabled)
-        self.google_sync_toggle.setToolTip(
-            "Show the Google button to import Google Tasks as quests.\n"
-            "Sign-in currently works only for Google accounts added as "
-            "test users on the app's Google OAuth client."
-        )
-        self.google_sync_toggle.toggled.connect(self._toggle_google_sync)
-        # Set after addWidget: re-parenting resets visibility to hidden.
-        self.google_button.setVisible(google_sync_enabled)
-
-        self.auto_update_check = QCheckBox("Auto Update")
-        self.auto_update_check.setChecked(load_auto_update_preference())
-        self.auto_update_check.clicked.connect(self._toggle_auto_update)
-
-        settings_layout.addWidget(self.close_to_tray_toggle)
-        settings_layout.addWidget(self.google_sync_toggle)
-        settings_layout.addWidget(self.auto_update_check)
+        self.profile_hint.clicked.connect(self.open_onboarding)
+        left_layout.addWidget(self.profile_hint)
+        self._profile_missing = not PersonaStorageHandler().has_profile()
 
         left_layout.addStretch(1)
+        left_layout.addWidget(self.settings_button)
 
         # right box — chatbot panel (system / friend modes)
         self.chat_panel = ChatPanel(self)
+        self.chat_panel.settings_requested.connect(
+            lambda: self.open_settings(AppSettingsDialog.LLM_TAB)
+        )
 
         layout.addWidget(self._sidebar, stretch=1)
         layout.addWidget(self.chat_panel, stretch=3)
         self._main_layout = layout
 
+        self._general_settings_page = self._build_general_settings_page()
+        self._settings_window = None
+
         self._apply_sidebar_state()
 
         # Start the background watcher if it was enabled during the last session
-        if is_dynamic:
+        if self.theme_toggle.isChecked():
             self.start_dynamic_theming()
 
         # The reminder used to start unconditionally, so merely opening the
@@ -315,6 +247,119 @@ class MainWindow(QMainWindow):
         if self.notifications_check.isChecked():
             self._start_notifier(notify_now=False)
 
+    def _build_general_settings_page(self) -> QWidget:
+        """Build the Settings window's General tab."""
+        self.notifications_check = QCheckBox("Notifications")
+        self.notifications_check.setChecked(load_notifications_enabled())
+        self.notifications_check.setToolTip(
+            "Show the hourly task reminder while THE SYSTEM is running.\n"
+            "Turn this off to stop reminders without changing login autostart."
+        )
+        self.notifications_check.toggled.connect(self._toggle_notifications)
+
+        self.check_box = QCheckBox("Notification AutoStart")
+        self.check_box.setChecked(self.autostart.is_enabled())
+        self.check_box.setToolTip(
+            "Launch the hourly notifier at login.\n"
+            "This is separate from the Notifications option: it does not turn "
+            "reminders on or off while THE SYSTEM is running."
+        )
+        self.check_box.clicked.connect(self.notification_autostart)
+
+        self.sound_button = QPushButton("Notification Sound")
+        self.sound_button.setIcon(get_icon("sound"))
+        self.sound_button.clicked.connect(self.change_notification_sound)
+
+        self.theme_toggle = QCheckBox("Enable Dynamic Theming")
+        self.theme_toggle.setChecked(
+            self.settings.value("dynamic_theming", False, type=bool)
+        )
+        self.theme_toggle.clicked.connect(self.on_theme_toggle_changed)
+
+        self.profile_button = QPushButton("Edit Player Profile")
+        self.profile_button.setIcon(get_icon("profile"))
+        self.profile_button.clicked.connect(self._edit_profile_from_settings)
+
+        self.close_to_tray_toggle = QCheckBox("Close to System Tray")
+        self.close_to_tray_toggle.setChecked(self.close_to_tray_enabled)
+        self.close_to_tray_toggle.setEnabled(self.tray_icon is not None)
+        if self.tray_icon is None:
+            self.close_to_tray_toggle.setToolTip(
+                "System tray is not available in this desktop session."
+            )
+        self.close_to_tray_toggle.toggled.connect(self._toggle_close_to_tray)
+
+        self.google_sync_toggle = QCheckBox("Google Tasks Sync")
+        self.google_sync_toggle.setChecked(
+            self.settings.value("google_sync_enabled", False, type=bool)
+        )
+        self.google_sync_toggle.setToolTip(
+            "Show the Google button to import Google Tasks as quests.\n"
+            "Sign-in currently works only for Google accounts added as "
+            "test users on the app's Google OAuth client."
+        )
+        self.google_sync_toggle.toggled.connect(self._toggle_google_sync)
+
+        self.auto_update_check = QCheckBox("Auto Update")
+        self.auto_update_check.setChecked(load_auto_update_preference())
+        self.auto_update_check.clicked.connect(self._toggle_auto_update)
+
+        self.install_desktop_btn = QPushButton("Install App")
+        self.install_desktop_btn.setIcon(get_icon("install"))
+        self.install_desktop_btn.clicked.connect(self.install_desktop_shortcut)
+
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setSpacing(SIDEBAR_SPACING)
+
+        sections = (
+            ("Notifications", (self.notifications_check, self.check_box, self.sound_button)),
+            ("Appearance", (self.theme_toggle,)),
+            ("Player", (self.profile_button,)),
+            (
+                "App",
+                (
+                    self.close_to_tray_toggle,
+                    self.auto_update_check,
+                    self.google_sync_toggle,
+                    self.install_desktop_btn,
+                ),
+            ),
+        )
+        for index, (title, widgets) in enumerate(sections):
+            if index:
+                page_layout.addSpacing(SETTINGS_SECTION_GAP)
+            heading = QLabel(title)
+            heading.setObjectName("settingsHeading")
+            page_layout.addWidget(heading)
+            for widget in widgets:
+                if isinstance(widget, QPushButton):
+                    widget.setFixedHeight(SIDEBAR_BUTTON_SIZE)
+                    widget.setCursor(Qt.PointingHandCursor)
+                page_layout.addWidget(widget, alignment=Qt.AlignmentFlag.AlignLeft)
+        page_layout.addStretch(1)
+
+        # Installing only works from an AppImage; elsewhere it can only fail.
+        # Set after addWidget: re-parenting resets visibility to hidden.
+        self.install_desktop_btn.setVisible(bool(os.environ.get("APPIMAGE")))
+
+        return page
+
+    def open_settings(self, tab: int = AppSettingsDialog.GENERAL_TAB) -> None:
+        if self._settings_window is None:
+            self._settings_window = AppSettingsDialog(self._general_settings_page, self)
+            self._settings_window.llm_saved.connect(self.chat_panel.reload_llm_settings)
+            self.chat_panel.busy_changed.connect(
+                lambda busy: self._settings_window.set_llm_available(not busy)
+            )
+        self._settings_window.set_llm_available(not self.chat_panel.is_busy())
+        self._settings_window.show_tab(tab)
+
+    def _edit_profile_from_settings(self) -> None:
+        # Settings is application-modal, so it has to close for the wizard to be usable.
+        self._settings_window.accept()
+        self.open_onboarding()
+
     def _toggle_sidebar(self) -> None:
         self.sidebar_collapsed = not self.sidebar_collapsed
         self.settings.setValue("sidebar_collapsed", self.sidebar_collapsed)
@@ -324,7 +369,7 @@ class MainWindow(QMainWindow):
     def _apply_sidebar_state(self) -> None:
         """Show the full sidebar, or shrink it to a rail of icon buttons."""
         collapsed = self.sidebar_collapsed
-        self._sidebar_settings.setVisible(not collapsed)
+        self._update_profile_hint()
 
         for button, label in self._sidebar_labels.items():
             self._set_sidebar_button_label(button, label)
@@ -340,9 +385,9 @@ class MainWindow(QMainWindow):
             )
             self._sidebar_layout.setContentsMargins(
                 left_margin,
-                SIDEBAR_TOP_MARGIN,
+                SIDEBAR_VERTICAL_MARGIN,
                 SIDEBAR_RAIL_RIGHT_MARGIN,
-                SIDEBAR_BOTTOM_MARGIN,
+                SIDEBAR_VERTICAL_MARGIN,
             )
             self._sidebar.setFixedWidth(
                 left_margin + SIDEBAR_BUTTON_SIZE + SIDEBAR_RAIL_RIGHT_MARGIN
@@ -351,7 +396,7 @@ class MainWindow(QMainWindow):
             self._main_layout.setStretch(1, 1)
         else:
             self._sidebar_layout.setContentsMargins(
-                16, SIDEBAR_TOP_MARGIN, 12, SIDEBAR_BOTTOM_MARGIN
+                16, SIDEBAR_VERTICAL_MARGIN, 12, SIDEBAR_VERTICAL_MARGIN
             )
             self._sidebar.setMinimumWidth(0)
             self._sidebar.setMaximumWidth(UNCONSTRAINED_WIDTH)
@@ -359,13 +404,6 @@ class MainWindow(QMainWindow):
             self._main_layout.setStretch(1, 3)
 
         self._sidebar_layout.setStretch(self._rail_top_stretch, 1 if collapsed else 0)
-        self._sidebar_gap.changeSize(
-            0,
-            SIDEBAR_RAIL_BALANCE if collapsed else SIDEBAR_SETTINGS_GAP,
-            QSizePolicy.Policy.Minimum,
-            QSizePolicy.Policy.Fixed,
-        )
-        self._sidebar_layout.invalidate()
 
         action = "Expand" if collapsed else "Collapse"
         self.sidebar_toggle.setIcon(
@@ -373,6 +411,9 @@ class MainWindow(QMainWindow):
         )
         self.sidebar_toggle.setToolTip(f"{action} sidebar (Ctrl+Shift+S)")
         self.sidebar_toggle.setAccessibleName(f"{action} sidebar")
+
+    def _update_profile_hint(self) -> None:
+        self.profile_hint.setVisible(self._profile_missing and not self.sidebar_collapsed)
 
     def _set_sidebar_button_label(self, button: QPushButton, label: str) -> None:
         """Record a button's label; the collapsed rail shows it as a tooltip."""
@@ -479,7 +520,8 @@ class MainWindow(QMainWindow):
             self.onboarding_window = None
         if completed:
             # A profile now exists, so drop the urgency-only explanation.
-            self.profile_hint.setVisible(False)
+            self._profile_missing = False
+            self._update_profile_hint()
 
     def notification_autostart(self):
         self.autostart.toggle()
