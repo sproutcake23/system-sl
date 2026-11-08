@@ -1,4 +1,13 @@
+from system_sl.frontend.gui.icons import set_icon_theme
 from system_sl.utils.theme_gen import DEFAULT_TOKENS
+
+
+def apply_theme(app, tokens=DEFAULT_TOKENS):
+    """Restyle the whole application, including icons, with the given tokens."""
+    # Icons first: restyling repaints every widget, which is what recolours them.
+    set_icon_theme(tokens)
+    app.setStyleSheet(get_stylesheet(tokens))
+
 
 def get_stylesheet(t=DEFAULT_TOKENS):
     """Generates the QSS string dynamically based on the provided token dictionary."""

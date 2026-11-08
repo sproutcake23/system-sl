@@ -1047,7 +1047,7 @@ class ChatPanel(QWidget):
 
         # Remove button
         remove_btn = QPushButton()
-        remove_btn.setIcon(get_icon("remove", color="#9ab8e5", size=14))
+        remove_btn.setIcon(get_icon("remove", role="sys_color_text_secondary", size=14))
         remove_btn.setFixedSize(18, 18)
         remove_btn.setStyleSheet("""
             QPushButton {

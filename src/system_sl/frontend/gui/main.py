@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
 from system_sl.frontend.gui.chat_panel import ChatPanel
 from system_sl.frontend.gui.settings_window import AppSettingsDialog
-from system_sl.frontend.gui.theme import get_stylesheet
+from system_sl.frontend.gui.theme import apply_theme
 from system_sl.frontend.gui.icons import get_icon, initialize_icons
 from system_sl.utils import (
     CrossPlatformAutostart,
@@ -638,7 +638,7 @@ class MainWindow(QMainWindow):
     def stop_dynamic_theming(self):
         self.wallpaper_timer.stop()
         self.last_wallpaper_path = None
-        QApplication.instance().setStyleSheet(get_stylesheet()) # Reset to fallback Theme
+        apply_theme(QApplication.instance()) # Reset to fallback Theme
 
     def check_wallpaper_update(self):
         current_path = get_wallpaper_path()
@@ -650,7 +650,7 @@ class MainWindow(QMainWindow):
             
             # Generate new semantic tokens and inject them into the stylesheet
             new_tokens = generate_dynamic_tokens(expanded_path)
-            QApplication.instance().setStyleSheet(get_stylesheet(new_tokens))
+            apply_theme(QApplication.instance(), new_tokens)
 
     def _toggle_auto_update(self):
         enabled = self.auto_update_check.isChecked()
@@ -715,7 +715,7 @@ def main():
     initialize_icons()
     
     # --- CHANGED: Inject the dynamic stylesheet on launch ---
-    app.setStyleSheet(get_stylesheet())
+    apply_theme(app)
     app.setQuitOnLastWindowClosed(False)
     initialize_application_autostart()
 
@@ -739,7 +739,7 @@ def main():
         current_wall = get_wallpaper_path()
         if current_wall and "Error" not in current_wall:
             expanded_path = os.path.expanduser(current_wall)
-            app.setStyleSheet(get_stylesheet(generate_dynamic_tokens(expanded_path)))
+            apply_theme(app, generate_dynamic_tokens(expanded_path))
 
         view = SystemNotification()
         controller = BackgroundServiceController(view)
