@@ -701,7 +701,27 @@ class MainWindow(QMainWindow):
 #         self.app.quit()
 #         os._exit(0)
 
+def _run_ocr_check():
+    """Handle --check-ocr [report_file] and exit with its result.
+
+    Windows release builds have no console, so the workflow reads the report
+    file and exit code.
+    """
+    from system_sl.chatbot.documents import check_ocr
+
+    ok, details = check_ocr()
+    report = sys.argv[sys.argv.index("--check-ocr") + 1:]
+    if report:
+        with open(report[0], "w", encoding="utf-8") as report_file:
+            report_file.write(details + "\n")
+    print(details)
+    sys.exit(0 if ok else 1)
+
+
 def main():
+    if "--check-ocr" in sys.argv:
+        _run_ocr_check()
+
     # Handle --install-desktop flag before Qt initialization
     if "--install-desktop" in sys.argv:
         return install_desktop_entry()

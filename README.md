@@ -27,7 +27,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 - **NLP Vectorizer** — spaCy-powered persona vectors built from your responses and task history, with temporal decay.
 - **AI Chatbot** — Talk to the System, an AI mentor with task-aware tools, streaming replies, and live markdown. It asks before adding a quest you didn't explicitly request.
 - **Your Choice of Model** — Google Gemini, Ollama, LM Studio, OpenRouter, Groq, Together AI, or any OpenAI-compatible endpoint. Switch models from the chat panel.
-- **Document Attachments** — Attach or drag in a PDF, DOCX, HTML, or text file and review the tasks found in it before they're added. OCR for scanned PDFs currently needs a source install.
+- **Document Attachments** — Attach or drag in a PDF, DOCX, HTML, or text file and review the tasks found in it before they're added. Scanned PDFs are read with OCR.
 - **Google Tasks Sync** — Import your Google Tasks as quests. Opt-in from Settings.
 - **Native Notifications** — Desktop alerts styled like the System, with custom notification sounds.
 - **Background Reminder** — An hourly notifier that keeps you on track, with its own on/off switch.
@@ -108,7 +108,7 @@ uv run build-sl
 
 On first launch, the app asks for your chatbot provider, model, and API key.
 
-To read scanned PDFs, install with `uv sync --extra ocr` and add `tesseract` and `poppler` to your system. Release builds can't read scanned PDFs yet.
+To read scanned PDFs from source, install `tesseract` and `poppler` on your system. Release builds include them.
 
 Source installs don't include the app's Google OAuth client. To use Google Tasks Sync from source, set up your own; see [Google Tasks Sync](https://github.com/sproutcake23/System-SL/wiki/Google-Tasks-Sync#using-your-own-oauth-client).
 

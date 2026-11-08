@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - "v*"
+  # Build and test without publishing, so a packaging change can be checked
+  # before it reaches a tag. Only the release job publishes, and only for tags.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "packaging/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/system_sl/chatbot/documents.py"
+      - "src/system_sl/utils/build.py"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -101,14 +112,12 @@ jobs:
               "tesseract", "pdftoppm", "pdfinfo",
           ]
           missing = [lib for lib in required if lib not in bundled]
-          missing_ocr = [lib for lib in ocr_required if lib not in bundled]
+          missing += [lib for lib in ocr_required if lib not in bundled]
           if "google_oauth_client.json" not in bundled:
               missing.append("google_oauth_client.json")
           if missing:
               raise SystemExit(f"Not bundled: {', '.join(missing)}")
-          if missing_ocr:
-              print(f"Warning: OCR binaries not bundled: {', '.join(missing_ocr)}")
-          print("All Qt xcb libraries and the Google OAuth client are bundled.")
+          print("All Qt xcb libraries, OCR tools and the Google OAuth client are bundled.")
           EOF
 
       - name: Package binary (tar.xz)
@@ -132,6 +141,15 @@ jobs:
           ls "$test_home"/Applications/system-sl-*-x86_64.AppImage
           grep '^Exec=' "$test_home/.local/share/applications/system-sl.desktop"
           test -f "$test_home/.local/share/icons/hicolor/scalable/apps/system-sl.svg"
+
+      # OCR must work from the bundle alone, so hide the build machine's tools.
+      - name: Check OCR works in the frozen builds
+        run: |
+          sudo mv /usr/bin/tesseract /usr/bin/pdftoppm /usr/bin/pdfinfo "$RUNNER_TEMP/"
+          test_home="$RUNNER_TEMP/ocr-home"
+          mkdir -p "$test_home"
+          HOME="$test_home" dist/system-sl --check-ocr
+          HOME="$test_home" dist/system-sl-*-x86_64.AppImage --appimage-extract-and-run --check-ocr
 
       - name: Upload Linux binary
         uses: actions/upload-artifact@v4
@@ -177,6 +195,27 @@ jobs:
           python -c "import json, sys; assert 'installed' in json.load(open(sys.argv[1])), 'not a Desktop app OAuth client'" `
             src/system_sl/assets/google_oauth_client.json
 
+      # Each tool gets its own folder: their DLLs share names but not versions,
+      # and Windows loads the copy next to the executable.
+      - name: Collect OCR tools
+        shell: pwsh
+        run: |
+          choco install tesseract poppler -y --no-progress
+          $tesseract = "C:\Program Files\Tesseract-OCR"
+          $popplerPackage = "C:\ProgramData\chocolatey\lib\poppler"
+          $pdftoppm = Get-ChildItem $popplerPackage -Recurse -Filter pdftoppm.exe | Select-Object -First 1
+          if (-not (Test-Path "$tesseract\tesseract.exe") -or -not $pdftoppm) {
+            Write-Output "::error::Could not find the tesseract and poppler tools."
+            exit 1
+          }
+          New-Item -ItemType Directory -Force ocr-bundle/tesseract, ocr-bundle/tessdata, ocr-bundle/poppler | Out-Null
+          Copy-Item "$tesseract\tesseract.exe", "$tesseract\*.dll" ocr-bundle/tesseract
+          Copy-Item "$tesseract\tessdata\eng.traineddata" ocr-bundle/tessdata
+          $bin = $pdftoppm.Directory.FullName
+          Copy-Item "$bin\pdftoppm.exe", "$bin\pdfinfo.exe", "$bin\*.dll" ocr-bundle/poppler
+          "TESSERACT_DIR=$tesseract" >> $env:GITHUB_ENV
+          "POPPLER_PACKAGE_DIR=$popplerPackage" >> $env:GITHUB_ENV
+
       - name: Build binary with PyInstaller
         shell: pwsh
         run: |
@@ -184,7 +223,25 @@ jobs:
             --collect-data spellchecker `
             --add-data "src/system_sl/assets;assets" `
             --collect-all en_core_web_md `
+            --add-data "ocr-bundle;ocr" `
+            --hidden-import pytesseract `
+            --hidden-import pdf2image `
+            --hidden-import pdf2image.pdf2image `
             src/system_sl/frontend/gui/main.py
+
+      # OCR must work from the bundle alone, so hide the build machine's tools.
+      - name: Check OCR works in the frozen build
+        shell: pwsh
+        run: |
+          Rename-Item $env:TESSERACT_DIR "$env:TESSERACT_DIR-hidden"
+          Rename-Item $env:POPPLER_PACKAGE_DIR "$env:POPPLER_PACKAGE_DIR-hidden"
+          $report = Join-Path $env:RUNNER_TEMP "ocr-report.txt"
+          $run = Start-Process dist/system-sl.exe -ArgumentList "--check-ocr", "`"$report`"" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if ($run.ExitCode -ne 0) {
+            Write-Output "::error::OCR check failed with exit code $($run.ExitCode)."
+            exit 1
+          }
 
       - name: Package binary (zip)
         shell: pwsh
@@ -225,6 +282,7 @@ jobs:
 
   release:
     needs: [build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
     steps:

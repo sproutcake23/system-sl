@@ -6,6 +6,7 @@ binary equivalent to the published one. Keep the two in sync.
 """
 
 import glob
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,14 +27,35 @@ def _tessdata_dir() -> str | None:
     return None
 
 
+def _ocr_binary_args() -> list[str]:
+    """Return the PyInstaller arguments that bundle tesseract and poppler."""
+    if os.name == "nt":
+        # release.yml collects the Windows tools; see "Collect OCR tools" there.
+        print(
+            "[build] WARNING: OCR tools are not bundled on Windows by this script",
+            file=sys.stderr,
+        )
+        return []
+
+    # These are not Python packages, so we use --add-binary
+    args = []
+    for binary in ("tesseract", "pdftoppm", "pdfinfo"):
+        args += ["--add-binary", f"/usr/bin/{binary}:."]
+
+    # tessdata directory (tesseract language data)
+    tessdata_dir = _tessdata_dir()
+    if tessdata_dir is None:
+        print(
+            "[build] WARNING: tessdata not found; OCR language data will be missing",
+            file=sys.stderr,
+        )
+    else:
+        args += ["--add-data", f"{tessdata_dir}:tessdata"]
+    return args
+
+
 def main():
     project_root = Path(__file__).parent.parent.parent.parent
-
-    # System binaries for OCR support (tesseract + poppler)
-    # These are not Python packages, so we use --add-binary
-    tesseract_bin = "/usr/bin/tesseract"
-    pdftoppm_bin = "/usr/bin/pdftoppm"
-    pdfinfo_bin = "/usr/bin/pdfinfo"
 
     command = [
         sys.executable, "-m", "PyInstaller",
@@ -51,23 +73,7 @@ def main():
         # SSL CERTIFICATE_VERIFY_FAILED when fetching models. Ship
         # certifi so urllib/requests can verify HTTPS certificates.
         "--collect-all", "certifi",
-        # OCR support: system binaries (tesseract + poppler utilities)
-        "--add-binary", f"{tesseract_bin}:.",
-        "--add-binary", f"{pdftoppm_bin}:.",
-        "--add-binary", f"{pdfinfo_bin}:.",
-    ]
-
-    # tessdata directory (tesseract language data)
-    tessdata_dir = _tessdata_dir()
-    if tessdata_dir is None:
-        print(
-            "[build] WARNING: tessdata not found; OCR language data will be missing",
-            file=sys.stderr,
-        )
-    else:
-        command += ["--add-data", f"{tessdata_dir}:tessdata"]
-
-    command += [
+        *_ocr_binary_args(),
         # Python modules for OCR
         "--hidden-import", "pytesseract",
         "--hidden-import", "pdf2image",
