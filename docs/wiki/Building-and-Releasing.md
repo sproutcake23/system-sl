@@ -12,7 +12,7 @@ This invokes PyInstaller to produce a single one-file executable named `system-s
 
 - `--windowed --noconsole` — no terminal window on launch
 - Bundles `assets/`, the spaCy model, and the spellchecker dictionary
-- Bundles the `tesseract` and `poppler` binaries from `/usr/bin`, so install them on the build machine first. The script therefore expects Linux
+- On Linux, bundles the `tesseract` and `poppler` binaries from `/usr/bin`, so install them first. On Windows, this script skips OCR; the release workflow collects those tools itself
 - Entry point: `system_sl/frontend/gui/main.py`
 
 The result is a self-contained binary for your current OS.
@@ -44,6 +44,8 @@ The tag triggers the workflow, which builds on Linux and Windows and publishes a
 - `SHA256SUMS.txt`
 
 Users with **Auto Update** on receive it at their next launch.
+
+Pull requests that change the build also run the workflow, without publishing anything. Both platforms must pass `--check-ocr`, which reads a generated scanned PDF using only the tools inside the binary.
 
 ## Google OAuth client
 

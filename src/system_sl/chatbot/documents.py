@@ -7,7 +7,10 @@ and plain text formats (txt, md, csv, etc.).
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import sys
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from html.parser import HTMLParser
@@ -79,8 +82,66 @@ class _TextExtractor(HTMLParser):
 
 
 # ---------------------------------------------------------------------------
-# OCR fallback for scanned PDFs (optional)
+# OCR fallback for scanned PDFs
 # ---------------------------------------------------------------------------
+
+OCR_CHECK_TEXT = "SYSTEM OCR CHECK 4729"
+
+
+def _use_bundled_ocr_tools() -> Optional[str]:
+    """Point OCR at the tools inside a frozen build; return the poppler directory.
+
+    Nothing in the bundle is on PATH, so pytesseract and pdf2image cannot find
+    these on their own. Windows keeps each tool in its own folder because their
+    DLLs share names but not versions. A source install uses the system's tools.
+    """
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle is None:
+        return None
+
+    import pytesseract
+
+    root = Path(bundle)
+    if os.name == "nt":
+        tesseract = root / "ocr" / "tesseract" / "tesseract.exe"
+        tessdata = root / "ocr" / "tessdata"
+        poppler = root / "ocr" / "poppler"
+    else:
+        tesseract = root / "tesseract"
+        tessdata = root / "tessdata"
+        poppler = root
+
+    pytesseract.pytesseract.tesseract_cmd = str(tesseract)
+    # host_env() removes this again for programs launched outside the bundle.
+    os.environ["TESSDATA_PREFIX"] = str(tessdata)
+    return str(poppler)
+
+
+def check_ocr() -> tuple[bool, str]:
+    """Run a generated image-only PDF through extraction; return (ok, details).
+
+    The release workflow calls this through ``--check-ocr``, because a build
+    can contain every OCR file and still be unable to run them.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    image = Image.new("RGB", (1400, 300), "white")
+    ImageDraw.Draw(image).text(
+        (40, 100), OCR_CHECK_TEXT, fill="black", font=ImageFont.load_default(size=72)
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        pdf = Path(directory) / "scanned.pdf"
+        image.save(pdf, "PDF", resolution=150)
+        try:
+            result = extract_document(pdf)
+        except (ExtractionError, UnsupportedFileError) as e:
+            return False, f"OCR check failed: {e}"
+
+    details = f"text={result.text!r} warnings={result.warnings!r}"
+    if OCR_CHECK_TEXT in " ".join(result.text.split()):
+        return True, f"OCR check passed: {details}"
+    return False, f"OCR check failed: {details}"
+
 
 def _extract_pdf_with_ocr(path: Path) -> DocumentText:
     """Extract text from scanned PDF using OCR (requires pytesseract + pdf2image)."""
@@ -94,8 +155,9 @@ def _extract_pdf_with_ocr(path: Path) -> DocumentText:
 
     warnings: list[str] = []
     try:
+        poppler_path = _use_bundled_ocr_tools()
         # Convert PDF pages to images
-        images = convert_from_path(str(path))
+        images = convert_from_path(str(path), poppler_path=poppler_path)
         page_count = len(images)
         text_parts: list[str] = []
         for i, image in enumerate(images):

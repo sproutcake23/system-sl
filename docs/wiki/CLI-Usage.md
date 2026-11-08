@@ -32,6 +32,14 @@ This runs only the hourly task notifier — it never opens the main menu. This i
 
 Moves the AppImage to `~/Applications` and adds a menu entry for it. **Settings → Install App** does the same from inside the running AppImage.
 
+## Checking OCR
+
+```bash
+system-sl --check-ocr [report-file]
+```
+
+Reads a generated scanned PDF and exits with `0` if OCR worked. It prints the result and also writes it to `report-file` if you give one, which is the only way to see it on Windows.
+
 ## Building a standalone executable
 
 ```bash
