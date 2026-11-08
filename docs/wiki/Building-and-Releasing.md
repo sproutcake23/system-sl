@@ -12,7 +12,7 @@ This invokes PyInstaller to produce a single one-file executable named `system-s
 
 - `--windowed --noconsole` — no terminal window on launch
 - Bundles `assets/`, the spaCy model, and the spellchecker dictionary
-- Bundles `tesseract` and `poppler` for OCR from `/usr/bin`, so install them on the build machine first. The script therefore expects Linux; the Windows release is built by the workflow without OCR
+- Bundles the `tesseract` and `poppler` binaries from `/usr/bin`, so install them on the build machine first. The script therefore expects Linux
 - Entry point: `system_sl/frontend/gui/main.py`
 
 The result is a self-contained binary for your current OS.

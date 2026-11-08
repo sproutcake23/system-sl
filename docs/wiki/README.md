@@ -27,7 +27,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 - **NLP Vectorizer** — spaCy-powered persona vectors built from your responses and task history, with temporal decay.
 - **AI Chatbot** — Talk to the System, an AI mentor with task-aware tools, streaming replies, and live markdown. It asks before adding a quest you didn't explicitly request.
 - **Your Choice of Model** — Google Gemini, Ollama, LM Studio, OpenRouter, Groq, Together AI, or any OpenAI-compatible endpoint. Switch models from the chat panel.
-- **Document Attachments** — Attach or drag in a PDF, DOCX, HTML, or text file and review the tasks found in it before they're added. Scanned PDFs fall back to OCR on Linux builds and on source installs with `tesseract` and `poppler`.
+- **Document Attachments** — Attach or drag in a PDF, DOCX, HTML, or text file and review the tasks found in it before they're added. OCR for scanned PDFs currently needs a source install.
 - **Google Tasks Sync** — Import your Google Tasks as quests. Opt-in from Settings.
 - **Native Notifications** — Desktop alerts styled like the System, with custom notification sounds.
 - **Background Reminder** — An hourly notifier that keeps you on track, with its own on/off switch.

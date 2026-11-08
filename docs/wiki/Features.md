@@ -78,7 +78,7 @@ Click the paperclip or drag a file onto the chat panel, then ask the SYSTEM to p
 | HTML | `.html`, `.htm` |
 | Text | `.txt`, `.md`, `.csv`, `.log`, `.json`, `.xml`, `.rst`, `.tex` |
 
-Scanned PDFs fall back to OCR. Linux release builds include it, but Windows builds don't yet. From source, it needs `tesseract` and `poppler` installed on your system. Text from each document is limited to 40,000 characters.
+Scanned PDFs need OCR, which currently works only on a source install: run `uv sync --extra ocr` and install `tesseract` and `poppler` on your system. Release builds can still read PDFs that contain text. Text from each document is limited to 40,000 characters.
 
 ## Google Tasks Sync
 

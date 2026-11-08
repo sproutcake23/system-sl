@@ -48,7 +48,7 @@ uv run system-sl
 
 `uv sync` installs all dependencies automatically, including the spaCy model `en_core_web_md` pinned in `pyproject.toml`.
 
-To read scanned PDFs attached in chat, also install `tesseract` and `poppler` with your system's package manager. Linux release builds already include them; Windows builds don't have OCR yet.
+To read scanned PDFs attached in chat, run `uv sync --extra ocr` and install `tesseract` and `poppler` with your system's package manager. Release builds can't read scanned PDFs yet.
 
 ## First launch
 
