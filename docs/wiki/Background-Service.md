@@ -42,6 +42,11 @@ A user upgrading from a version without `notifications_enabled` falls back to
 their autostart setting, so someone who had autostart off does not suddenly
 start receiving reminders.
 
+Only one notifier runs per user. It takes a lock file in the data directory, so
+the GUI and a `--bg` process cannot both deliver the same reminder. A process
+without the lock skips its notifications and takes over on its next tick if the
+holder exits.
+
 ## Custom notification sounds
 
 Place `.mp3` or `.wav` files in the `sounds/` folder inside the system-sl data directory:

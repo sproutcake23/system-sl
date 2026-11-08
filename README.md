@@ -15,20 +15,28 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
   <tr>
     <td align="center"><img src="src/system_sl/assets/chat.gif" width="240" alt="Chat"/><br/><em>Chat</em></td>
     <td align="center"><img src="src/system_sl/assets/notification.gif" width="240" alt="System notification"/><br/><em>System notification</em></td>
+    <td align="center"><img src="src/system_sl/assets/settings.gif" width="240" alt="Settings window"/><br/><em>Settings</em></td>
   </tr>
 </table>
 
 ## Features
 
-- **Persona Builder** — A 10-step onboarding process that builds your Player Profile from your real-world ambitions.
-- **Task Management** — Add, complete, and reorder quests with deadlines and categories.
-- **Google Tasks Sync** — Import your Google Tasks as quests. Opt-in from Settings.
-- **Native Notifications** — Desktop alerts styled like the System, with custom notification sounds.
-- **AI Chatbot** — Talk to the System, an AI mentor powered by Gemini with task-aware tools, plus a friendly companion persona.
+- **Persona Builder** — An optional 10-step onboarding process that builds your Player Profile from your real-world ambitions. Edit it any time from Settings.
+- **Task Management** — Add, edit, complete, and drag to reorder quests with deadlines. Your reordering also trains the ranking.
 - **Priority Engine** — Context-aware scoring (PRESSURE / GROWTH / RECOVERY) of what to work on next.
 - **NLP Vectorizer** — spaCy-powered persona vectors built from your responses and task history, with temporal decay.
-- **Background Reminder** — A persistent hourly notifier that keeps you on track.
+- **AI Chatbot** — Talk to the System, an AI mentor with task-aware tools, streaming replies, and live markdown. It asks before adding a quest you didn't explicitly request.
+- **Your Choice of Model** — Google Gemini, Ollama, LM Studio, OpenRouter, Groq, Together AI, or any OpenAI-compatible endpoint. Switch models from the chat panel.
+- **Document Attachments** — Attach or drag in a PDF, DOCX, HTML, or text file and review the tasks found in it before they're added. Scanned PDFs fall back to OCR on Linux builds and on source installs with `tesseract` and `poppler`.
+- **Google Tasks Sync** — Import your Google Tasks as quests. Opt-in from Settings.
+- **Native Notifications** — Desktop alerts styled like the System, with custom notification sounds.
+- **Background Reminder** — An hourly notifier that keeps you on track, with its own on/off switch.
 - **Cross-Platform Autostart** — Register the notifier on Linux, Windows, or macOS.
+- **Dynamic Theming** — Optionally match the app's colors to your wallpaper.
+- **Tabbed Settings and Collapsible Sidebar** — All options live in one Settings window, and `Ctrl+Shift+S` shrinks the sidebar to a rail of icons.
+- **System Tray** — Optionally keep the app running in the tray when you close the window.
+- **Auto Update** — Optionally install new releases at launch, verified against their published SHA-256 checksums.
+- **Secure Key Storage** — API keys and Google tokens are kept in your system keyring, or an encrypted file if none is available.
 
 ## Installation
 
@@ -45,11 +53,11 @@ chmod +x system-sl-*.AppImage
 
 | Method | Command | Notes |
 |--------|---------|-------|
-| **Built-in (Recommended)** | `./system-sl-*.AppImage --install-desktop` | Creates `.desktop` entry automatically, no extra tools |
+| **Built-in (Recommended)** | `./system-sl-*.AppImage --install-desktop` | Moves the AppImage to `~/Applications` and adds a menu entry, no extra tools |
 | **AppImageLauncher** | Download from [GitHub](https://github.com/TheAssassin/AppImageLauncher/releases) | GUI tool, file manager integration, update management |
 | **Gear Lever** | `flatpak install flathub it.mijorus.gearlever` | Modern AppImage manager, requires Flatpak |
 
-The built-in `--install-desktop` flag creates a menu entry pointing to your AppImage location. Run it once after downloading:
+Run the built-in `--install-desktop` once after downloading, or use **Settings → Install App** from inside the running AppImage:
 
 ```bash
 chmod +x system-sl-*.AppImage
@@ -70,6 +78,8 @@ This creates:
 Download `system-sl-windows.zip` (Windows) or `system-sl-linux.tar.xz` (Linux) from [GitHub Releases](https://github.com/sproutcake23/System-SL/releases).
 
 Extract and run `system-sl.exe` / `system-sl` directly.
+
+Every release also publishes `SHA256SUMS.txt` so you can verify your download.
 
 ### Option 4: From Source (Development)
 
@@ -95,6 +105,10 @@ Build a standalone executable:
 ```bash
 uv run build-sl
 ```
+
+On first launch, the app asks for your chatbot provider, model, and API key.
+
+OCR for scanned PDFs is bundled with Linux release builds, but not Windows ones. From source, it needs `tesseract` and `poppler` installed on your system.
 
 Source installs don't include the app's Google OAuth client. To use Google Tasks Sync from source, set up your own; see [Google Tasks Sync](https://github.com/sproutcake23/System-SL/wiki/Google-Tasks-Sync#using-your-own-oauth-client).
 
