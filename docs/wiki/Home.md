@@ -6,15 +6,17 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 
 ## Screenshots
 
-![Main menu](https://github.com/sproutcake23/System-SL/blob/main/assets/main.gif?raw=true)
+![Main menu](https://github.com/sproutcake23/System-SL/blob/main/src/system_sl/assets/main.gif?raw=true)
 
-![Task manager](https://github.com/sproutcake23/System-SL/blob/main/assets/tasks.gif?raw=true)
+![Task manager](https://github.com/sproutcake23/System-SL/blob/main/src/system_sl/assets/tasks.gif?raw=true)
 
-![Onboarding wizard](https://github.com/sproutcake23/System-SL/blob/main/assets/onboarding.gif?raw=true)
+![Onboarding wizard](https://github.com/sproutcake23/System-SL/blob/main/src/system_sl/assets/onboarding.gif?raw=true)
 
-![Chat](https://github.com/sproutcake23/System-SL/blob/main/assets/chat.gif?raw=true)
+![Chat](https://github.com/sproutcake23/System-SL/blob/main/src/system_sl/assets/chat.gif?raw=true)
 
-![System notification](https://github.com/sproutcake23/System-SL/blob/main/assets/notification.gif?raw=true)
+![System notification](https://github.com/sproutcake23/System-SL/blob/main/src/system_sl/assets/notification.gif?raw=true)
+
+![Settings window](https://github.com/sproutcake23/System-SL/blob/main/src/system_sl/assets/settings.gif?raw=true)
 
 ## Pages
 
@@ -24,4 +26,3 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 - [CLI Usage](CLI-Usage)
 - [Background Service](Background-Service)
 - [Building and Releasing](Building-and-Releasing)
-- [README](README)

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 from PySide6.QtGui import QRegularExpressionValidator, QColor
+from system_sl.frontend.gui.icons import get_icon
 from system_sl.core.onboarding import ONBOARDING_QUESTIONS, PersonaStorageHandler
 from system_sl.core.tasks import (
     add_tasks,
@@ -100,11 +101,17 @@ class TasksWindow(QWidget):
         root.addWidget(self.tasks_list_widget, stretch=1)
 
         action_row = QHBoxLayout()
-        self.complete_button = QPushButton("Mark complete")
+        self.complete_button = QPushButton()
+        self.complete_button.setIcon(get_icon("complete"))
+        self.complete_button.setText("Mark Complete")
         self.complete_button.clicked.connect(self._on_complete)
-        self.remove_button = QPushButton("Remove")
+        self.remove_button = QPushButton()
+        self.remove_button.setIcon(get_icon("remove_task"))
+        self.remove_button.setText("Remove")
         self.remove_button.clicked.connect(self._on_remove)
-        self.edit_button = QPushButton("Edit")
+        self.edit_button = QPushButton()
+        self.edit_button.setIcon(get_icon("edit"))
+        self.edit_button.setText("Edit")
         self.edit_button.clicked.connect(self._on_edit)
         action_row.addWidget(self.complete_button)
         action_row.addWidget(self.remove_button)
@@ -127,7 +134,9 @@ class TasksWindow(QWidget):
         self.deadline_edit.setEnabled(False)
         self.deadline_checkbox.toggled.connect(self.deadline_edit.setEnabled)
 
-        self.add_button = QPushButton("Add")
+        self.add_button = QPushButton()
+        self.add_button.setIcon(get_icon("add"))
+        self.add_button.setText("Add")
         self.add_button.clicked.connect(self._on_add)
         add_row.addWidget(self.title_input)
         add_row.addWidget(self.deadline_checkbox)
@@ -440,9 +449,13 @@ class OnboardingWindow(QWidget):
         layout.addStretch(1)
 
         button_row = QHBoxLayout()
-        begin_btn = QPushButton("Begin")
+        begin_btn = QPushButton()
+        begin_btn.setIcon(get_icon("begin"))
+        begin_btn.setText("Begin")
         begin_btn.clicked.connect(self._on_begin)
-        skip_btn = QPushButton("Skip")
+        skip_btn = QPushButton()
+        skip_btn.setIcon(get_icon("skip"))
+        skip_btn.setText("Skip")
         skip_btn.clicked.connect(self._on_skip)
         button_row.addStretch(1)
         button_row.addWidget(begin_btn)
@@ -499,7 +512,9 @@ class OnboardingWindow(QWidget):
 
         layout.addStretch(1)
 
-        self.next_button = QPushButton("Next")
+        self.next_button = QPushButton()
+        self.next_button.setIcon(get_icon("next"))
+        self.next_button.setText("Next")
         self.next_button.setEnabled(False)
         self.next_button.setMinimumHeight(36)
         self.next_button.clicked.connect(self._on_next)
@@ -532,7 +547,9 @@ class OnboardingWindow(QWidget):
 
         layout.addStretch(1)
 
-        finish_btn = QPushButton("Begin Journey")
+        finish_btn = QPushButton()
+        finish_btn.setIcon(get_icon("finish"))
+        finish_btn.setText("Begin Journey")
         finish_btn.setMinimumHeight(36)
         finish_btn.clicked.connect(self._on_finish)
         layout.addWidget(finish_btn)
@@ -672,7 +689,7 @@ class BatchProposalDialog(QDialog):
         # Table widget
         self.table = QTableWidget()
         self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["✓", "Task Title", "Category", "Deadline (YYYY-MM-DD)"])
+        self.table.setHorizontalHeaderLabels(["", "Task Title", "Category", "Deadline (YYYY-MM-DD)"])
         self.table.setRowCount(len(tasks))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked)
@@ -683,6 +700,11 @@ class BatchProposalDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(True)
+
+        # Set checkbox column header icon
+        header_item = QTableWidgetItem()
+        header_item.setIcon(get_icon("complete", size=14))
+        self.table.setHorizontalHeaderItem(0, header_item)
 
         # Deadline validator
         deadline_validator = QRegularExpressionValidator(QRegularExpression(r"^\d{4}-\d{2}-\d{2}$|^$"))
@@ -718,7 +740,7 @@ class BatchProposalDialog(QDialog):
                     item = self.table.item(row, col)
                     if item:
                         item.setBackground(QColor("#5a3a3a"))  # Reddish tint for duplicates
-                        item.setToolTip("⚠ Task with this title already exists — adding will update its deadline")
+                        item.setToolTip("Task with this title already exists — adding will update its deadline")
 
         root.addWidget(self.table, stretch=1)
 
@@ -726,11 +748,15 @@ class BatchProposalDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
 
-        self.select_all_btn = QPushButton("Select All")
+        self.select_all_btn = QPushButton()
+        self.select_all_btn.setIcon(get_icon("select_all"))
+        self.select_all_btn.setText("Select All")
         self.select_all_btn.clicked.connect(self._select_all)
         btn_row.addWidget(self.select_all_btn)
 
-        self.deselect_all_btn = QPushButton("Deselect All")
+        self.deselect_all_btn = QPushButton()
+        self.deselect_all_btn.setIcon(get_icon("deselect_all"))
+        self.deselect_all_btn.setText("Deselect All")
         self.deselect_all_btn.clicked.connect(self._deselect_all)
         btn_row.addWidget(self.deselect_all_btn)
 
@@ -739,7 +765,9 @@ class BatchProposalDialog(QDialog):
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.button_box.accepted.connect(self._on_accept)
         self.button_box.rejected.connect(self.reject)
-        self.button_box.button(QDialogButtonBox.Ok).setText("Add Selected Tasks")
+        ok_btn = self.button_box.button(QDialogButtonBox.Ok)
+        ok_btn.setIcon(get_icon("confirm_add"))
+        ok_btn.setText("Add Selected Tasks")
         btn_row.addWidget(self.button_box)
 
         root.addLayout(btn_row)

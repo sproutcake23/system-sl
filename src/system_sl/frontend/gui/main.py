@@ -25,7 +25,7 @@ def install_desktop_entry() -> int:
     print(f"   Menu entry: {DESKTOP_FILE}")
     return 0
 from PySide6.QtCore import QSize, QTimer, QSettings, QFileSystemWatcher, Qt, Slot, QObject, QThread, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -45,7 +45,13 @@ from PySide6.QtWidgets import (
 )
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
 from system_sl.frontend.gui.chat_panel import ChatPanel
-from system_sl.frontend.gui.theme import get_stylesheet, get_tokens_for_mode
+from system_sl.frontend.gui.settings_window import AppSettingsDialog
+from system_sl.frontend.gui.theme import (
+    apply_theme,
+    get_current_theme_tokens,
+    get_tokens_for_mode,
+)
+from system_sl.frontend.gui.icons import get_icon, initialize_icons
 from system_sl.utils import (
     CrossPlatformAutostart,
     SystemNotification,
@@ -95,6 +101,25 @@ class _GoogleSyncWorker(QObject):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+SIDEBAR_BUTTON_SIZE = 34
+SIDEBAR_RAIL_RIGHT_MARGIN = 4
+# Top and bottom match the chat panel, lining the toggle and the Settings button
+# up with its header and input rows.
+SIDEBAR_VERTICAL_MARGIN = 9
+SIDEBAR_SPACING = 10
+SETTINGS_SECTION_GAP = 12
+UNCONSTRAINED_WIDTH = 16777215  # QWIDGETSIZE_MAX
+
+
+class _ClickableLabel(QLabel):
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -129,42 +154,125 @@ class MainWindow(QMainWindow):
         self.close_to_tray_enabled = self.settings.value(
             "close_to_tray", False, type=bool
         )
+        self.sidebar_collapsed = self.settings.value(
+            "sidebar_collapsed", False, type=bool
+        )
         self.tray_icon = None
         self._setup_tray_icon()
 
         main_container = QWidget()
         self.setCentralWidget(main_container)
         layout = QHBoxLayout(main_container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        # left box
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
+        # left box (collapsible sidebar)
+        self._sidebar = QWidget()
+        self._sidebar_layout = QVBoxLayout(self._sidebar)
+        left_layout = self._sidebar_layout
+        left_layout.setSpacing(SIDEBAR_SPACING)
 
-        task_button = QPushButton("Tasks")
-        task_button.clicked.connect(self.open_tasks_window)
+        self.sidebar_toggle = QPushButton()
+        self.sidebar_toggle.setObjectName("sidebarToggle")
+        self.sidebar_toggle.setFixedSize(SIDEBAR_BUTTON_SIZE, SIDEBAR_BUTTON_SIZE)
+        self.sidebar_toggle.setCursor(Qt.PointingHandCursor)
+        self.sidebar_toggle.clicked.connect(self._toggle_sidebar)
+        left_layout.addWidget(self.sidebar_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self._toggle_sidebar)
+
+        self.task_button = QPushButton("Tasks")
+        self.task_button.setIcon(get_icon("tasks"))
+        self.task_button.clicked.connect(self.open_tasks_window)
 
         self.google_button = QPushButton("Google")
+        self.google_button.setIcon(get_icon("google"))
         self.google_button.clicked.connect(self.sync_google_tasks)
 
-        sound_button = QPushButton("Set Notification Sound")
-        sound_button.clicked.connect(self.change_notification_sound)
+        self.settings_button = QPushButton("Settings")
+        self.settings_button.setIcon(get_icon("settings"))
+        self.settings_button.clicked.connect(lambda: self.open_settings())
 
-        install_desktop_btn = QPushButton("Install App")
-        install_desktop_btn.clicked.connect(self.install_desktop_shortcut)
+        # These stay visible in the collapsed rail, reduced to their icons.
+        self._sidebar_labels = {}
+        for btn in (self.task_button, self.google_button, self.settings_button):
+            btn.setFixedHeight(SIDEBAR_BUTTON_SIZE)
+            btn.setCursor(Qt.PointingHandCursor)
+            self._sidebar_labels[btn] = btn.text()
+            btn.setAccessibleName(btn.text())
 
-        profile_button = QPushButton("Edit Player Profile")
-        profile_button.clicked.connect(self.open_onboarding)
+        left_layout.addWidget(self.task_button)
+        left_layout.addWidget(self.google_button)
 
-        self.check_box = QCheckBox("Notification AutoStart")
-        initial_state = self.autostart.is_enabled()
-        self.check_box.setChecked(initial_state)
-        self.check_box.setToolTip(
-            "Launch the hourly notifier at login.\n"
-            "This is separate from Notifications below: it does not turn "
-            "reminders on or off while THE SYSTEM is running."
+        # Google sign-in only works for accounts allowed on the OAuth client,
+        # so the sync button stays hidden until the player opts in.
+        # Set after addWidget: re-parenting resets visibility to hidden.
+        self.google_button.setVisible(
+            self.settings.value("google_sync_enabled", False, type=bool)
         )
-        self.check_box.clicked.connect(self.notification_autostart)
 
+        # Profile hint
+        self.profile_hint = _ClickableLabel(
+            "No player profile — tasks are ranked by urgency only. "
+            "<u>Set up a profile</u>"
+        )
+        self.profile_hint.setTextFormat(Qt.TextFormat.RichText)
+        self.profile_hint.setCursor(Qt.PointingHandCursor)
+        self.profile_hint.setWordWrap(True)
+        self.profile_hint.setObjectName("profileHint")
+        # A wrapped label in a QVBoxLayout otherwise expands to absorb all
+        # spare vertical space and stretches the whole column.
+        self.profile_hint.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self.profile_hint.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        self.profile_hint.clicked.connect(self.open_onboarding)
+        left_layout.addWidget(self.profile_hint)
+        self._profile_missing = not PersonaStorageHandler().has_profile()
+
+        left_layout.addStretch(1)
+        left_layout.addWidget(self.settings_button)
+
+        # right box — chatbot panel (system / friend modes)
+        self.chat_panel = ChatPanel(self)
+        self.chat_panel.settings_requested.connect(
+            lambda: self.open_settings(AppSettingsDialog.LLM_TAB)
+        )
+
+        layout.addWidget(self._sidebar, stretch=1)
+        layout.addWidget(self.chat_panel, stretch=3)
+        self._main_layout = layout
+
+        self._general_settings_page = self._build_general_settings_page()
+        self._settings_window = None
+
+        self._apply_sidebar_state()
+
+        # Restore the saved theme mode and apply it. Older versions stored a
+        # ``dynamic_theming`` boolean instead of ``theme_mode``; carry it over.
+        saved_mode = self.settings.value("theme_mode", None, type=str)
+        if not saved_mode:
+            saved_mode = (
+                "dynamic"
+                if self.settings.value("dynamic_theming", False, type=bool)
+                else "default"
+            )
+            self.settings.setValue("theme_mode", saved_mode)
+        self._current_theme_mode = saved_mode
+        self._apply_theme_mode(self._current_theme_mode, save=False)
+
+        # The reminder used to start unconditionally, so merely opening the
+        # app produced a popup even with autostart off. Start it only when the
+        # user asked for reminders, and never fire at launch: the hourly timer
+        # owns the schedule. (--bg still notifies immediately; that run exists
+        # to deliver the login reminder.)
+        if self.notifications_check.isChecked():
+            self._start_notifier(notify_now=False)
+
+    def _build_general_settings_page(self) -> QWidget:
+        """Build the Settings window's General tab."""
         self.notifications_check = QCheckBox("Notifications")
         self.notifications_check.setChecked(load_notifications_enabled())
         self.notifications_check.setToolTip(
@@ -173,13 +281,31 @@ class MainWindow(QMainWindow):
         )
         self.notifications_check.toggled.connect(self._toggle_notifications)
 
-        # --- NEW: Themes button (Default / Light / Dark / Dynamic menu) ---
+        self.check_box = QCheckBox("Notification AutoStart")
+        self.check_box.setChecked(self.autostart.is_enabled())
+        self.check_box.setToolTip(
+            "Launch the hourly notifier at login.\n"
+            "This is separate from the Notifications option: it does not turn "
+            "reminders on or off while THE SYSTEM is running."
+        )
+        self.check_box.clicked.connect(self.notification_autostart)
+
+        self.sound_button = QPushButton("Notification Sound")
+        self.sound_button.setIcon(get_icon("sound"))
+        self.sound_button.clicked.connect(self.change_notification_sound)
+
+        # Theme picker: a menu button because the four modes are mutually
+        # exclusive (Default / Light / Dark / Dynamic).
         self.theme_button = QPushButton("Themes")
-        self.theme_button.setToolTip("Choose a theme: Default, Light, Dark or Dynamic")
+        self.theme_button.setIcon(get_icon("dynamic_theme"))
+        self.theme_button.setToolTip(
+            "Choose a theme: Default, Light, Dark or Dynamic.\n"
+            "Dynamic follows the wallpaper via Aether, or the built-in palette."
+        )
         self.theme_menu = QMenu(self)
         self.theme_action_group = QActionGroup(self)
         self.theme_action_group.setExclusive(True)
-
+        self.theme_mode_actions = {}
         for mode, label in (
             ("default", "Default"),
             ("light", "Light"),
@@ -192,41 +318,12 @@ class MainWindow(QMainWindow):
             action.triggered.connect(self.on_theme_action_triggered)
             self.theme_action_group.addAction(action)
             self.theme_menu.addAction(action)
-
+            self.theme_mode_actions[mode] = action
         self.theme_button.setMenu(self.theme_menu)
 
-        left_layout.addWidget(task_button)
-        left_layout.addWidget(self.google_button)
-        left_layout.addWidget(sound_button)
-        left_layout.addWidget(install_desktop_btn)
-
-        # Ranking now degrades gracefully without a profile, so a player who
-        # skipped onboarding is no longer blocked from the app. They would
-        # otherwise have no way to learn why their ordering looks flat unless
-        # they happened to open the Tasks window.
-        self.profile_hint = QLabel(
-            "No player profile — tasks are ranked by urgency only."
-        )
-        self.profile_hint.setWordWrap(True)
-        self.profile_hint.setObjectName("profileHint")
-        # A wrapped label in a QVBoxLayout otherwise expands to absorb all
-        # spare vertical space and stretches the whole column.
-        self.profile_hint.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
-        )
-        self.profile_hint.setAlignment(
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
-        )
-        left_layout.addWidget(self.profile_hint)
-        # Set after addWidget: re-parenting resets visibility to hidden.
-        self.profile_hint.setVisible(
-            not PersonaStorageHandler().has_profile()
-        )
-
-        left_layout.addWidget(profile_button)
-        left_layout.addWidget(self.check_box)
-        left_layout.addWidget(self.notifications_check)
-        left_layout.addWidget(self.theme_button) # Added to the left panel UI
+        self.profile_button = QPushButton("Edit Player Profile")
+        self.profile_button.setIcon(get_icon("profile"))
+        self.profile_button.clicked.connect(self._edit_profile_from_settings)
 
         self.close_to_tray_toggle = QCheckBox("Close to System Tray")
         self.close_to_tray_toggle.setChecked(self.close_to_tray_enabled)
@@ -236,49 +333,137 @@ class MainWindow(QMainWindow):
                 "System tray is not available in this desktop session."
             )
         self.close_to_tray_toggle.toggled.connect(self._toggle_close_to_tray)
-        left_layout.addWidget(self.close_to_tray_toggle)
 
-        # Google sign-in only works for accounts allowed on the OAuth client,
-        # so the sync button stays hidden until the player opts in.
-        google_sync_enabled = self.settings.value(
-            "google_sync_enabled", False, type=bool
-        )
         self.google_sync_toggle = QCheckBox("Google Tasks Sync")
-        self.google_sync_toggle.setChecked(google_sync_enabled)
+        self.google_sync_toggle.setChecked(
+            self.settings.value("google_sync_enabled", False, type=bool)
+        )
         self.google_sync_toggle.setToolTip(
             "Show the Google button to import Google Tasks as quests.\n"
             "Sign-in currently works only for Google accounts added as "
             "test users on the app's Google OAuth client."
         )
         self.google_sync_toggle.toggled.connect(self._toggle_google_sync)
-        left_layout.addWidget(self.google_sync_toggle)
-        # Set after addWidget: re-parenting resets visibility to hidden.
-        self.google_button.setVisible(google_sync_enabled)
 
         self.auto_update_check = QCheckBox("Auto Update")
         self.auto_update_check.setChecked(load_auto_update_preference())
         self.auto_update_check.clicked.connect(self._toggle_auto_update)
-        left_layout.addWidget(self.auto_update_check)
 
-        # right box — chatbot panel (system / friend modes)
-        self.chat_panel = ChatPanel(self)
+        self.install_desktop_btn = QPushButton("Install App")
+        self.install_desktop_btn.setIcon(get_icon("install"))
+        self.install_desktop_btn.clicked.connect(self.install_desktop_shortcut)
 
-        layout.addWidget(left_widget, stretch=1)
-        layout.addWidget(self.chat_panel, stretch=3)
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setSpacing(SIDEBAR_SPACING)
 
-        # Restore the saved theme mode and apply it.
-        self._current_theme_mode = self.settings.value(
-            "theme_mode", "default", type=str
+        sections = (
+            ("Notifications", (self.notifications_check, self.check_box, self.sound_button)),
+            ("Appearance", (self.theme_button,)),
+            ("Player", (self.profile_button,)),
+            (
+                "App",
+                (
+                    self.close_to_tray_toggle,
+                    self.auto_update_check,
+                    self.google_sync_toggle,
+                    self.install_desktop_btn,
+                ),
+            ),
         )
-        self._apply_theme_mode(self._current_theme_mode, save=False)
+        for index, (title, widgets) in enumerate(sections):
+            if index:
+                page_layout.addSpacing(SETTINGS_SECTION_GAP)
+            heading = QLabel(title)
+            heading.setObjectName("settingsHeading")
+            page_layout.addWidget(heading)
+            for widget in widgets:
+                if isinstance(widget, QPushButton):
+                    widget.setFixedHeight(SIDEBAR_BUTTON_SIZE)
+                    widget.setCursor(Qt.PointingHandCursor)
+                page_layout.addWidget(widget, alignment=Qt.AlignmentFlag.AlignLeft)
+        page_layout.addStretch(1)
 
-        # The reminder used to start unconditionally, so merely opening the
-        # app produced a popup even with autostart off. Start it only when the
-        # user asked for reminders, and never fire at launch: the hourly timer
-        # owns the schedule. (--bg still notifies immediately; that run exists
-        # to deliver the login reminder.)
-        if self.notifications_check.isChecked():
-            self._start_notifier(notify_now=False)
+        # Installing only works from an AppImage; elsewhere it can only fail.
+        # Set after addWidget: re-parenting resets visibility to hidden.
+        self.install_desktop_btn.setVisible(bool(os.environ.get("APPIMAGE")))
+
+        return page
+
+    def open_settings(self, tab: int = AppSettingsDialog.GENERAL_TAB) -> None:
+        if self._settings_window is None:
+            self._settings_window = AppSettingsDialog(self._general_settings_page, self)
+            self._settings_window.llm_saved.connect(self.chat_panel.reload_llm_settings)
+            self.chat_panel.busy_changed.connect(
+                lambda busy: self._settings_window.set_llm_available(not busy)
+            )
+        self._settings_window.set_llm_available(not self.chat_panel.is_busy())
+        self._settings_window.show_tab(tab)
+
+    def _edit_profile_from_settings(self) -> None:
+        # Settings is application-modal, so it has to close for the wizard to be usable.
+        self._settings_window.accept()
+        self.open_onboarding()
+
+    def _toggle_sidebar(self) -> None:
+        self.sidebar_collapsed = not self.sidebar_collapsed
+        self.settings.setValue("sidebar_collapsed", self.sidebar_collapsed)
+        self.settings.sync()
+        self._apply_sidebar_state()
+
+    def _apply_sidebar_state(self) -> None:
+        """Show the full sidebar, or shrink it to a rail of icon buttons."""
+        collapsed = self.sidebar_collapsed
+        self._update_profile_hint()
+
+        for button, label in self._sidebar_labels.items():
+            self._set_sidebar_button_label(button, label)
+            # The theme's horizontal padding leaves no room for a rail icon.
+            button.setStyleSheet("padding: 0px;" if collapsed else "")
+
+        if collapsed:
+            # The chat panel's own padding also separates the icons from its
+            # content, so match it on the left to keep the gaps either side even.
+            left_margin = (
+                SIDEBAR_RAIL_RIGHT_MARGIN
+                + self.chat_panel.layout().contentsMargins().left()
+            )
+            self._sidebar_layout.setContentsMargins(
+                left_margin,
+                SIDEBAR_VERTICAL_MARGIN,
+                SIDEBAR_RAIL_RIGHT_MARGIN,
+                SIDEBAR_VERTICAL_MARGIN,
+            )
+            self._sidebar.setFixedWidth(
+                left_margin + SIDEBAR_BUTTON_SIZE + SIDEBAR_RAIL_RIGHT_MARGIN
+            )
+            self._main_layout.setStretch(0, 0)
+            self._main_layout.setStretch(1, 1)
+        else:
+            self._sidebar_layout.setContentsMargins(
+                16, SIDEBAR_VERTICAL_MARGIN, 12, SIDEBAR_VERTICAL_MARGIN
+            )
+            self._sidebar.setMinimumWidth(0)
+            self._sidebar.setMaximumWidth(UNCONSTRAINED_WIDTH)
+            self._main_layout.setStretch(0, 1)
+            self._main_layout.setStretch(1, 3)
+
+
+        action = "Expand" if collapsed else "Collapse"
+        self.sidebar_toggle.setIcon(
+            get_icon("sidebar_expand" if collapsed else "sidebar_collapse")
+        )
+        self.sidebar_toggle.setToolTip(f"{action} sidebar (Ctrl+Shift+S)")
+        self.sidebar_toggle.setAccessibleName(f"{action} sidebar")
+
+    def _update_profile_hint(self) -> None:
+        self.profile_hint.setVisible(self._profile_missing and not self.sidebar_collapsed)
+
+    def _set_sidebar_button_label(self, button: QPushButton, label: str) -> None:
+        """Record a button's label; the collapsed rail shows it as a tooltip."""
+        self._sidebar_labels[button] = label
+        button.setText("" if self.sidebar_collapsed else label)
+        button.setToolTip(label if self.sidebar_collapsed else "")
 
     def _setup_tray_icon(self):
         """Create the tray menu used to restore or fully exit the app."""
@@ -379,7 +564,8 @@ class MainWindow(QMainWindow):
             self.onboarding_window = None
         if completed:
             # A profile now exists, so drop the urgency-only explanation.
-            self.profile_hint.setVisible(False)
+            self._profile_missing = False
+            self._update_profile_hint()
 
     def notification_autostart(self):
         self.autostart.toggle()
@@ -424,7 +610,7 @@ class MainWindow(QMainWindow):
         if self._sync_thread is not None:
             return
         self.google_button.setEnabled(False)
-        self.google_button.setText("Syncing...")
+        self._set_sidebar_button_label(self.google_button, "Syncing...")
 
         self._sync_thread = QThread(self)
         self._sync_worker = _GoogleSyncWorker()
@@ -451,7 +637,7 @@ class MainWindow(QMainWindow):
 
     def _cleanup_google_sync(self):
         self.google_button.setEnabled(True)
-        self.google_button.setText("Google")
+        self._set_sidebar_button_label(self.google_button, "Google")
         self._sync_worker.deleteLater()
         self._sync_thread.deleteLater()
         self._sync_worker = None
@@ -517,10 +703,14 @@ class MainWindow(QMainWindow):
             self.start_dynamic_theming()
         else:
             # Static theme: stop any running dynamic watchers, then apply the
-            # matching stylesheet immediately.
+            # matching stylesheet (and icon colours) immediately.
             self.stop_dynamic_theming()
-            tokens = get_tokens_for_mode(mode)
-            QApplication.instance().setStyleSheet(get_stylesheet(tokens))
+            apply_theme(QApplication.instance(), get_tokens_for_mode(mode))
+
+        # Keep an open onboarding wizard in sync with the new palette.
+        onboarding = getattr(self, "onboarding_window", None)
+        if onboarding is not None:
+            onboarding.refresh_theme()
 
     def start_dynamic_theming(self):
         self.wallpaper_timer.start(5000) # Poll every 5 seconds
@@ -532,13 +722,18 @@ class MainWindow(QMainWindow):
     def stop_dynamic_theming(self):
         self.wallpaper_timer.stop()
         self.last_wallpaper_path = None
-        self.aether_theme_watcher.removePaths(
-            self.aether_theme_watcher.files()
-        )
+        if self.aether_theme_watcher.files():
+            self.aether_theme_watcher.removePaths(
+                self.aether_theme_watcher.files()
+            )
         self._aether_theme_path = None
         self.last_aether_tokens = None
 
     def check_wallpaper_update(self):
+        # Only the Dynamic mode should ever rewrite the stylesheet.
+        if self.settings.value("theme_mode", "default", type=str) != "dynamic":
+            return
+
         # Aether writes the live palette to colors.toml when you change the wallpaper.
         # If Aether is active, its QFileSystemWatcher handles updates instantly — do NOT
         # fall through to the wallpaper-polling fallback here, otherwise it would overwrite
@@ -559,24 +754,29 @@ class MainWindow(QMainWindow):
 
             # Generate new semantic tokens and inject them into the stylesheet
             new_tokens = generate_dynamic_tokens(expanded_path)
-            QApplication.instance().setStyleSheet(get_stylesheet(new_tokens))
+            apply_theme(QApplication.instance(), new_tokens)
 
     def check_aether_theme_update(self) -> bool:
         """Read Aether's live colors.toml and apply it to SL if it changed.
 
         Returns ``True`` if a new theme was applied, ``False`` otherwise.
         """
+        if self.settings.value("theme_mode", "default", type=str) != "dynamic":
+            return False
+
         theme_path = find_aether_colors_toml()
         if not theme_path:
             return False
 
-        # Re-watch the file if Aether moved it to a new location.
-        if theme_path != self._aether_theme_path:
-            self.aether_theme_watcher.removePaths(
-                self.aether_theme_watcher.files()
-            )
-            if theme_path:
-                self.aether_theme_watcher.addPath(theme_path)
+        # Re-watch the file if Aether moved it. Aether rewrites colors.toml
+        # in place, and some editors replace the file, which silently drops
+        # Qt's watch — so re-add the path whenever it is not being watched.
+        if theme_path != self._aether_theme_path or theme_path not in self.aether_theme_watcher.files():
+            if self.aether_theme_watcher.files():
+                self.aether_theme_watcher.removePaths(
+                    self.aether_theme_watcher.files()
+                )
+            self.aether_theme_watcher.addPath(theme_path)
             self._aether_theme_path = theme_path
 
         new_tokens = generate_aether_tokens(theme_path)
@@ -584,15 +784,17 @@ class MainWindow(QMainWindow):
             return False
 
         self.last_aether_tokens = new_tokens
-        QApplication.instance().setStyleSheet(get_stylesheet(new_tokens))
+        apply_theme(QApplication.instance(), new_tokens)
         return True
 
     def _refresh_aether_watch(self):
         """(Re)start watching Aether's live theme file if it exists."""
         theme_path = find_aether_colors_toml()
-        if theme_path:
+        if not theme_path:
+            return
+        if theme_path not in self.aether_theme_watcher.files():
             self.aether_theme_watcher.addPath(theme_path)
-            self._aether_theme_path = theme_path
+        self._aether_theme_path = theme_path
 
 
     def _toggle_auto_update(self):
@@ -644,7 +846,82 @@ class MainWindow(QMainWindow):
 #         self.app.quit()
 #         os._exit(0)
 
+def _finish_check(flag, ok, details):
+    """Report a --check-* result and exit with it.
+
+    Windows release builds have no console, so the workflow reads the report
+    file named after the flag, and the exit code.
+    """
+    report = sys.argv[sys.argv.index(flag) + 1:]
+    if report:
+        with open(report[0], "w", encoding="utf-8") as report_file:
+            report_file.write(details + "\n")
+    print(details)
+    sys.stdout and sys.stdout.flush()
+    # Skip Qt teardown: the check is over, and a crash there would hide its result.
+    os._exit(0 if ok else 1)
+
+
+def _run_ocr_check():
+    from system_sl.chatbot.documents import check_ocr
+
+    ok, details = check_ocr()
+    _finish_check("--check-ocr", ok, details)
+
+
+def _run_gui_check():
+    """Exercise what trimming the bundle could break, and exit with the result."""
+    from googleapiclient.discovery_cache import get_static_doc
+    from PySide6.QtCore import QElapsedTimer, QUrl
+    from PySide6.QtMultimedia import QMediaPlayer
+    from system_sl.utils.audio_manager import list_available_sounds
+
+    problems = []
+    try:
+        app = QApplication(sys.argv)
+        initialize_icons()
+        apply_theme(app)
+        window = MainWindow()
+        window.show()
+        window.open_tasks_window()
+        window.tasks_window.close()
+        app.processEvents()
+        if get_icon("tasks").pixmap(16, 16).isNull():
+            problems.append("icons do not render")
+
+        sounds = list_available_sounds()
+        if not sounds:
+            problems.append("no bundled sounds")
+        else:
+            # Longer than check_audio_duration() waits: a cold start is slow.
+            player = QMediaPlayer()
+            player.setSource(QUrl.fromLocalFile(sounds[0]))
+            waited = QElapsedTimer()
+            waited.start()
+            finished = (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.InvalidMedia)
+            while player.mediaStatus() not in finished and waited.elapsed() < 20000:
+                app.processEvents()
+            if player.mediaStatus() != QMediaPlayer.MediaStatus.LoadedMedia:
+                problems.append(
+                    f"could not load {os.path.basename(sounds[0])}: "
+                    f"{player.mediaStatus().name} {player.errorString()!r}"
+                )
+
+        if not get_static_doc("tasks", "v1"):
+            problems.append("the Google Tasks API description is missing")
+    except Exception as e:
+        problems.append(f"{type(e).__name__}: {e}")
+
+    details = "GUI check failed: " + "; ".join(problems) if problems else "GUI check passed"
+    _finish_check("--check-gui", not problems, details)
+
+
 def main():
+    if "--check-ocr" in sys.argv:
+        _run_ocr_check()
+    if "--check-gui" in sys.argv:
+        _run_gui_check()
+
     # Handle --install-desktop flag before Qt initialization
     if "--install-desktop" in sys.argv:
         return install_desktop_entry()
@@ -653,9 +930,12 @@ def main():
     apply_pending_update()
 
     app = QApplication(sys.argv)
-    
-    # --- CHANGED: Inject the dynamic stylesheet on launch ---
-    app.setStyleSheet(get_stylesheet())
+
+    # Initialize icon system (loads FontAwesome fonts)
+    initialize_icons()
+
+    # --- CHANGED: Inject the saved theme (and icon colours) on launch ---
+    apply_theme(app, get_current_theme_tokens())
     app.setQuitOnLastWindowClosed(False)
     initialize_application_autostart()
 
@@ -675,11 +955,9 @@ def main():
             )
             sys.exit(0)
         print("[INFO] Running in background notifier mode...")
-        # --- NEW: Fetch live theme specifically for background notifications ---
-        current_wall = get_wallpaper_path()
-        if current_wall and "Error" not in current_wall:
-            expanded_path = os.path.expanduser(current_wall)
-            app.setStyleSheet(get_stylesheet(generate_dynamic_tokens(expanded_path)))
+        # The notification widget re-reads the saved theme mode itself, but
+        # applying it here also keeps any dialogs it opens consistent.
+        apply_theme(app, get_current_theme_tokens())
 
         view = SystemNotification()
         controller = BackgroundServiceController(view)

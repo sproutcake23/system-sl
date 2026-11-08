@@ -67,6 +67,9 @@ dependencies = [
   "keyring>=25.3.0",
   "cryptography>=42.0.0",
   "pypdf>=5.0.0",
+  "pytesseract>=0.3.10",
+  "pdf2image>=1.17.0",
+  "qtawesome>=1.4.2",
 ]
 
 [project.urls]
@@ -77,7 +80,6 @@ Documentation = "https://github.com/sproutcake23/System-SL/tree/main/docs/wiki"
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.20.0"]
-ocr = ["pytesseract>=0.3.10", "pdf2image>=1.17.0"]
 
 [project.scripts]
 system-sl = "system_sl.frontend.gui.main:main"

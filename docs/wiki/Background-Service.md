@@ -18,7 +18,7 @@ uv run system-sl --bg
 
 ## Autostart
 
-The GUI has a checkbox on the main menu that toggles autostart on login:
+The GUI has a checkbox under **Settings** that toggles autostart on login:
 
 - **Linux**: a `.desktop` entry in `~/.config/autostart/` launching `system-sl --bg`
 - **macOS**: a LaunchAgent plist
@@ -28,7 +28,7 @@ Autostart is implemented for all three platforms but is currently tested on Linu
 
 Autostart only controls whether the notifier is launched at login. It does
 **not** decide whether reminders are shown. The separate **Notifications**
-checkbox on the main menu does that, and its value is stored as
+checkbox under **Settings** does that, and its value is stored as
 `notifications_enabled` in `AppConfig.conf`:
 
 - Reminders off: the GUI starts no notifier, and `--bg` exits immediately even
@@ -41,6 +41,11 @@ checkbox on the main menu does that, and its value is stored as
 A user upgrading from a version without `notifications_enabled` falls back to
 their autostart setting, so someone who had autostart off does not suddenly
 start receiving reminders.
+
+Only one notifier runs per user. It takes a lock file in the data directory, so
+the GUI and a `--bg` process cannot both deliver the same reminder. A process
+without the lock skips its notifications and takes over on its next tick if the
+holder exits.
 
 ## Custom notification sounds
 

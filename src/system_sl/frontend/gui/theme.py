@@ -75,6 +75,19 @@ def get_current_theme_tokens() -> dict:
     return get_tokens_for_mode(mode)
 
 
+def apply_theme(app, tokens=None):
+    """Restyle the whole application, including icons, with the given tokens."""
+    # Imported lazily: icons -> theme_gen -> utils/__init__ -> notifications_ui
+    # -> this module would otherwise be a circular import at startup.
+    from system_sl.frontend.gui.icons import set_icon_theme
+
+    if tokens is None:
+        tokens = _default_tokens()
+    # Icons first: restyling repaints every widget, which is what recolours them.
+    set_icon_theme(tokens)
+    app.setStyleSheet(get_stylesheet(tokens))
+
+
 def get_stylesheet(t=None):
     """Generates the QSS string dynamically based on the provided token dictionary."""
     if t is None:
@@ -139,27 +152,93 @@ QPushButton:disabled {{
     border: 1px solid {t['sys_color_border_muted']};
 }}
 
+/* --- Sidebar collapse button: outlined so its edge lines up with the column --- */
+QPushButton#sidebarToggle {{
+    background-color: transparent;
+    border: 1px solid {t['sys_color_border']};
+    padding: 0px;
+}}
+
+QPushButton#sidebarToggle:hover {{
+    background-color: {t['sys_color_primary_hover']};
+    border: 1px solid {t['sys_color_primary']};
+}}
+
+QPushButton#sidebarToggle:pressed {{
+    background-color: {t['sys_color_primary_pressed']};
+    border: 1px solid {t['sys_color_primary_light']};
+}}
+
+/* --- Settings window --- */
+QTabWidget::pane {{
+    border: 1px solid {t['sys_color_border']};
+}}
+
+QTabBar::tab {{
+    background-color: transparent;
+    color: {t['sys_color_text_secondary']};
+    border: 1px solid {t['sys_color_border_muted']};
+    padding: 7px 18px;
+    margin-right: 4px;
+}}
+
+QTabBar::tab:hover {{
+    background-color: {t['sys_color_primary_hover']};
+}}
+
+QTabBar::tab:selected {{
+    background-color: {t['sys_color_primary_dim']};
+    color: {t['sys_color_primary_light']};
+    border: 1px solid {t['sys_color_border']};
+}}
+
+QTabBar::tab:disabled {{
+    color: {t['sys_color_text_muted']};
+}}
+
+QLabel#settingsHeading {{
+    color: {t['sys_color_primary_light']};
+    font-weight: bold;
+}}
+
 /* --- Checkbox --- */
 QCheckBox {{
     color: {t['sys_color_text_secondary']};
-    spacing: 8px;
+    spacing: 10px;
     background-color: transparent;
+    font-size: 13px;
 }}
 
 QCheckBox::indicator {{
-    width: 14px;
-    height: 14px;
-    border: 1px solid {t['sys_color_border']};
+    width: 18px;
+    height: 18px;
+    border: 2px solid {t['sys_color_border']};
+    border-radius: 3px;
     background-color: {t['sys_color_surface']};
+    /* SVG checkmark - white, 12x9, centered */
+    image: none;
 }}
 
 QCheckBox::indicator:hover {{
-    border: 1px solid {t['sys_color_primary']};
+    border: 2px solid {t['sys_color_primary']};
 }}
 
 QCheckBox::indicator:checked {{
     background-color: {t['sys_color_primary']};
-    border: 1px solid {t['sys_color_primary']};
+    border: 2px solid {t['sys_color_primary']};
+    image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xIDQuNUw0LjUgOEwxMSAxIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPgo=);
+}}
+
+QCheckBox::indicator:disabled {{
+    background-color: {t['sys_color_background']};
+    border: 2px solid {t['sys_color_border_muted']};
+    color: {t['sys_color_text_muted']};
+}}
+
+QCheckBox::indicator:checked:disabled {{
+    background-color: {t['sys_color_primary_dim']};
+    border: 2px solid {t['sys_color_primary_dim']};
+    image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xIDQuNUw0LjUgOEwxMSAxIiBzdHJva2U9IiM5YWI4ZTUiIHN0cm9rZS13aWR0aD0iMi41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KPC9zdmc+Cg==);
 }}
 
 /* --- Text inputs --- */

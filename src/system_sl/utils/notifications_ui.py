@@ -76,29 +76,6 @@ class SystemNotification(QWidget):
 
         self.main_layout.addWidget(self.container)
 
-    def display_message(self,message: list) -> None:
-        if not message or not any(m.strip() for m in message):
-            return
-        while self.content_layout.count():
-            item = self.content_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        text = "Loading task"
-
-        for i in range(len(message)):
-            label = QLabel(f"{text}{i}")
-            label.setObjectName("notifMessage")  # Keeps your QSS styling consistent
-
-            self.content_layout.addWidget(label)  # Assuming self.layout is your QVBoxLayout
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.content_layout.addWidget(label)
-            label.setText(message[i])
-
-        current_sound = get_current_sound()
-        play_sound(current_sound)
-        self.show_system_style()
-
     def show_system_style(self):
         self.show()
         self.raise_()
@@ -120,7 +97,6 @@ class SystemNotification(QWidget):
         primary = tokens.get("sys_color_primary", "#00d9ff")
         text_main = tokens.get("sys_color_text_main", "#d6e7ff")
         text_secondary = tokens.get("sys_color_text_secondary", "#b3d4ff")
-        text_muted = tokens.get("sys_color_text_muted", "#3d4d68")
         surface = tokens.get("sys_color_surface", "#0b0f1a")
 
         self.setStyleSheet(f"""

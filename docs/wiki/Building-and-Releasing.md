@@ -8,22 +8,45 @@ Use the provided build script:
 uv run build-sl
 ```
 
-This invokes PyInstaller to produce a single one-file executable named `system-sl` in `dist/`:
+This runs PyInstaller with `packaging/system-sl.spec`, which the release workflow also uses, to produce a single one-file executable named `system-sl` in `dist/`:
 
 - `--windowed --noconsole` — no terminal window on launch
-- Bundles `assets/` and the spellchecker dictionary
+- Bundles `assets/`, the spaCy model, and the spellchecker dictionary
+- On Linux, bundles the `tesseract` and `poppler` binaries from `/usr/bin`, so install them first. On Windows, this script skips OCR; the release workflow collects those tools itself
+- Leaves out parts of Qt and the Google API library that the app doesn't use
 - Entry point: `system_sl/frontend/gui/main.py`
 
-The result is a self-contained binary for your current OS. Build once per platform (Linux and Windows) to produce the release artifacts.
+The result is a self-contained binary for your current OS.
+
+To package that binary as an AppImage on Linux:
+
+```bash
+uv run python packaging/appimage/build-appimage.py
+```
 
 ## Preparing a release
 
-1. Bump the version in `pyproject.toml`.
-2. Build for each target platform.
-3. Package each executable into a zip:
-   - `system-sl-linux.zip`
-   - `system-sl-windows.zip`
-4. Create a [GitHub Release](https://github.com/sproutcake23/System-SL/releases/new) and attach the zips.
+Releases are built by GitHub Actions (`.github/workflows/release.yml`), not by hand.
+
+1. Bump `__version__` in `src/system_sl/__init__.py` in a `chore: bump version to X.Y.Z` pull request. `pyproject.toml` reads the version from there.
+2. After it merges, push a `vX.Y.Z` tag:
+
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+The tag triggers the workflow, which builds on Linux and Windows and publishes a GitHub release containing:
+
+- `system-sl-X.Y.Z-x86_64.AppImage` and its `.zsync` file
+- `system-sl-linux.tar.xz`
+- `system-sl-setup.exe`
+- `system-sl-windows.zip`
+- `SHA256SUMS.txt`
+
+Users with **Auto Update** on receive it at their next launch.
+
+Pull requests that change the build also run the workflow, without publishing anything. Both platforms must pass two checks in the built binary: `--check-ocr` reads a generated scanned PDF using only the bundled tools, and `--check-gui` opens the main window, loads a sound, and confirms the Google Tasks API description is present.
 
 ## Google OAuth client
 

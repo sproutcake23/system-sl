@@ -14,7 +14,7 @@ Or, if installed globally:
 system-sl
 ```
 
-On first launch an **LLM Settings** dialog asks for the chatbot provider, model and API key. The settings are saved to `llm_config.json` in the system-sl data directory, and the API key to your system keyring.
+On first launch an **LLM Settings** dialog asks for the chatbot provider, model and API key. The settings are saved to `llm_config.json` in the system-sl data directory, and the API key to your system keyring. Change them later under **Settings → LLM**.
 
 ## Background notifier mode
 
@@ -30,7 +30,16 @@ This runs only the hourly task notifier — it never opens the main menu. This i
 ./system-sl-*.AppImage --install-desktop
 ```
 
-Moves the AppImage to `~/Applications` and adds a menu entry for it.
+Moves the AppImage to `~/Applications` and adds a menu entry for it. **Settings → Install App** does the same from inside the running AppImage.
+
+## Checking a build
+
+```bash
+system-sl --check-ocr [report-file]
+system-sl --check-gui [report-file]
+```
+
+`--check-ocr` reads a generated scanned PDF. `--check-gui` opens the main window, loads a notification sound, and confirms the Google Tasks API description is present. Each exits with `0` on success. They print the result and also write it to `report-file` if you give one, which is the only way to see it on Windows.
 
 ## Building a standalone executable
 

@@ -20,24 +20,7 @@ import os
 import tomllib
 from typing import Dict, Optional
 
-# Fallback tokens identical to theme_gen.DEFAULT_TOKENS so SL keeps its
-# Solo Leveling look when Aether has not yet applied a theme.
-DEFAULT_TOKENS: Dict[str, str] = {
-    "sys_color_background": "#060912",
-    "sys_color_surface": "#0b0f1a",
-    "sys_color_surface_raised": "#0e1626",
-    "sys_color_border": "#1f6f99",
-    "sys_color_border_muted": "#1a2638",
-    "sys_color_primary": "#00d9ff",
-    "sys_color_primary_light": "#67e8ff",
-    "sys_color_primary_dim": "rgba(0, 217, 255, 0.08)",
-    "sys_color_primary_hover": "rgba(0, 217, 255, 0.18)",
-    "sys_color_primary_pressed": "rgba(0, 217, 255, 0.30)",
-    "sys_color_text_main": "#d6e7ff",
-    "sys_color_text_secondary": "#b3d4ff",
-    "sys_color_text_highlight": "#b6f1ff",
-    "sys_color_text_muted": "#3d4d68",
-}
+from system_sl.utils.theme_gen import DEFAULT_TOKENS
 
 # Default path to Aether's live theme file (Omarchy-managed).
 AETHER_COLORS_TOML = os.path.expanduser(

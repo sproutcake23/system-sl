@@ -1735,6 +1735,18 @@ wheels = [
 ]
 
 [[package]]
+name = "qtawesome"
+version = "1.4.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "qtpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cf/bc/475c8df94de4f358bbf7703747c13b16ae3c0c4cda50d5243b99cb45e2a8/qtawesome-1.4.2.tar.gz", hash = "sha256:b2bf9351beb335095006892796f072ffd9755a2d7e5113dc71918dcd9ba4ef4a", size = 2614207, upload-time = "2026-04-10T18:49:46.037Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/25/b1/da1d826ccc9258674b26dd0abcbbb1c55cab06e7fbf2697518b67edc79fc/qtawesome-1.4.2-py3-none-any.whl", hash = "sha256:dbf08524428fa2df73918ce362153254cd44f089380576d84bfaad8f40eece45", size = 2593557, upload-time = "2026-04-10T18:49:44.219Z" },
+]
+
+[[package]]
 name = "qtpy"
 version = "2.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2049,12 +2061,15 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "openai" },
+    { name = "pdf2image" },
     { name = "pillow" },
     { name = "protobuf" },
     { name = "pypdf" },
     { name = "pyside6" },
     { name = "pyspellchecker" },
+    { name = "pytesseract" },
     { name = "python-dotenv" },
+    { name = "qtawesome" },
     { name = "qtpy" },
     { name = "requests" },
     { name = "spacy" },
@@ -2063,10 +2078,6 @@ dependencies = [
 [package.optional-dependencies]
 build = [
     { name = "pyinstaller" },
-]
-ocr = [
-    { name = "pdf2image" },
-    { name = "pytesseract" },
 ]
 
 [package.metadata]
@@ -2088,20 +2099,21 @@ requires-dist = [
     { name = "langsmith", specifier = ">=0.8.5" },
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "openai", specifier = ">=2.38.0" },
-    { name = "pdf2image", marker = "extra == 'ocr'", specifier = ">=1.17.0" },
+    { name = "pdf2image", specifier = ">=1.17.0" },
     { name = "pillow", specifier = "==12.3.0" },
     { name = "protobuf", specifier = ">=7.35.0" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.20.0" },
     { name = "pypdf", specifier = ">=5.0.0" },
     { name = "pyside6" },
     { name = "pyspellchecker" },
-    { name = "pytesseract", marker = "extra == 'ocr'", specifier = ">=0.3.10" },
+    { name = "pytesseract", specifier = ">=0.3.10" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "qtawesome", specifier = ">=1.4.2" },
     { name = "qtpy" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "spacy", specifier = ">=3.8.14" },
 ]
-provides-extras = ["build", "ocr"]
+provides-extras = ["build"]
 
 [[package]]
 name = "tenacity"
