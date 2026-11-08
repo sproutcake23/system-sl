@@ -226,6 +226,7 @@ class SettingsDialog(QDialog):
 
         self.fetch_btn = QPushButton()
         self.fetch_btn.setIcon(get_icon("refresh"))
+        self.fetch_btn.setText("Fetch Models")
         self.fetch_btn.setToolTip("Fetch available models from provider API")
         self.fetch_btn.clicked.connect(self._fetch_models)
         key_row.addWidget(self.fetch_btn)
@@ -1570,7 +1571,7 @@ class ChatPanel(QWidget):
             self._append_alert("stopped before any reply")
         self._thread.requestInterruption()
         self.stop_button.setEnabled(False)
-        self.stop_button.setText("Stopping...")
+        self.stop_button.setToolTip("Stopping...")
 
     def _on_reply(self, reply: str) -> None:
         self._md_timer.stop()
@@ -1624,6 +1625,6 @@ class ChatPanel(QWidget):
         if self._thread is not None:
             self._thread.deleteLater()
             self._thread = None
-        self.stop_button.setText("Stop")
+        self.stop_button.setToolTip("Interrupt the reply")
         self._set_busy(False)
         self.input_box.setFocus()
