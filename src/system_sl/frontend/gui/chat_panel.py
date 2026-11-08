@@ -73,6 +73,7 @@ from system_sl.chatbot import (
 from system_sl.core import add_tasks, load_tasks
 from system_sl.utils import get_wallpaper_path
 from system_sl.utils.theme_gen import generate_dynamic_tokens, DEFAULT_TOKENS
+from system_sl.frontend.gui.icons import get_icon
 
 
 def _colorize_markdown_html(body: str, color: str) -> str:
@@ -223,7 +224,8 @@ class SettingsDialog(QDialog):
         )
         key_row.addWidget(self.show_key_check)
 
-        self.fetch_btn = QPushButton("Fetch Models")
+        self.fetch_btn = QPushButton()
+        self.fetch_btn.setIcon(get_icon("refresh"))
         self.fetch_btn.setToolTip("Fetch available models from provider API")
         self.fetch_btn.clicked.connect(self._fetch_models)
         key_row.addWidget(self.fetch_btn)
@@ -236,7 +238,9 @@ class SettingsDialog(QDialog):
         form.addRow("Model:", self.model_edit)
 
         # Test Connection Button
-        self.test_btn = QPushButton("Test Connection")
+        self.test_btn = QPushButton()
+        self.test_btn.setIcon(get_icon("info"))
+        self.test_btn.setText("Test Connection")
         self.test_btn.clicked.connect(self._test_connection)
         form.addRow("", self.test_btn)
 
@@ -255,12 +259,16 @@ class SettingsDialog(QDialog):
         self.search_edit.textChanged.connect(self._filter_models)
         search_row.addWidget(self.search_edit, stretch=1)
 
-        self.select_free_btn = QPushButton("Select All Free")
+        self.select_free_btn = QPushButton()
+        self.select_free_btn.setIcon(get_icon("select_all"))
+        self.select_free_btn.setText("Select All Free")
         self.select_free_btn.clicked.connect(self._select_all_free)
         self.select_free_btn.setEnabled(False)
         search_row.addWidget(self.select_free_btn)
 
-        self.refresh_cache_btn = QPushButton("Refresh Cache")
+        self.refresh_cache_btn = QPushButton()
+        self.refresh_cache_btn.setIcon(get_icon("refresh"))
+        self.refresh_cache_btn.setText("Refresh Cache")
         self.refresh_cache_btn.clicked.connect(self._refresh_cache)
         self.refresh_cache_btn.setEnabled(False)
         search_row.addWidget(self.refresh_cache_btn)
@@ -730,15 +738,17 @@ class ChatPanel(QWidget):
         header.addWidget(self.model_combo, stretch=1)
 
         # Refresh button
-        self.refresh_btn = QPushButton("↻")
-        self.refresh_btn.setFixedWidth(32)
+        self.refresh_btn = QPushButton()
+        self.refresh_btn.setIcon(get_icon("refresh"))
+        self.refresh_btn.setFixedWidth(36)
         self.refresh_btn.setToolTip("Refresh model list")
         self.refresh_btn.clicked.connect(self._refresh_models)
         header.addWidget(self.refresh_btn)
 
         # Settings button
-        self.settings_btn = QPushButton("⚙")
-        self.settings_btn.setFixedWidth(32)
+        self.settings_btn = QPushButton()
+        self.settings_btn.setIcon(get_icon("settings"))
+        self.settings_btn.setFixedWidth(36)
         self.settings_btn.setToolTip("LLM Settings")
         self.settings_btn.clicked.connect(self._open_settings)
         header.addWidget(self.settings_btn)
@@ -800,13 +810,17 @@ class ChatPanel(QWidget):
         self.input_box.setPlaceholderText("Speak, Player...")
         self.input_box.returnPressed.connect(self._on_send)
         # Paperclip button for attachments
-        self.attach_btn = QPushButton("📎")
-        self.attach_btn.setFixedWidth(32)
+        self.attach_btn = QPushButton()
+        self.attach_btn.setIcon(get_icon("attach"))
+        self.attach_btn.setFixedWidth(36)
         self.attach_btn.setToolTip("Attach document (PDF, DOCX, HTML, TXT, MD, CSV...)")
         self.attach_btn.clicked.connect(self._on_attach_clicked)
-        self.send_button = QPushButton("Send")
+        self.send_button = QPushButton()
+        self.send_button.setIcon(get_icon("send"))
+        self.send_button.setToolTip("Send message")
         self.send_button.clicked.connect(self._on_send)
-        self.stop_button = QPushButton("Stop")
+        self.stop_button = QPushButton()
+        self.stop_button.setIcon(get_icon("stop"))
         self.stop_button.setEnabled(False)
         self.stop_button.setToolTip("Interrupt the reply")
         self.stop_button.clicked.connect(self._on_stop)
@@ -1003,20 +1017,17 @@ class ChatPanel(QWidget):
         layout.addWidget(label)
 
         # Remove button
-        remove_btn = QPushButton("✕")
+        remove_btn = QPushButton()
+        remove_btn.setIcon(get_icon("remove", color="#9ab8e5", size=14))
         remove_btn.setFixedSize(18, 18)
         remove_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
-                color: #9ab8e5;
                 border: none;
                 border-radius: 9px;
-                font-size: 11px;
-                font-weight: bold;
             }
             QPushButton:hover {
                 background: #ff6b8a;
-                color: white;
             }
         """)
         remove_btn.setToolTip("Remove attachment")

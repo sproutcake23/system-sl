@@ -24,7 +24,7 @@ def install_desktop_entry() -> int:
     print(f"   Menu entry: {DESKTOP_FILE}")
     return 0
 from PySide6.QtCore import QSize, QTimer, QSettings, QFileSystemWatcher, Qt, Slot, QObject, QThread, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QInputDialog,
     QSizePolicy,
+    QSpacerItem,
     QDialog,
     QSystemTrayIcon,
     QMenu,
@@ -45,6 +46,7 @@ from PySide6.QtWidgets import (
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
 from system_sl.frontend.gui.chat_panel import ChatPanel
 from system_sl.frontend.gui.theme import get_stylesheet
+from system_sl.frontend.gui.icons import get_icon, initialize_icons
 from system_sl.utils import (
     CrossPlatformAutostart,
     SystemNotification,
@@ -90,6 +92,20 @@ class _GoogleSyncWorker(QObject):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+SIDEBAR_BUTTON_SIZE = 34
+SIDEBAR_RAIL_RIGHT_MARGIN = 4
+SIDEBAR_TOP_MARGIN = 9  # Lines the toggle up with the chat panel's header row.
+SIDEBAR_BOTTOM_MARGIN = 12
+SIDEBAR_SPACING = 10
+SIDEBAR_SETTINGS_GAP = 12
+# Below the rail icons, matches what the toggle occupies above them, so that
+# they centre on the window (and so on the chat panel) rather than sit low.
+SIDEBAR_RAIL_BALANCE = (
+    SIDEBAR_TOP_MARGIN + SIDEBAR_BUTTON_SIZE + SIDEBAR_SPACING - SIDEBAR_BOTTOM_MARGIN
+)
+UNCONSTRAINED_WIDTH = 16777215  # QWIDGETSIZE_MAX
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -114,31 +130,80 @@ class MainWindow(QMainWindow):
         self.close_to_tray_enabled = self.settings.value(
             "close_to_tray", False, type=bool
         )
+        self.sidebar_collapsed = self.settings.value(
+            "sidebar_collapsed", False, type=bool
+        )
         self.tray_icon = None
         self._setup_tray_icon()
 
         main_container = QWidget()
         self.setCentralWidget(main_container)
         layout = QHBoxLayout(main_container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        # left box
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
+        # left box (collapsible sidebar)
+        self._sidebar = QWidget()
+        self._sidebar_layout = QVBoxLayout(self._sidebar)
+        left_layout = self._sidebar_layout
+        left_layout.setSpacing(SIDEBAR_SPACING)
 
-        task_button = QPushButton("Tasks")
-        task_button.clicked.connect(self.open_tasks_window)
+        self.sidebar_toggle = QPushButton()
+        self.sidebar_toggle.setObjectName("sidebarToggle")
+        self.sidebar_toggle.setFixedSize(SIDEBAR_BUTTON_SIZE, SIDEBAR_BUTTON_SIZE)
+        self.sidebar_toggle.setCursor(Qt.PointingHandCursor)
+        self.sidebar_toggle.clicked.connect(self._toggle_sidebar)
+        left_layout.addWidget(self.sidebar_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        # Given a stretch only while collapsed, to push the rail icons to centre.
+        left_layout.addStretch(0)
+        self._rail_top_stretch = left_layout.count() - 1
+
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self._toggle_sidebar)
+
+        # --- Buttons group ---
+        self.task_button = QPushButton("Tasks")
+        self.task_button.setIcon(get_icon("tasks"))
+        self.task_button.clicked.connect(self.open_tasks_window)
 
         self.google_button = QPushButton("Google")
+        self.google_button.setIcon(get_icon("google"))
         self.google_button.clicked.connect(self.sync_google_tasks)
 
-        sound_button = QPushButton("Set Notification Sound")
-        sound_button.clicked.connect(self.change_notification_sound)
+        self.sound_button = QPushButton("Notification Sound")
+        self.sound_button.setIcon(get_icon("sound"))
+        self.sound_button.clicked.connect(self.change_notification_sound)
 
-        install_desktop_btn = QPushButton("Install App")
-        install_desktop_btn.clicked.connect(self.install_desktop_shortcut)
+        self.install_desktop_btn = QPushButton("Install App")
+        self.install_desktop_btn.setIcon(get_icon("install"))
+        self.install_desktop_btn.clicked.connect(self.install_desktop_shortcut)
 
-        profile_button = QPushButton("Edit Player Profile")
-        profile_button.clicked.connect(self.open_onboarding)
+        self.profile_button = QPushButton("Edit Player Profile")
+        self.profile_button.setIcon(get_icon("profile"))
+        self.profile_button.clicked.connect(self.open_onboarding)
+
+        # These stay visible in the collapsed rail, reduced to their icons.
+        self._sidebar_labels = {}
+        for btn in (self.task_button, self.google_button, self.sound_button,
+                    self.install_desktop_btn, self.profile_button):
+            btn.setFixedHeight(SIDEBAR_BUTTON_SIZE)
+            btn.setCursor(Qt.PointingHandCursor)
+            self._sidebar_labels[btn] = btn.text()
+            btn.setAccessibleName(btn.text())
+            left_layout.addWidget(btn)
+
+        # Spacer between buttons and checkboxes
+        self._sidebar_gap = QSpacerItem(
+            0, SIDEBAR_SETTINGS_GAP, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
+        left_layout.addSpacerItem(self._sidebar_gap)
+
+        # Everything that has no icon form, hidden while collapsed.
+        self._sidebar_settings = QWidget()
+        settings_layout = QVBoxLayout(self._sidebar_settings)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(10)
+        left_layout.addWidget(self._sidebar_settings)
 
         self.check_box = QCheckBox("Notification AutoStart")
         initial_state = self.autostart.is_enabled()
@@ -164,15 +229,7 @@ class MainWindow(QMainWindow):
         self.theme_toggle.setChecked(is_dynamic)
         self.theme_toggle.clicked.connect(self.on_theme_toggle_changed)
 
-        left_layout.addWidget(task_button)
-        left_layout.addWidget(self.google_button)
-        left_layout.addWidget(sound_button)
-        left_layout.addWidget(install_desktop_btn)
-
-        # Ranking now degrades gracefully without a profile, so a player who
-        # skipped onboarding is no longer blocked from the app. They would
-        # otherwise have no way to learn why their ordering looks flat unless
-        # they happened to open the Tasks window.
+        # Profile hint
         self.profile_hint = QLabel(
             "No player profile — tasks are ranked by urgency only."
         )
@@ -186,17 +243,22 @@ class MainWindow(QMainWindow):
         self.profile_hint.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
-        left_layout.addWidget(self.profile_hint)
+        settings_layout.addWidget(self.profile_hint)
         # Set after addWidget: re-parenting resets visibility to hidden.
         self.profile_hint.setVisible(
             not PersonaStorageHandler().has_profile()
         )
 
-        left_layout.addWidget(profile_button)
-        left_layout.addWidget(self.check_box)
-        left_layout.addWidget(self.notifications_check)
-        left_layout.addWidget(self.theme_toggle) # Added to the left panel UI
+        settings_layout.addSpacing(10)
 
+        # --- Checkboxes group ---
+        settings_layout.addWidget(self.check_box)
+        settings_layout.addWidget(self.notifications_check)
+        settings_layout.addWidget(self.theme_toggle)
+
+        settings_layout.addSpacing(10)
+
+        # --- System checkboxes ---
         self.close_to_tray_toggle = QCheckBox("Close to System Tray")
         self.close_to_tray_toggle.setChecked(self.close_to_tray_enabled)
         self.close_to_tray_toggle.setEnabled(self.tray_icon is not None)
@@ -205,7 +267,6 @@ class MainWindow(QMainWindow):
                 "System tray is not available in this desktop session."
             )
         self.close_to_tray_toggle.toggled.connect(self._toggle_close_to_tray)
-        left_layout.addWidget(self.close_to_tray_toggle)
 
         # Google sign-in only works for accounts allowed on the OAuth client,
         # so the sync button stays hidden until the player opts in.
@@ -220,20 +281,27 @@ class MainWindow(QMainWindow):
             "test users on the app's Google OAuth client."
         )
         self.google_sync_toggle.toggled.connect(self._toggle_google_sync)
-        left_layout.addWidget(self.google_sync_toggle)
         # Set after addWidget: re-parenting resets visibility to hidden.
         self.google_button.setVisible(google_sync_enabled)
 
         self.auto_update_check = QCheckBox("Auto Update")
         self.auto_update_check.setChecked(load_auto_update_preference())
         self.auto_update_check.clicked.connect(self._toggle_auto_update)
-        left_layout.addWidget(self.auto_update_check)
+
+        settings_layout.addWidget(self.close_to_tray_toggle)
+        settings_layout.addWidget(self.google_sync_toggle)
+        settings_layout.addWidget(self.auto_update_check)
+
+        left_layout.addStretch(1)
 
         # right box — chatbot panel (system / friend modes)
         self.chat_panel = ChatPanel(self)
 
-        layout.addWidget(left_widget, stretch=1)
+        layout.addWidget(self._sidebar, stretch=1)
         layout.addWidget(self.chat_panel, stretch=3)
+        self._main_layout = layout
+
+        self._apply_sidebar_state()
 
         # Start the background watcher if it was enabled during the last session
         if is_dynamic:
@@ -246,6 +314,71 @@ class MainWindow(QMainWindow):
         # to deliver the login reminder.)
         if self.notifications_check.isChecked():
             self._start_notifier(notify_now=False)
+
+    def _toggle_sidebar(self) -> None:
+        self.sidebar_collapsed = not self.sidebar_collapsed
+        self.settings.setValue("sidebar_collapsed", self.sidebar_collapsed)
+        self.settings.sync()
+        self._apply_sidebar_state()
+
+    def _apply_sidebar_state(self) -> None:
+        """Show the full sidebar, or shrink it to a rail of icon buttons."""
+        collapsed = self.sidebar_collapsed
+        self._sidebar_settings.setVisible(not collapsed)
+
+        for button, label in self._sidebar_labels.items():
+            self._set_sidebar_button_label(button, label)
+            # The theme's horizontal padding leaves no room for a rail icon.
+            button.setStyleSheet("padding: 0px;" if collapsed else "")
+
+        if collapsed:
+            # The chat panel's own padding also separates the icons from its
+            # content, so match it on the left to keep the gaps either side even.
+            left_margin = (
+                SIDEBAR_RAIL_RIGHT_MARGIN
+                + self.chat_panel.layout().contentsMargins().left()
+            )
+            self._sidebar_layout.setContentsMargins(
+                left_margin,
+                SIDEBAR_TOP_MARGIN,
+                SIDEBAR_RAIL_RIGHT_MARGIN,
+                SIDEBAR_BOTTOM_MARGIN,
+            )
+            self._sidebar.setFixedWidth(
+                left_margin + SIDEBAR_BUTTON_SIZE + SIDEBAR_RAIL_RIGHT_MARGIN
+            )
+            self._main_layout.setStretch(0, 0)
+            self._main_layout.setStretch(1, 1)
+        else:
+            self._sidebar_layout.setContentsMargins(
+                16, SIDEBAR_TOP_MARGIN, 12, SIDEBAR_BOTTOM_MARGIN
+            )
+            self._sidebar.setMinimumWidth(0)
+            self._sidebar.setMaximumWidth(UNCONSTRAINED_WIDTH)
+            self._main_layout.setStretch(0, 1)
+            self._main_layout.setStretch(1, 3)
+
+        self._sidebar_layout.setStretch(self._rail_top_stretch, 1 if collapsed else 0)
+        self._sidebar_gap.changeSize(
+            0,
+            SIDEBAR_RAIL_BALANCE if collapsed else SIDEBAR_SETTINGS_GAP,
+            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._sidebar_layout.invalidate()
+
+        action = "Expand" if collapsed else "Collapse"
+        self.sidebar_toggle.setIcon(
+            get_icon("sidebar_expand" if collapsed else "sidebar_collapse")
+        )
+        self.sidebar_toggle.setToolTip(f"{action} sidebar (Ctrl+Shift+S)")
+        self.sidebar_toggle.setAccessibleName(f"{action} sidebar")
+
+    def _set_sidebar_button_label(self, button: QPushButton, label: str) -> None:
+        """Record a button's label; the collapsed rail shows it as a tooltip."""
+        self._sidebar_labels[button] = label
+        button.setText("" if self.sidebar_collapsed else label)
+        button.setToolTip(label if self.sidebar_collapsed else "")
 
     def _setup_tray_icon(self):
         """Create the tray menu used to restore or fully exit the app."""
@@ -391,7 +524,7 @@ class MainWindow(QMainWindow):
         if self._sync_thread is not None:
             return
         self.google_button.setEnabled(False)
-        self.google_button.setText("Syncing...")
+        self._set_sidebar_button_label(self.google_button, "Syncing...")
 
         self._sync_thread = QThread(self)
         self._sync_worker = _GoogleSyncWorker()
@@ -418,7 +551,7 @@ class MainWindow(QMainWindow):
 
     def _cleanup_google_sync(self):
         self.google_button.setEnabled(True)
-        self.google_button.setText("Google")
+        self._set_sidebar_button_label(self.google_button, "Google")
         self._sync_worker.deleteLater()
         self._sync_thread.deleteLater()
         self._sync_worker = None
@@ -540,6 +673,9 @@ def main():
     apply_pending_update()
 
     app = QApplication(sys.argv)
+    
+    # Initialize icon system (loads FontAwesome fonts)
+    initialize_icons()
     
     # --- CHANGED: Inject the dynamic stylesheet on launch ---
     app.setStyleSheet(get_stylesheet())
