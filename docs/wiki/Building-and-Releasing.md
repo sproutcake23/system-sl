@@ -8,11 +8,12 @@ Use the provided build script:
 uv run build-sl
 ```
 
-This invokes PyInstaller to produce a single one-file executable named `system-sl` in `dist/`:
+This runs PyInstaller with `packaging/system-sl.spec`, which the release workflow also uses, to produce a single one-file executable named `system-sl` in `dist/`:
 
 - `--windowed --noconsole` — no terminal window on launch
 - Bundles `assets/`, the spaCy model, and the spellchecker dictionary
 - On Linux, bundles the `tesseract` and `poppler` binaries from `/usr/bin`, so install them first. On Windows, this script skips OCR; the release workflow collects those tools itself
+- Leaves out parts of Qt and the Google API library that the app doesn't use
 - Entry point: `system_sl/frontend/gui/main.py`
 
 The result is a self-contained binary for your current OS.
@@ -45,7 +46,7 @@ The tag triggers the workflow, which builds on Linux and Windows and publishes a
 
 Users with **Auto Update** on receive it at their next launch.
 
-Pull requests that change the build also run the workflow, without publishing anything. Both platforms must pass `--check-ocr`, which reads a generated scanned PDF using only the tools inside the binary.
+Pull requests that change the build also run the workflow, without publishing anything. Both platforms must pass two checks in the built binary: `--check-ocr` reads a generated scanned PDF using only the bundled tools, and `--check-gui` opens the main window, loads a sound, and confirms the Google Tasks API description is present.
 
 ## Google OAuth client
 
