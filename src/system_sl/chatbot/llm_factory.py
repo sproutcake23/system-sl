@@ -141,10 +141,20 @@ def get_preset(key: str) -> ProviderPreset | None:
     return PRESETS.get(key.lower())
 
 
+def list_preset_items() -> list[tuple[str, ProviderPreset]]:
+    """Return ``(key, preset)`` pairs in a consistent order.
+
+    The UI needs the key, not just the display name: ``get_preset`` looks
+    presets up by key, so storing ``preset.name.lower()`` in a combo box made
+    lookups fail for every preset whose name differs from its key.
+    """
+    order = ["google", "ollama", "lm_studio", "openrouter", "groq", "together", "custom"]
+    return [(key, PRESETS[key]) for key in order if key in PRESETS]
+
+
 def list_presets() -> list[ProviderPreset]:
     """Return all presets in a consistent order."""
-    order = ["google", "ollama", "lm_studio", "openrouter", "groq", "together", "custom"]
-    return [PRESETS[k] for k in order if k in PRESETS]
+    return [preset for _, preset in list_preset_items()]
 
 
 # =============================================================================

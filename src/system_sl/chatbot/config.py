@@ -46,13 +46,38 @@ class ChatConfigError(RuntimeError):
     pass
 
 
+# Dummy keys that local servers accept. If one of these is attached to a
+# non-local endpoint it is a leftover from the bug where the key loaded at
+# launch was written back over the key the user had just entered.
+_DUMMY_API_KEYS = {"lm-studio", "ollama"}
+_LOCAL_ENDPOINT_MARKERS = ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+
+
+def _is_local_endpoint(base_url: Optional[str]) -> bool:
+    """Return True when the base URL points at this machine."""
+    if not base_url:
+        return False
+    lowered = base_url.lower()
+    return any(marker in lowered for marker in _LOCAL_ENDPOINT_MARKERS)
+
+
 def load_config() -> ChatConfig:
     """Load configuration from file, environment, and defaults.
 
     Priority (highest first):
-    1. ~/.config/system-sl/llm_config.json
-    2. Environment variables (LLM_PROVIDER, LLM_BASE_URL, LLM_API_KEY, LLM_MODEL)
-    3. Hardcoded defaults (Google Gemini)
+    1. ``LLM_API_KEY`` for the API key — an explicit, app-specific override.
+    2. The API key in the system keyring (what the GUI saves).
+    3. ``~/.config/system-sl/llm_config.json`` for the other fields.
+    4. ``LLM_PROVIDER`` / ``LLM_BASE_URL`` / ``LLM_MODEL`` environment variables.
+    5. ``GOOGLE_API_KEY`` (Google provider) or ``OPENAI_API_KEY`` (OpenAI-compatible
+       provider) — a fallback for headless/CLI use.
+    6. Hardcoded defaults (Google Gemini).
+
+    The keyring deliberately outranks the provider environment variables. Those
+    variables are frequently stale (set at launch, or inherited from the shell),
+    and if they won here a key entered later in the settings dialog would be
+    ignored for the rest of the process and could be saved back over the real
+    one. ``LLM_API_KEY`` remains the explicit, highest-priority override.
 
     Returns:
         ChatConfig with resolved values.
@@ -87,16 +112,28 @@ def load_config() -> ChatConfig:
     # API Key
     # Stored securely in the system keyring (KDE Wallet / GNOME Keyring /
     # macOS Keychain / Windows Credential Manager) with an encrypted-file
-    # fallback for headless environments. Environment variables still take
-    # precedence for explicit overrides.
+    # fallback for headless environments.
+    #
+    # LLM_API_KEY is an explicit override and still wins. The keyring beats the
+    # provider-specific variables because they are usually just what the GUI
+    # exported at launch; letting them win means a key entered later in the
+    # settings dialog is never seen again in this process. Only the variable
+    # that matches the configured provider is consulted, so a leftover
+    # GOOGLE_API_KEY cannot replace an OpenRouter key.
+    provider_key_var = "GOOGLE_API_KEY" if provider == "google" else "OPENAI_API_KEY"
     api_key = (
         os.environ.get("LLM_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
         or secure_storage.get_secret(secure_storage.SECRET_LLM_API_KEY)
+        or os.environ.get(provider_key_var)
         or data.get("api_key", "")  # backward compat with existing installs
         or ""
     )
+
+    # A local server's dummy key must not be presented as a real key for a
+    # remote endpoint. Treat it as unset so the settings dialog asks for the
+    # real one instead of failing later with 401.
+    if api_key in _DUMMY_API_KEYS and not _is_local_endpoint(base_url):
+        api_key = ""
 
     # Model
     system_model = (
@@ -143,6 +180,10 @@ def save_config(config: ChatConfig) -> None:
     # Persist the API key securely, never in plaintext on disk.
     if config.api_key:
         secure_storage.set_secret(secure_storage.SECRET_LLM_API_KEY, config.api_key)
+    else:
+        # Clearing the key must actually clear it, otherwise switching to an
+        # endpoint that needs no key keeps the previous provider's secret.
+        secure_storage.delete_secret(secure_storage.SECRET_LLM_API_KEY)
 
 
 def validate_config(config: ChatConfig) -> list[str]:
