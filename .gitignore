@@ -15,6 +15,7 @@ build/
 dist/
 system_sl.egg-info/
 *.spec
+!packaging/system-sl.spec
 
 # Local Environment Variables & Secrets (CRITICAL)
 .env

@@ -80,19 +80,7 @@ jobs:
 
       - name: Build binary with PyInstaller
         run: |
-          uv run python -m PyInstaller --name system-sl --windowed --noconsole --onefile \
-            --collect-data spellchecker \
-            --add-data "src/system_sl/assets:assets" \
-            --collect-all en_core_web_md \
-            --collect-all certifi \
-            --add-binary "/usr/bin/tesseract:." \
-            --add-binary "/usr/bin/pdftoppm:." \
-            --add-binary "/usr/bin/pdfinfo:." \
-            --add-data "/usr/share/tessdata:tessdata" \
-            --hidden-import pytesseract \
-            --hidden-import pdf2image \
-            --hidden-import pdf2image.pdf2image \
-            src/system_sl/frontend/gui/main.py
+          uv run python -m PyInstaller packaging/system-sl.spec --noconfirm --clean
 
       - name: Check Qt xcb libraries and OAuth client are bundled
         run: |
@@ -150,6 +138,14 @@ jobs:
           mkdir -p "$test_home"
           HOME="$test_home" dist/system-sl --check-ocr
           HOME="$test_home" dist/system-sl-*-x86_64.AppImage --appimage-extract-and-run --check-ocr
+
+      - name: Check the GUI works in the frozen build
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          test_home="$RUNNER_TEMP/gui-home"
+          mkdir -p "$test_home"
+          HOME="$test_home" dist/system-sl --check-gui
 
       - name: Upload Linux binary
         uses: actions/upload-artifact@v4
@@ -219,15 +215,7 @@ jobs:
       - name: Build binary with PyInstaller
         shell: pwsh
         run: |
-          uv run python -m PyInstaller --name system-sl --windowed --noconsole --onefile `
-            --collect-data spellchecker `
-            --add-data "src/system_sl/assets;assets" `
-            --collect-all en_core_web_md `
-            --add-data "ocr-bundle;ocr" `
-            --hidden-import pytesseract `
-            --hidden-import pdf2image `
-            --hidden-import pdf2image.pdf2image `
-            src/system_sl/frontend/gui/main.py
+          uv run python -m PyInstaller packaging/system-sl.spec --noconfirm --clean
 
       # OCR must work from the bundle alone, so hide the build machine's tools.
       - name: Check OCR works in the frozen build
@@ -240,6 +228,17 @@ jobs:
           if (Test-Path $report) { Get-Content $report }
           if ($run.ExitCode -ne 0) {
             Write-Output "::error::OCR check failed with exit code $($run.ExitCode)."
+            exit 1
+          }
+
+      - name: Check the GUI works in the frozen build
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "gui-report.txt"
+          $run = Start-Process dist/system-sl.exe -ArgumentList "--check-gui", "`"$report`"" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if ($run.ExitCode -ne 0) {
+            Write-Output "::error::GUI check failed with exit code $($run.ExitCode)."
             exit 1
           }
 

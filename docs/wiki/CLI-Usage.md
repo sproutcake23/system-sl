@@ -32,13 +32,14 @@ This runs only the hourly task notifier — it never opens the main menu. This i
 
 Moves the AppImage to `~/Applications` and adds a menu entry for it. **Settings → Install App** does the same from inside the running AppImage.
 
-## Checking OCR
+## Checking a build
 
 ```bash
 system-sl --check-ocr [report-file]
+system-sl --check-gui [report-file]
 ```
 
-Reads a generated scanned PDF and exits with `0` if OCR worked. It prints the result and also writes it to `report-file` if you give one, which is the only way to see it on Windows.
+`--check-ocr` reads a generated scanned PDF. `--check-gui` opens the main window, loads a notification sound, and confirms the Google Tasks API description is present. Each exits with `0` on success. They print the result and also write it to `report-file` if you give one, which is the only way to see it on Windows.
 
 ## Building a standalone executable
 

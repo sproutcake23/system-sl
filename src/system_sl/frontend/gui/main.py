@@ -701,26 +701,81 @@ class MainWindow(QMainWindow):
 #         self.app.quit()
 #         os._exit(0)
 
-def _run_ocr_check():
-    """Handle --check-ocr [report_file] and exit with its result.
+def _finish_check(flag, ok, details):
+    """Report a --check-* result and exit with it.
 
     Windows release builds have no console, so the workflow reads the report
-    file and exit code.
+    file named after the flag, and the exit code.
     """
-    from system_sl.chatbot.documents import check_ocr
-
-    ok, details = check_ocr()
-    report = sys.argv[sys.argv.index("--check-ocr") + 1:]
+    report = sys.argv[sys.argv.index(flag) + 1:]
     if report:
         with open(report[0], "w", encoding="utf-8") as report_file:
             report_file.write(details + "\n")
     print(details)
-    sys.exit(0 if ok else 1)
+    sys.stdout and sys.stdout.flush()
+    # Skip Qt teardown: the check is over, and a crash there would hide its result.
+    os._exit(0 if ok else 1)
+
+
+def _run_ocr_check():
+    from system_sl.chatbot.documents import check_ocr
+
+    ok, details = check_ocr()
+    _finish_check("--check-ocr", ok, details)
+
+
+def _run_gui_check():
+    """Exercise what trimming the bundle could break, and exit with the result."""
+    from googleapiclient.discovery_cache import get_static_doc
+    from PySide6.QtCore import QElapsedTimer, QUrl
+    from PySide6.QtMultimedia import QMediaPlayer
+    from system_sl.utils.audio_manager import list_available_sounds
+
+    problems = []
+    try:
+        app = QApplication(sys.argv)
+        initialize_icons()
+        apply_theme(app)
+        window = MainWindow()
+        window.show()
+        window.open_tasks_window()
+        window.tasks_window.close()
+        app.processEvents()
+        if get_icon("tasks").pixmap(16, 16).isNull():
+            problems.append("icons do not render")
+
+        sounds = list_available_sounds()
+        if not sounds:
+            problems.append("no bundled sounds")
+        else:
+            # Longer than check_audio_duration() waits: a cold start is slow.
+            player = QMediaPlayer()
+            player.setSource(QUrl.fromLocalFile(sounds[0]))
+            waited = QElapsedTimer()
+            waited.start()
+            finished = (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.InvalidMedia)
+            while player.mediaStatus() not in finished and waited.elapsed() < 20000:
+                app.processEvents()
+            if player.mediaStatus() != QMediaPlayer.MediaStatus.LoadedMedia:
+                problems.append(
+                    f"could not load {os.path.basename(sounds[0])}: "
+                    f"{player.mediaStatus().name} {player.errorString()!r}"
+                )
+
+        if not get_static_doc("tasks", "v1"):
+            problems.append("the Google Tasks API description is missing")
+    except Exception as e:
+        problems.append(f"{type(e).__name__}: {e}")
+
+    details = "GUI check failed: " + "; ".join(problems) if problems else "GUI check passed"
+    _finish_check("--check-gui", not problems, details)
 
 
 def main():
     if "--check-ocr" in sys.argv:
         _run_ocr_check()
+    if "--check-gui" in sys.argv:
+        _run_gui_check()
 
     # Handle --install-desktop flag before Qt initialization
     if "--install-desktop" in sys.argv:
