@@ -67,6 +67,7 @@ dependencies = [
   "keyring>=25.3.0",
   "cryptography>=42.0.0",
   "pypdf>=5.0.0",
+  "qtawesome>=1.4.2",
 ]
 
 [project.urls]
