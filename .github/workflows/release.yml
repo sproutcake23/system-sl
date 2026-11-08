@@ -111,6 +111,7 @@ jobs:
       - name: Package binary (tar.xz)
         run: tar -cJf system-sl-linux.tar.xz -C dist system-sl
 
+      # Makes its own one-folder build, separate from the one-file dist/system-sl.
       - name: Build AppImage
         run: |
           uv run python packaging/appimage/build-appimage.py
@@ -146,6 +147,7 @@ jobs:
           test_home="$RUNNER_TEMP/gui-home"
           mkdir -p "$test_home"
           HOME="$test_home" dist/system-sl --check-gui
+          HOME="$test_home" dist/system-sl-*-x86_64.AppImage --appimage-extract-and-run --check-gui
 
       - name: Upload Linux binary
         uses: actions/upload-artifact@v4

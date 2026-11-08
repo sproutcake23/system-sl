@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Create an AppImage from the standalone PyInstaller executable.
+"""Build the app as a PyInstaller folder and package it as an AppImage.
 
-The PyInstaller executable is already self-contained. Do not install the
-project wheel into an AppDir: pip-generated console scripts use an absolute
-shebang pointing to the build virtual environment.
+An AppImage is already one file, and it reads its contents on demand. Putting a
+one-file build inside it would unpack everything to the temp folder on every
+launch for no benefit, so this makes its own one-folder build.
+
+Do not install the project wheel into an AppDir: pip-generated console scripts
+use an absolute shebang pointing to the build virtual environment.
 """
 
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -61,16 +65,31 @@ def read_version(project_root: Path) -> str:
     return match.group(1)
 
 
+def build_bundle(project_root: Path) -> Path:
+    """Build the one-folder bundle and return its directory."""
+    dist = project_root / "dist" / "appimage"
+    run_cmd(
+        [
+            sys.executable, "-m", "PyInstaller",
+            project_root / "packaging" / "system-sl.spec",
+            "--noconfirm", "--clean",
+            "--distpath", dist,
+            "--workpath", project_root / "build" / "appimage",
+        ],
+        cwd=project_root,
+        env={**os.environ, "SYSTEM_SL_ONEDIR": "1"},
+    )
+    bundle = dist / "system-sl"
+    if not os.access(bundle / "system-sl", os.X_OK):
+        raise SystemExit(f"PyInstaller did not produce {bundle / 'system-sl'}.")
+    return bundle
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
     version = read_version(project_root)
 
-    binary = project_root / "dist" / "system-sl"
-    if not binary.is_file() or not os.access(binary, os.X_OK):
-        raise SystemExit(
-            "Missing executable dist/system-sl. Build it with PyInstaller before "
-            "creating the AppImage."
-        )
+    bundle = build_bundle(project_root)
 
     assets = project_root / "src" / "system_sl" / "assets"
     desktop = assets / "system-sl-appimage.desktop"
@@ -84,12 +103,12 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="system-sl-appimage-") as temporary:
         temporary_dir = Path(temporary)
         appdir = temporary_dir / "system-sl.AppDir"
-        app_bin_dir = appdir / "usr" / "bin"
-        app_bin_dir.mkdir(parents=True)
+        app_lib_dir = appdir / "usr" / "lib"
+        app_lib_dir.mkdir(parents=True)
 
-        # Copy the binary, not the Python packaging entry point. The former is
+        # Copy the bundle, not the Python packaging entry point. The former is
         # portable; the latter embeds the builder's virtualenv in its shebang.
-        shutil.copy2(binary, app_bin_dir / "system-sl")
+        shutil.copytree(bundle, app_lib_dir / "system-sl", symlinks=True)
         shutil.copy2(desktop, appdir / "system-sl.desktop")
         shutil.copy2(icon, appdir / "system-sl.svg")
         # appimagetool used to derive .DirIcon from the desktop file's icon;
@@ -99,7 +118,7 @@ def main() -> None:
         apprun = appdir / "AppRun"
         apprun.write_text(
             "#!/bin/sh\n"
-            "exec \"${APPDIR}/usr/bin/system-sl\" \"$@\"\n"
+            "exec \"${APPDIR}/usr/lib/system-sl/system-sl\" \"$@\"\n"
         )
         apprun.chmod(0o755)
 
