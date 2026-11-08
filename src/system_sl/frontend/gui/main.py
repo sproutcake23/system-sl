@@ -25,7 +25,7 @@ def install_desktop_entry() -> int:
     print(f"   Menu entry: {DESKTOP_FILE}")
     return 0
 from PySide6.QtCore import QSize, QTimer, QSettings, QFileSystemWatcher, Qt, Slot, QObject, QThread, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 )
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
 from system_sl.frontend.gui.chat_panel import ChatPanel
-from system_sl.frontend.gui.theme import get_stylesheet
+from system_sl.frontend.gui.theme import get_stylesheet, get_tokens_for_mode
 from system_sl.utils import (
     CrossPlatformAutostart,
     SystemNotification,
@@ -173,11 +173,27 @@ class MainWindow(QMainWindow):
         )
         self.notifications_check.toggled.connect(self._toggle_notifications)
 
-        # --- NEW: Dynamic Theme Checkbox ---
-        self.theme_toggle = QCheckBox("Enable Dynamic Theming")
-        is_dynamic = self.settings.value("dynamic_theming", False, type=bool)
-        self.theme_toggle.setChecked(is_dynamic)
-        self.theme_toggle.clicked.connect(self.on_theme_toggle_changed)
+        # --- NEW: Themes button (Default / Light / Dark / Dynamic menu) ---
+        self.theme_button = QPushButton("Themes")
+        self.theme_button.setToolTip("Choose a theme: Default, Light, Dark or Dynamic")
+        self.theme_menu = QMenu(self)
+        self.theme_action_group = QActionGroup(self)
+        self.theme_action_group.setExclusive(True)
+
+        for mode, label in (
+            ("default", "Default"),
+            ("light", "Light"),
+            ("dark", "Dark"),
+            ("dynamic", "Dynamic"),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setData(mode)
+            action.triggered.connect(self.on_theme_action_triggered)
+            self.theme_action_group.addAction(action)
+            self.theme_menu.addAction(action)
+
+        self.theme_button.setMenu(self.theme_menu)
 
         left_layout.addWidget(task_button)
         left_layout.addWidget(self.google_button)
@@ -210,7 +226,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(profile_button)
         left_layout.addWidget(self.check_box)
         left_layout.addWidget(self.notifications_check)
-        left_layout.addWidget(self.theme_toggle) # Added to the left panel UI
+        left_layout.addWidget(self.theme_button) # Added to the left panel UI
 
         self.close_to_tray_toggle = QCheckBox("Close to System Tray")
         self.close_to_tray_toggle.setChecked(self.close_to_tray_enabled)
@@ -250,9 +266,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(left_widget, stretch=1)
         layout.addWidget(self.chat_panel, stretch=3)
 
-        # Start the background watcher if it was enabled during the last session
-        if is_dynamic:
-            self.start_dynamic_theming()
+        # Restore the saved theme mode and apply it.
+        self._current_theme_mode = self.settings.value(
+            "theme_mode", "default", type=str
+        )
+        self._apply_theme_mode(self._current_theme_mode, save=False)
 
         # The reminder used to start unconditionally, so merely opening the
         # app produced a popup even with autostart off. Start it only when the
@@ -468,13 +486,41 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Failed", "Could not install the app.\nMake sure you're running from the AppImage.")
 
     # --- NEW: Theme Manager Methods ---
-    def on_theme_toggle_changed(self):
-        is_checked = self.theme_toggle.isChecked()
-        self.settings.setValue("dynamic_theming", is_checked)
-        if is_checked:
+    def on_theme_action_triggered(self):
+        """Handle a theme menu action being triggered."""
+        action = self.sender()
+        if not action or not isinstance(action, QAction):
+            return
+        mode = action.data()
+        if not isinstance(mode, str):
+            return
+        self._apply_theme_mode(mode, save=True)
+
+    def _apply_theme_mode(self, mode: str, save: bool = True):
+        """Apply the given theme mode and persist it if requested.
+
+        Modes: ``default``, ``dark``, ``light``, ``dynamic``.
+        """
+        # Update the checkable action group so the UI reflects the choice.
+        for action in self.theme_action_group.actions():
+            if action.data() == mode:
+                action.setChecked(True)
+
+        self._current_theme_mode = mode
+
+        if save:
+            self.settings.setValue("theme_mode", mode)
+            self.settings.sync()
+
+        if mode == "dynamic":
+            # Dynamic theming owns the stylesheet via its watchers/poller.
             self.start_dynamic_theming()
         else:
+            # Static theme: stop any running dynamic watchers, then apply the
+            # matching stylesheet immediately.
             self.stop_dynamic_theming()
+            tokens = get_tokens_for_mode(mode)
+            QApplication.instance().setStyleSheet(get_stylesheet(tokens))
 
     def start_dynamic_theming(self):
         self.wallpaper_timer.start(5000) # Poll every 5 seconds
@@ -491,7 +537,6 @@ class MainWindow(QMainWindow):
         )
         self._aether_theme_path = None
         self.last_aether_tokens = None
-        QApplication.instance().setStyleSheet(get_stylesheet()) # Reset to fallback Theme
 
     def check_wallpaper_update(self):
         # Aether writes the live palette to colors.toml when you change the wallpaper.

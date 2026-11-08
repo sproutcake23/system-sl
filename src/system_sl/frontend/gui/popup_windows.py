@@ -37,7 +37,7 @@ from system_sl.core.priority_engine_new import (
     ThompsonSampler,
     save_manual_order,
 )  # we are importing run_prioritization from api section(priority_engine_new)
-from system_sl.utils.aether_theme import get_current_tokens
+from system_sl.frontend.gui.theme import get_current_theme_tokens
 
 
 # GUI-added tasks no longer carry a user-chosen category — the model assigns one
@@ -411,8 +411,8 @@ class OnboardingWindow(QWidget):
 
         self.stack.setCurrentIndex(0)
 
-        # Apply dynamic theme colors (falls back to DEFAULT_TOKENS if Aether is absent).
-        self._tokens = get_current_tokens()
+        # Apply theme colors based on the selected theme mode.
+        self._tokens = get_current_theme_tokens()
         self.refresh_theme()
 
     def _build_welcome_page(self):
@@ -542,7 +542,7 @@ class OnboardingWindow(QWidget):
     def refresh_theme(self, tokens=None):
         """Re-apply dynamic colors to all onboarding labels."""
         if tokens is None:
-            tokens = get_current_tokens()
+            tokens = get_current_theme_tokens()
 
         primary = tokens.get("sys_color_primary", "#00d9ff")
         text_secondary = tokens.get("sys_color_text_secondary", "#b3d4ff")

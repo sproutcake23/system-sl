@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from system_sl.utils.audio_manager import play_sound, get_current_sound
-from system_sl.utils.aether_theme import get_current_tokens
+from system_sl.frontend.gui.theme import get_current_theme_tokens
 
 
 class SystemNotification(QWidget):
@@ -114,7 +114,7 @@ class SystemNotification(QWidget):
         always matches the live Aether palette.
         """
         if tokens is None:
-            tokens = get_current_tokens()
+            tokens = get_current_theme_tokens()
 
         bg = tokens.get("sys_color_background", "#060912")
         primary = tokens.get("sys_color_primary", "#00d9ff")

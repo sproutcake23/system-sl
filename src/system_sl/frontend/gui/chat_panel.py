@@ -70,7 +70,7 @@ from system_sl.chatbot import (
 )
 # --- Dynamic Theming Utilities ---
 from system_sl.core import add_tasks, load_tasks
-from system_sl.utils.aether_theme import get_current_tokens
+from system_sl.frontend.gui.theme import get_current_theme_tokens
 
 
 def _colorize_markdown_html(body: str, color: str) -> str:
@@ -1046,11 +1046,12 @@ class ChatPanel(QWidget):
     # ----- Transcript Rendering -----
 
     def _get_live_tokens(self) -> dict:
-        """Fetches the live dynamic theme colors from Aether's palette.
+        """Fetches the live theme colors based on the selected theme mode.
 
-        Falls back to DEFAULT_TOKENS when Aether's theme file is unavailable.
+        Respects the player's theme choice (Default / Light / Dark / Dynamic)
+        stored in QSettings. Falls back to default tokens when unavailable.
         """
-        return get_current_tokens()
+        return get_current_theme_tokens()
 
     def _append_player(self, text: str) -> None:
         """Append a user (PLAYER) message as a right-aligned bubble, no label."""
