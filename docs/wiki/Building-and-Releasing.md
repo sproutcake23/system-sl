@@ -18,7 +18,7 @@ This runs PyInstaller with `packaging/system-sl.spec`, which the release workflo
 
 The result is a self-contained binary for your current OS.
 
-To package that binary as an AppImage on Linux:
+To build the AppImage on Linux, which makes its own one-folder build so that it doesn't unpack on every launch:
 
 ```bash
 uv run python packaging/appimage/build-appimage.py

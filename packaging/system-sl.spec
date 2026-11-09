@@ -1,6 +1,9 @@
 # PyInstaller build for every platform: release.yml and build-sl both use this.
 #
 #   pyinstaller packaging/system-sl.spec --noconfirm --clean
+#
+# Set SYSTEM_SL_ONEDIR=1 for a folder instead of one self-unpacking file. The
+# AppImage uses that, because it is already a single file and is not unpacked.
 
 import glob
 import os
@@ -95,12 +98,23 @@ if IS_WINDOWS:
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    name="system-sl",
-    console=False,
-    upx=False,
-)
+if os.environ.get("SYSTEM_SL_ONEDIR") == "1":
+    exe = EXE(
+        pyz,
+        a.scripts,
+        exclude_binaries=True,
+        name="system-sl",
+        console=False,
+        upx=False,
+    )
+    coll = COLLECT(exe, a.binaries, a.datas, name="system-sl", upx=False)
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        name="system-sl",
+        console=False,
+        upx=False,
+    )
