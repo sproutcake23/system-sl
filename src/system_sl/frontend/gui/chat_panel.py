@@ -447,6 +447,8 @@ class LLMSettingsPage(QWidget):
 
     def _populate_model_table(self) -> None:
         """Populate the model table with fetched models."""
+        tokens = get_current_theme_tokens()
+        success_color = QColor(tokens.get("sys_color_success", "#4ade80"))
         self.model_table.blockSignals(True)
         self.model_table.setRowCount(len(self._fetched_models))
 
@@ -462,7 +464,7 @@ class LLMSettingsPage(QWidget):
             name_item = QTableWidgetItem(model.display_name)
             name_item.setData(Qt.UserRole, model.id)
             if model.is_free:
-                name_item.setForeground(QColor("#4ade80"))  # Green for free
+                name_item.setForeground(success_color)  # Green for free
                 font = QFont()
                 font.setBold(True)
                 name_item.setFont(font)
@@ -483,7 +485,7 @@ class LLMSettingsPage(QWidget):
             price_item = QTableWidgetItem(model.price_display)
             price_item.setData(Qt.UserRole, model.id)
             if model.is_free:
-                price_item.setForeground(QColor("#4ade80"))
+                price_item.setForeground(success_color)
             self.model_table.setItem(row, 4, price_item)
 
         self.model_table.blockSignals(False)
@@ -741,8 +743,9 @@ class ChatPanel(QWidget):
         # One bright dot travels left to right through a fixed-width field.
         self._dots_start: int | None = None
         self._dots_frame: int = 0
-        self._dots_bright: str = "#00d9ff"
-        self._dots_dim: str = "#9ab8e5"
+        _initial_tokens = get_current_theme_tokens()
+        self._dots_bright: str = _initial_tokens.get("sys_color_primary", "#00d9ff")
+        self._dots_dim: str = _initial_tokens.get("sys_color_text_secondary", "#9ab8e5")
         self._dots_timer = QTimer(self)
         self._dots_timer.setInterval(200)
         self._dots_timer.timeout.connect(self._tick_dots)
@@ -1021,18 +1024,24 @@ class ChatPanel(QWidget):
 
     def _create_attachment_chip(self, path: Path) -> QWidget:
         """Create a chip widget for an attached file."""
+        tokens = get_current_theme_tokens()
+        chip_background = tokens.get("sys_color_surface_raised", "#0e1626")
+        chip_hover = tokens.get("sys_color_primary_dim", "rgba(0, 217, 255, 0.08)")
+        chip_text = tokens.get("sys_color_text_main", "#d6e7ff")
+        alert = tokens.get("sys_color_alert", "#ff6b8a")
+
         chip = QFrame()
         chip.setObjectName("attachmentChip")
         chip.setFrameShape(QFrame.StyledPanel)
-        chip.setStyleSheet("""
-            QFrame#attachmentChip {
-                background-color: #3a3a50;
+        chip.setStyleSheet(f"""
+            QFrame#attachmentChip {{
+                background-color: {chip_background};
                 border-radius: 12px;
                 padding: 2px 8px;
-            }
-            QFrame#attachmentChip:hover {
-                background-color: #4a4a60;
-            }
+            }}
+            QFrame#attachmentChip:hover {{
+                background-color: {chip_hover};
+            }}
         """)
         layout = QHBoxLayout(chip)
         layout.setContentsMargins(8, 2, 4, 2)
@@ -1045,22 +1054,22 @@ class ChatPanel(QWidget):
         else:
             size_str = f"{size_kb:.0f} KB"
         label = QLabel(f"{path.name} ({size_str})")
-        label.setStyleSheet("color: #d6e7ff; font-size: 11px;")
+        label.setStyleSheet(f"color: {chip_text}; font-size: 11px;")
         layout.addWidget(label)
 
         # Remove button
         remove_btn = QPushButton()
         remove_btn.setIcon(get_icon("remove", role="sys_color_text_secondary", size=14))
         remove_btn.setFixedSize(18, 18)
-        remove_btn.setStyleSheet("""
-            QPushButton {
+        remove_btn.setStyleSheet(f"""
+            QPushButton {{
                 background: transparent;
                 border: none;
                 border-radius: 9px;
-            }
-            QPushButton:hover {
-                background: #ff6b8a;
-            }
+            }}
+            QPushButton:hover {{
+                background: {alert};
+            }}
         """)
         remove_btn.setToolTip("Remove attachment")
         remove_btn.clicked.connect(lambda: self._remove_attachment(path))
@@ -1093,23 +1102,40 @@ class ChatPanel(QWidget):
     def _get_live_tokens(self) -> dict:
         """Fetches the live theme colors based on the selected theme mode.
 
-        Respects the player's theme choice (Default / Light / Dark / Dynamic)
+        Respects the player's theme choice (System / Light / Dark / Dynamic)
         stored in QSettings. Falls back to default tokens when unavailable.
         """
         return get_current_theme_tokens()
+
+    def refresh_theme(self, tokens: dict | None = None) -> None:
+        """Refresh colours captured at construction time.
+
+        Transcript bubbles already on screen keep their colour, but the loading
+        dots and the reasoning panel pick up the new palette.
+        """
+        tokens = tokens or self._get_live_tokens()
+        self._dots_bright = tokens.get("sys_color_primary", "#00d9ff")
+        self._dots_dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
+        if self.reasoning_view.isVisible():
+            dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
+            self.reasoning_view.setStyleSheet(
+                f"QTextEdit {{ color: {dim}; font-style: italic;"
+                f" border: none; border-left: 2px solid {dim};"
+                f" background: transparent; padding-left: 6px; }}"
+            )
 
     def _append_player(self, text: str) -> None:
         """Append a user (PLAYER) message as a right-aligned bubble, no label."""
         tokens = self._get_live_tokens()
         bg = tokens.get("sys_color_primary", "#00d9ff")
-        fg = "#000000"
+        fg = tokens.get("sys_color_on_primary", "#04121a")
         self._append_bubble(text, align_right=True, bg_color=bg, text_color=fg, escape=True)
 
     def _append_player_with_attachments(self, text: str, attachment_paths: list[str]) -> None:
         """Append a user message with attachment info as a right-aligned bubble."""
         tokens = self._get_live_tokens()
         bg = tokens.get("sys_color_primary", "#00d9ff")
-        fg = "#000000"
+        fg = tokens.get("sys_color_on_primary", "#04121a")
 
         # Build attachment summary
         attach_lines = ["📎 Attached:"]
@@ -1202,8 +1228,10 @@ class ChatPanel(QWidget):
 
     def _append_alert(self, text: str) -> None:
         safe = html.escape(text).replace("\n", "<br>")
-        alert_color = "#ff6b8a"
-        self._append_bubble(safe, align_right=False, bg_color=alert_color, text_color="#ffffff", escape=False)
+        tokens = self._get_live_tokens()
+        alert_color = tokens.get("sys_color_alert", "#ff6b8a")
+        alert_text = tokens.get("sys_color_on_alert", "#ffffff")
+        self._append_bubble(safe, align_right=False, bg_color=alert_color, text_color=alert_text, escape=False)
 
     def _reset_stream_state(self) -> None:
         self._answer_open = False

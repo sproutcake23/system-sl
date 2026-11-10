@@ -85,16 +85,17 @@ class SystemNotification(QWidget):
         self.hide()
 
     def refresh_theme(self, tokens=None):
-        """Re-apply the stylesheet using the current dynamic tokens.
+        """Re-apply the stylesheet using the current theme tokens.
 
         Called on init and before every notification so the notification
-        always matches the live Aether palette.
+        always matches the palette selected in Settings.
         """
         if tokens is None:
             tokens = get_current_theme_tokens()
 
         bg = tokens.get("sys_color_background", "#060912")
         primary = tokens.get("sys_color_primary", "#00d9ff")
+        on_primary = tokens.get("sys_color_on_primary", "#04121a")
         text_main = tokens.get("sys_color_text_main", "#d6e7ff")
         text_secondary = tokens.get("sys_color_text_secondary", "#b3d4ff")
         surface = tokens.get("sys_color_surface", "#0b0f1a")
@@ -124,7 +125,7 @@ class SystemNotification(QWidget):
                 padding: 8px 35px;
                 font-weight: 700;
             }}
-            QPushButton:hover {{ background: {primary}; color: {text_main}; }}
+            QPushButton:hover {{ background: {primary}; color: {on_primary}; }}
         """)
 
     def display_message(self,message: list) -> None:

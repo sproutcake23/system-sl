@@ -32,7 +32,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 - **Native Notifications** — Desktop alerts styled like the System, with custom notification sounds.
 - **Background Reminder** — An hourly notifier that keeps you on track, with its own on/off switch.
 - **Cross-Platform Autostart** — Register the notifier on Linux, Windows, or macOS.
-- **Dynamic Theming** — Optionally match the app's colors to your wallpaper.
+- **Themes** — Follow the system’s light/dark appearance, choose Light, pick a darker near-black Dark palette, or generate colors from your wallpaper.
 - **Tabbed Settings and Collapsible Sidebar** — All options live in one Settings window, and `Ctrl+Shift+S` shrinks the sidebar to a rail of icons.
 - **System Tray** — Optionally keep the app running in the tray when you close the window.
 - **Auto Update** — Optionally install new releases at launch, verified against their published SHA-256 checksums.

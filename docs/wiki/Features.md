@@ -108,12 +108,19 @@ The sidebar holds **Tasks**, **Google** (once sync is enabled), and **Settings**
 
 The **Settings** window has two tabs:
 
-- **General**: notifications, autostart, notification sound, dynamic theming, player profile, close to tray, auto update, Google Tasks Sync, and **Install App** when running as an AppImage
+- **General**: notifications, autostart, notification sound, theme, player profile, close to tray, auto update, Google Tasks Sync, and **Install App** when running as an AppImage
 - **LLM**: chatbot provider, API key, and model
 
-## Dynamic Theming
+## Themes
 
-Turn on **Enable Dynamic Theming** to generate the app's colors from your desktop wallpaper. The SYSTEM checks for a new wallpaper every few seconds and updates the theme, including its icons.
+Choose a theme from the picker in Settings:
+
+- **System** (default) follows your operating system's light/dark appearance and switches when the OS does. In dark mode it uses THE SYSTEM's Solo Leveling navy palette.
+- **Light** uses the built-in light palette.
+- **Dark** uses a darker, OLED-friendly near-black palette with the same cyan accent, so it is visibly distinct from System.
+- **Dynamic** extracts colors from your wallpaper with [wallust](https://codeberg.org/explosion-mental/wallust) and applies them across the whole app, including icons, chat, notifications, dialogs, and the tray. It is always a dark variant, follows the primary monitor, and updates when the wallpaper changes.
+
+Released builds bundle wallust. Running from source requires wallust on your `PATH`, or set `SYSTEM_SL_WALLUST` to its executable. If wallust is unavailable in Dynamic mode, the app falls back to the Dark palette and shows a note in Settings.
 
 ## System Tray
 

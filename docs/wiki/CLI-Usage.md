@@ -37,9 +37,10 @@ Moves the AppImage to `~/Applications` and adds a menu entry for it. **Settings 
 ```bash
 system-sl --check-ocr [report-file]
 system-sl --check-gui [report-file]
+system-sl --check-theme [report-file]
 ```
 
-`--check-ocr` reads a generated scanned PDF. `--check-gui` opens the main window, loads a notification sound, and confirms the Google Tasks API description is present. Each exits with `0` on success. They print the result and also write it to `report-file` if you give one, which is the only way to see it on Windows.
+`--check-ocr` reads a generated scanned PDF. `--check-gui` opens the main window, loads a notification sound, and confirms the Google Tasks API description is present. `--check-theme` runs the bundled wallust on a generated image and verifies that it produces a complete Dynamic palette. Each exits with `0` on success. They print the result and also write it to `report-file` if you give one, which is the only way to see it on Windows.
 
 ## Building a standalone executable
 

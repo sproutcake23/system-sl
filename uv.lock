@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.14"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -260,18 +260,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
-]
-
-[[package]]
-name = "colorthief"
-version = "0.2.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pillow" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b6/b2/b55b741f7a7d1299d23e1c635f00f6c57ea4d2e9b76d09e1fc5ea3ca9921/colorthief-0.2.1.tar.gz", hash = "sha256:079cb0c95bdd669c4643e2f7494de13b0b6029d5cdbe2d74d5d3c3386bd57221", size = 6164, upload-time = "2017-02-09T07:13:15.7Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/18/be03b7058e65f9df479b14e7af4e73945ce311e07aaad45cf2536e14791a/colorthief-0.2.1-py2.py3-none-any.whl", hash = "sha256:b04fc8ce5cf9c888768745e29cb19b7b688d5711af6fba26e8057debabec56b9", size = 6134, upload-time = "2017-02-09T07:13:19.041Z" },
 ]
 
 [[package]]
@@ -2045,7 +2033,6 @@ source = { editable = "." }
 dependencies = [
     { name = "certifi" },
     { name = "click" },
-    { name = "colorthief" },
     { name = "cryptography" },
     { name = "en-core-web-md" },
     { name = "google-api-python-client" },
@@ -2084,7 +2071,6 @@ build = [
 requires-dist = [
     { name = "certifi", specifier = ">=2024.8.30" },
     { name = "click", specifier = ">=8.4.1" },
-    { name = "colorthief", specifier = "==0.2.1" },
     { name = "cryptography", specifier = ">=42.0.0" },
     { name = "en-core-web-md", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" },
     { name = "google-api-python-client" },

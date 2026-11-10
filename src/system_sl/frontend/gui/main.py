@@ -2,7 +2,6 @@ import os
 import sys
 from pathlib import Path
 import subprocess
-from typing import Dict, Optional
 
 from dotenv import load_dotenv, set_key
 
@@ -24,20 +23,20 @@ def install_desktop_entry() -> int:
     print(f"✅ Installed to: {installed}")
     print(f"   Menu entry: {DESKTOP_FILE}")
     return 0
-from PySide6.QtCore import QSize, QTimer, QSettings, QFileSystemWatcher, Qt, Slot, QObject, QThread, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtCore import QSize, QTimer, QSettings, Qt, Slot, QObject, QThread, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
     QWidget,
     QPushButton,
     QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QVBoxLayout,
     QLabel,
     QMessageBox,
     QFileDialog,
-    QInputDialog,
     QSizePolicy,
     QDialog,
     QSystemTrayIcon,
@@ -46,22 +45,14 @@ from PySide6.QtWidgets import (
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
 from system_sl.frontend.gui.chat_panel import ChatPanel
 from system_sl.frontend.gui.settings_window import AppSettingsDialog
-from system_sl.frontend.gui.theme import (
-    apply_theme,
-    get_current_theme_tokens,
-    get_tokens_for_mode,
-)
+from system_sl.frontend.gui.theme import THEME_MODE_LABELS, THEME_MODES
+from system_sl.frontend.gui.theme_manager import get_theme_manager
 from system_sl.frontend.gui.icons import get_icon, initialize_icons
 from system_sl.utils import (
     CrossPlatformAutostart,
     SystemNotification,
     get_tasks_file_path,
-    get_wallpaper_path,
     GoogleSyncError,
-)
-from system_sl.utils.aether_theme import (
-    generate_aether_tokens,
-    find_aether_colors_toml,
 )
 from system_sl.core import GoogleSyncEngine, TasksProvider
 from system_sl.core.onboarding import PersonaStorageHandler
@@ -71,7 +62,6 @@ from system_sl.utils.audio_manager import (
     set_sound_setting,
     DEFAULT_SOUNDS_DIR,
 )
-from system_sl.utils.theme_gen import generate_dynamic_tokens
 from system_sl.utils.autostart_migration import initialize_application_autostart
 from system_sl.utils.notification_settings import (
     load_notifications_enabled,
@@ -126,21 +116,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Main Menu")
         self.setMinimumSize(QSize(700, 400))
 
-        # --- NEW: Theme Settings Initialization ---
+        # Apply the saved theme before any widget is built, so every window,
+        # dialog and notification starts in the right palette.
         self.settings = QSettings("system-sl", "AppConfig")
-        self.last_wallpaper_path = None
-        self.wallpaper_timer = QTimer(self)
-        self.wallpaper_timer.timeout.connect(self.check_wallpaper_update)
-
-        # --- NEW: Aether theme file watcher ---
-        # Aether writes the live palette to ~/.local/state/omarchy/current/theme/colors.toml.
-        # We watch that file so SL recolors instantly when Aether applies a new theme.
-        self.aether_theme_watcher = QFileSystemWatcher()
-        self.aether_theme_watcher.fileChanged.connect(
-            self.check_aether_theme_update
-        )
-        self.last_aether_tokens: Optional[Dict[str, str]] = None
-        self._aether_theme_path: Optional[str] = None
+        self.theme_manager = get_theme_manager()
+        self.theme_manager.start()
+        self._theme_status_text = self.theme_manager.status_message
 
         self.autostart = CrossPlatformAutostart()
         self.notifier_view = None
@@ -159,6 +140,8 @@ class MainWindow(QMainWindow):
         )
         self.tray_icon = None
         self._setup_tray_icon()
+        self.theme_manager.themeChanged.connect(self._on_theme_changed)
+        self.theme_manager.statusChanged.connect(self._on_theme_status)
 
         main_container = QWidget()
         self.setCentralWidget(main_container)
@@ -250,19 +233,6 @@ class MainWindow(QMainWindow):
 
         self._apply_sidebar_state()
 
-        # Restore the saved theme mode and apply it. Older versions stored a
-        # ``dynamic_theming`` boolean instead of ``theme_mode``; carry it over.
-        saved_mode = self.settings.value("theme_mode", None, type=str)
-        if not saved_mode:
-            saved_mode = (
-                "dynamic"
-                if self.settings.value("dynamic_theming", False, type=bool)
-                else "default"
-            )
-            self.settings.setValue("theme_mode", saved_mode)
-        self._current_theme_mode = saved_mode
-        self._apply_theme_mode(self._current_theme_mode, save=False)
-
         # The reminder used to start unconditionally, so merely opening the
         # app produced a popup even with autostart off. Start it only when the
         # user asked for reminders, and never fire at launch: the hourly timer
@@ -294,32 +264,31 @@ class MainWindow(QMainWindow):
         self.sound_button.setIcon(get_icon("sound"))
         self.sound_button.clicked.connect(self.change_notification_sound)
 
-        # Theme picker: a menu button because the four modes are mutually
-        # exclusive (Default / Light / Dark / Dynamic).
-        self.theme_button = QPushButton("Themes")
-        self.theme_button.setIcon(get_icon("dynamic_theme"))
-        self.theme_button.setToolTip(
-            "Choose a theme: Default, Light, Dark or Dynamic.\n"
-            "Dynamic follows the wallpaper via Aether, or the built-in palette."
+        # Theme picker: System, Light, Dark or Dynamic.
+        self.theme_combo = QComboBox()
+        self.theme_combo.setMinimumWidth(170)
+        self.theme_combo.setCursor(Qt.PointingHandCursor)
+        for mode in THEME_MODES:
+            self.theme_combo.addItem(THEME_MODE_LABELS[mode], mode)
+        self.theme_combo.setToolTip(
+            "System follows your operating system's light/dark setting.\n"
+            "Dark is a darker, near-black palette.\n"
+            "Dynamic derives the palette from your wallpaper with wallust."
         )
-        self.theme_menu = QMenu(self)
-        self.theme_action_group = QActionGroup(self)
-        self.theme_action_group.setExclusive(True)
-        self.theme_mode_actions = {}
-        for mode, label in (
-            ("default", "Default"),
-            ("light", "Light"),
-            ("dark", "Dark"),
-            ("dynamic", "Dynamic"),
-        ):
-            action = QAction(label, self)
-            action.setCheckable(True)
-            action.setData(mode)
-            action.triggered.connect(self.on_theme_action_triggered)
-            self.theme_action_group.addAction(action)
-            self.theme_menu.addAction(action)
-            self.theme_mode_actions[mode] = action
-        self.theme_button.setMenu(self.theme_menu)
+        current_mode = self.theme_manager.mode
+        index = self.theme_combo.findData(current_mode)
+        if index >= 0:
+            self.theme_combo.setCurrentIndex(index)
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_combo_changed)
+
+        self.theme_status = QLabel("")
+        self.theme_status.setObjectName("themeStatus")
+        self.theme_status.setWordWrap(True)
+        self.theme_status.setText(self._theme_status_text)
+        self.theme_status.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        self.theme_status.setVisible(bool(self._theme_status_text))
 
         self.profile_button = QPushButton("Edit Player Profile")
         self.profile_button.setIcon(get_icon("profile"))
@@ -359,7 +328,7 @@ class MainWindow(QMainWindow):
 
         sections = (
             ("Notifications", (self.notifications_check, self.check_box, self.sound_button)),
-            ("Appearance", (self.theme_button,)),
+            ("Appearance", (self.theme_combo, self.theme_status)),
             ("Player", (self.profile_button,)),
             (
                 "App",
@@ -465,25 +434,46 @@ class MainWindow(QMainWindow):
         button.setText("" if self.sidebar_collapsed else label)
         button.setToolTip(label if self.sidebar_collapsed else "")
 
+    def _tray_pixmap(self, tokens: dict) -> QPixmap:
+        """Draw the tray mark with Qt so frozen builds need no SVG plugin."""
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        background = QColor(tokens.get("sys_color_surface_raised", "#0e1626"))
+        accent = QColor(tokens.get("sys_color_primary", "#00d9ff"))
+        painter.setBrush(background)
+        painter.setPen(accent)
+        painter.drawEllipse(3, 3, 58, 58)
+        painter.setPen(accent)
+        painter.setFont(QFont("Arial", 19, QFont.Weight.Bold))
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "SL")
+        painter.end()
+        return pixmap
+
+    def _on_theme_changed(self, tokens: dict) -> None:
+        """Recolour the tray and any open wizard when the palette changes."""
+        if self.tray_icon is not None:
+            self.tray_icon.setIcon(QIcon(self._tray_pixmap(tokens)))
+        chat = getattr(self, "chat_panel", None)
+        if chat is not None:
+            chat.refresh_theme(tokens)
+        if self.onboarding_window is not None:
+            self.onboarding_window.refresh_theme(tokens)
+
+    def _on_theme_status(self, message: str) -> None:
+        self._theme_status_text = message
+        status = getattr(self, "theme_status", None)
+        if status is not None:
+            status.setText(message)
+            status.setVisible(bool(message))
+
     def _setup_tray_icon(self):
         """Create the tray menu used to restore or fully exit the app."""
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
 
-        # Draw the small tray mark with Qt so it works in frozen builds even
-        # when the platform's SVG image plugin is not bundled.
-        pixmap = QPixmap(64, 64)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(QColor("#10182b"))
-        painter.setPen(QColor("#00d9ff"))
-        painter.drawEllipse(3, 3, 58, 58)
-        painter.setPen(QColor("#00d9ff"))
-        painter.setFont(QFont("Arial", 19, QFont.Weight.Bold))
-        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "SL")
-        painter.end()
-        self.tray_icon = QSystemTrayIcon(QIcon(pixmap), self)
+        self.tray_icon = QSystemTrayIcon(self._tray_pixmap(self.theme_manager.tokens), self)
         self.tray_icon.setToolTip("THE SYSTEM")
         menu = QMenu()
         show_action = QAction("Open THE SYSTEM", self)
@@ -671,131 +661,12 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "Failed", "Could not install the app.\nMake sure you're running from the AppImage.")
 
-    # --- NEW: Theme Manager Methods ---
-    def on_theme_action_triggered(self):
-        """Handle a theme menu action being triggered."""
-        action = self.sender()
-        if not action or not isinstance(action, QAction):
+    def _on_theme_combo_changed(self, index: int) -> None:
+        if index < 0:
             return
-        mode = action.data()
-        if not isinstance(mode, str):
-            return
-        self._apply_theme_mode(mode, save=True)
-
-    def _apply_theme_mode(self, mode: str, save: bool = True):
-        """Apply the given theme mode and persist it if requested.
-
-        Modes: ``default``, ``dark``, ``light``, ``dynamic``.
-        """
-        # Update the checkable action group so the UI reflects the choice.
-        for action in self.theme_action_group.actions():
-            if action.data() == mode:
-                action.setChecked(True)
-
-        self._current_theme_mode = mode
-
-        if save:
-            self.settings.setValue("theme_mode", mode)
-            self.settings.sync()
-
-        if mode == "dynamic":
-            # Dynamic theming owns the stylesheet via its watchers/poller.
-            self.start_dynamic_theming()
-        else:
-            # Static theme: stop any running dynamic watchers, then apply the
-            # matching stylesheet (and icon colours) immediately.
-            self.stop_dynamic_theming()
-            apply_theme(QApplication.instance(), get_tokens_for_mode(mode))
-
-        # Keep an open onboarding wizard in sync with the new palette.
-        onboarding = getattr(self, "onboarding_window", None)
-        if onboarding is not None:
-            onboarding.refresh_theme()
-
-    def start_dynamic_theming(self):
-        self.wallpaper_timer.start(5000) # Poll every 5 seconds
-        self.check_wallpaper_update() # Instantly check when toggled on
-
-        # Start watching Aether's live theme file for instant updates.
-        self._refresh_aether_watch()
-
-    def stop_dynamic_theming(self):
-        self.wallpaper_timer.stop()
-        self.last_wallpaper_path = None
-        if self.aether_theme_watcher.files():
-            self.aether_theme_watcher.removePaths(
-                self.aether_theme_watcher.files()
-            )
-        self._aether_theme_path = None
-        self.last_aether_tokens = None
-
-    def check_wallpaper_update(self):
-        # Only the Dynamic mode should ever rewrite the stylesheet.
-        if self.settings.value("theme_mode", "default", type=str) != "dynamic":
-            return
-
-        # Aether writes the live palette to colors.toml when you change the wallpaper.
-        # If Aether is active, its QFileSystemWatcher handles updates instantly — do NOT
-        # fall through to the wallpaper-polling fallback here, otherwise it would overwrite
-        # the Aether-applied colors with locally-extracted ColorThief colors every 5s
-        # (causing the "rolls back to defaults" behavior).
-        if find_aether_colors_toml():
-            self.check_aether_theme_update()  # apply once if watcher missed an event
-            return
-
-        # Fallback: poll the wallpaper path and extract colors locally (for systems
-        # where Aether is not running or does not write a colors.toml).
-        current_path = get_wallpaper_path()
-        if current_path and current_path != self.last_wallpaper_path and "Error" not in current_path:
-            self.last_wallpaper_path = current_path
-
-            # Safely expand paths like ~/Pictures/wallpaper.jpg
-            expanded_path = os.path.expanduser(current_path)
-
-            # Generate new semantic tokens and inject them into the stylesheet
-            new_tokens = generate_dynamic_tokens(expanded_path)
-            apply_theme(QApplication.instance(), new_tokens)
-
-    def check_aether_theme_update(self) -> bool:
-        """Read Aether's live colors.toml and apply it to SL if it changed.
-
-        Returns ``True`` if a new theme was applied, ``False`` otherwise.
-        """
-        if self.settings.value("theme_mode", "default", type=str) != "dynamic":
-            return False
-
-        theme_path = find_aether_colors_toml()
-        if not theme_path:
-            return False
-
-        # Re-watch the file if Aether moved it. Aether rewrites colors.toml
-        # in place, and some editors replace the file, which silently drops
-        # Qt's watch — so re-add the path whenever it is not being watched.
-        if theme_path != self._aether_theme_path or theme_path not in self.aether_theme_watcher.files():
-            if self.aether_theme_watcher.files():
-                self.aether_theme_watcher.removePaths(
-                    self.aether_theme_watcher.files()
-                )
-            self.aether_theme_watcher.addPath(theme_path)
-            self._aether_theme_path = theme_path
-
-        new_tokens = generate_aether_tokens(theme_path)
-        if new_tokens == self.last_aether_tokens:
-            return False
-
-        self.last_aether_tokens = new_tokens
-        apply_theme(QApplication.instance(), new_tokens)
-        return True
-
-    def _refresh_aether_watch(self):
-        """(Re)start watching Aether's live theme file if it exists."""
-        theme_path = find_aether_colors_toml()
-        if not theme_path:
-            return
-        if theme_path not in self.aether_theme_watcher.files():
-            self.aether_theme_watcher.addPath(theme_path)
-        self._aether_theme_path = theme_path
-
+        mode = self.theme_combo.itemData(index)
+        if isinstance(mode, str) and mode != self.theme_manager.mode:
+            self.theme_manager.set_mode(mode, persist=True)
 
     def _toggle_auto_update(self):
         enabled = self.auto_update_check.isChecked()
@@ -869,6 +740,45 @@ def _run_ocr_check():
     _finish_check("--check-ocr", ok, details)
 
 
+def _run_theme_check():
+    """Verify the frozen build can run wallust and map its palette to tokens."""
+    import tempfile
+
+    from PIL import Image
+
+    from system_sl.utils.theme_gen import DEFAULT_TOKENS
+    from system_sl.utils.wallust_theme import find_wallust, generate_wallust_tokens
+
+    problems = []
+    binary = find_wallust()
+    if not binary:
+        problems.append("wallust is not bundled")
+    else:
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                image_path = os.path.join(directory, "check.png")
+                image = Image.new("RGB", (48, 48))
+                pixels = image.load()
+                for y in range(48):
+                    for x in range(48):
+                        pixels[x, y] = (int(255 * x / 47), int(255 * y / 47), 128)
+                image.save(image_path)
+
+                tokens = generate_wallust_tokens(image_path, use_cache=False)
+                missing = [key for key in DEFAULT_TOKENS if not tokens.get(key)]
+                if missing:
+                    problems.append("missing tokens: " + ", ".join(sorted(missing)))
+                if tokens == DEFAULT_TOKENS:
+                    problems.append("wallust fell back to the built-in palette")
+        except Exception as exc:
+            problems.append(f"{type(exc).__name__}: {exc}")
+
+    details = "Theme check failed: " + "; ".join(problems) if problems else "Theme check passed"
+    if binary:
+        details += f" ({binary})"
+    _finish_check("--check-theme", not problems, details)
+
+
 def _run_gui_check():
     """Exercise what trimming the bundle could break, and exit with the result."""
     from googleapiclient.discovery_cache import get_static_doc
@@ -880,7 +790,7 @@ def _run_gui_check():
     try:
         app = QApplication(sys.argv)
         initialize_icons()
-        apply_theme(app)
+        get_theme_manager(app).start()
         window = MainWindow()
         window.show()
         window.open_tasks_window()
@@ -921,6 +831,8 @@ def main():
         _run_ocr_check()
     if "--check-gui" in sys.argv:
         _run_gui_check()
+    if "--check-theme" in sys.argv:
+        _run_theme_check()
 
     # Handle --install-desktop flag before Qt initialization
     if "--install-desktop" in sys.argv:
@@ -934,8 +846,8 @@ def main():
     # Initialize icon system (loads FontAwesome fonts)
     initialize_icons()
 
-    # --- CHANGED: Inject the saved theme (and icon colours) on launch ---
-    apply_theme(app, get_current_theme_tokens())
+    # Apply the saved theme (and icon colours) before any window is created.
+    get_theme_manager(app).start()
     app.setQuitOnLastWindowClosed(False)
     initialize_application_autostart()
 
@@ -955,9 +867,6 @@ def main():
             )
             sys.exit(0)
         print("[INFO] Running in background notifier mode...")
-        # The notification widget re-reads the saved theme mode itself, but
-        # applying it here also keeps any dialogs it opens consistent.
-        apply_theme(app, get_current_theme_tokens())
 
         view = SystemNotification()
         controller = BackgroundServiceController(view)

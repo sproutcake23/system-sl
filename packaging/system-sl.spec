@@ -67,6 +67,32 @@ datas = [(str(ROOT / "src/system_sl/assets"), "assets")]
 binaries = []
 hiddenimports = ["pytesseract", "pdf2image", "pdf2image.pdf2image"]
 
+
+def wallust_binary():
+    """Return a pinned wallust binary downloaded by release.yml, if present."""
+    override = os.environ.get("SYSTEM_SL_WALLUST_BUILD")
+    candidates = []
+    if override:
+        candidates.append(Path(override))
+    candidates.append(
+        ROOT / "vendor" / "wallust" / ("wallust.exe" if IS_WINDOWS else "wallust")
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
+
+wallust = wallust_binary()
+if wallust is None:
+    print(
+        "[build] WARNING: no vendor/wallust binary; Dynamic theme will need "
+        "wallust on PATH at runtime",
+        file=sys.stderr,
+    )
+elif IS_WINDOWS:
+    # Copy the Rust executable untouched; it has no side-by-side DLLs to scan.
+    datas.append((str(wallust), "."))
+else:
+    binaries.append((str(wallust), "."))
+
 datas += collect_data_files("spellchecker")
 for package in ("en_core_web_md", "certifi"):
     package_datas, package_binaries, package_imports = collect_all(package)

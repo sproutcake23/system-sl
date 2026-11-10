@@ -1,99 +1,184 @@
-# --- Light theme tokens (proper light palette — not the default dark colors) ---
+"""Theme tokens, theme-mode resolution, and the application stylesheet.
+
+The app has four modes:
+
+* ``system``  – follow the operating system's light/dark appearance; its dark
+  side uses THE SYSTEM's Solo Leveling navy palette
+* ``light``   – the built-in light palette
+* ``dark``    – a darker, OLED-friendly near-black palette
+* ``dynamic`` – colours extracted from the wallpaper by wallust
+
+Every UI target reads :func:`get_current_theme_tokens`, so switching modes (or
+a wallpaper change in Dynamic mode) restyles the whole app, not one window.
+"""
+
+import base64
+
+# --- Light theme ---
 LIGHT_TOKENS = {
     "sys_color_background": "#ffffff",
-    "sys_color_surface": "#f3f4f6",
-    "sys_color_surface_raised": "#e5e7eb",
-    "sys_color_border": "#d1d5db",
-    "sys_color_border_muted": "#9ca3af",
-    "sys_color_primary": "#00d9ff",
-    "sys_color_primary_light": "#67e8ff",
-    "sys_color_primary_dim": "rgba(0, 217, 255, 0.12)",
-    "sys_color_primary_hover": "rgba(0, 217, 255, 0.20)",
-    "sys_color_primary_pressed": "rgba(0, 217, 255, 0.30)",
-    "sys_color_text_main": "#000000",
-    "sys_color_text_secondary": "#333333",
-    "sys_color_text_highlight": "#00d9ff",
-    "sys_color_text_muted": "#6b7280",
+    "sys_color_surface": "#f8fafc",
+    "sys_color_surface_raised": "#eef2f7",
+    "sys_color_border": "#cbd5e1",
+    "sys_color_border_muted": "#e2e8f0",
+    "sys_color_primary": "#0891b2",
+    "sys_color_primary_light": "#0e7490",
+    "sys_color_primary_dim": "rgba(8, 145, 178, 0.12)",
+    "sys_color_primary_hover": "rgba(8, 145, 178, 0.20)",
+    "sys_color_primary_pressed": "rgba(8, 145, 178, 0.30)",
+    "sys_color_text_main": "#0b1220",
+    "sys_color_text_secondary": "#334155",
+    "sys_color_text_highlight": "#0e7490",
+    "sys_color_text_muted": "#64748b",
+    "sys_color_on_primary": "#ffffff",
+    "sys_color_button_text": "#0e7490",
+    "sys_color_success": "#15803d",
+    "sys_color_alert": "#dc2626",
+    "sys_color_on_alert": "#ffffff",
+    "sys_color_disabled_surface": "rgba(15, 23, 42, 0.04)",
+    "sys_color_selection_text": "#0b1220",
 }
 
-# Dark theme: aesthetic pure-black background with white text.
+# --- Dark theme: near-black, so it is visibly darker than the navy default ---
 DARK_TOKENS = {
     "sys_color_background": "#000000",
-    "sys_color_surface": "#0d0d0d",
-    "sys_color_surface_raised": "#141414",
-    "sys_color_border": "#2a2a2a",
-    "sys_color_border_muted": "#1a1a1a",
+    "sys_color_surface": "#050505",
+    "sys_color_surface_raised": "#0b0b0b",
+    "sys_color_border": "#262626",
+    "sys_color_border_muted": "#141414",
     "sys_color_primary": "#00d9ff",
     "sys_color_primary_light": "#67e8ff",
-    "sys_color_primary_dim": "rgba(0, 217, 255, 0.12)",
-    "sys_color_primary_hover": "rgba(0, 217, 255, 0.20)",
+    "sys_color_primary_dim": "rgba(0, 217, 255, 0.10)",
+    "sys_color_primary_hover": "rgba(0, 217, 255, 0.18)",
     "sys_color_primary_pressed": "rgba(0, 217, 255, 0.30)",
-    "sys_color_text_main": "#ffffff",
-    "sys_color_text_secondary": "#e5e7eb",
-    "sys_color_text_highlight": "#00d9ff",
-    "sys_color_text_muted": "#9ca3af",
+    "sys_color_text_main": "#f5f5f5",
+    "sys_color_text_secondary": "#c7c7c7",
+    "sys_color_text_highlight": "#67e8ff",
+    "sys_color_text_muted": "#7a7a7a",
+    "sys_color_on_primary": "#04121a",
+    "sys_color_button_text": "#67e8ff",
+    "sys_color_success": "#4ade80",
+    "sys_color_alert": "#ff6b8a",
+    "sys_color_on_alert": "#ffffff",
+    "sys_color_disabled_surface": "rgba(255, 255, 255, 0.02)",
+    "sys_color_selection_text": "#ffffff",
 }
+
+THEME_MODES = ("system", "light", "dark", "dynamic")
+THEME_MODE_LABELS = {
+    "system": "System",
+    "light": "Light",
+    "dark": "Dark",
+    "dynamic": "Dynamic",
+}
+DEFAULT_THEME_MODE = "system"
+
+_active_tokens = None
 
 
 def _default_tokens() -> dict:
-    """Lazily load DEFAULT_TOKENS to avoid circular imports at module load time."""
+    """Lazily load the navy DEFAULT_TOKENS to avoid circular imports."""
     from system_sl.utils.theme_gen import DEFAULT_TOKENS
 
     return dict(DEFAULT_TOKENS)
 
 
-def get_tokens_for_mode(mode: str = "default") -> dict:
-    """Return the token dict for a given theme mode.
+def normalize_theme_mode(mode, dynamic_theming: bool = False) -> str:
+    """Map legacy values to one of :data:`THEME_MODES`."""
+    if mode in THEME_MODES:
+        return mode
+    if mode == "default":
+        return "dark"
+    return "dynamic" if dynamic_theming else DEFAULT_THEME_MODE
 
-    Modes: ``default``, ``dark``, ``light``, ``dynamic``.
-    """
+
+def get_saved_theme_mode(settings=None) -> str:
+    """Read ``theme_mode``, migrating the old boolean setting if needed."""
+    from PySide6.QtCore import QSettings
+
+    settings = settings or QSettings("system-sl", "AppConfig")
+    raw = settings.value("theme_mode", None, type=str)
+    if not raw:
+        legacy_dynamic = settings.value("dynamic_theming", False, type=bool)
+        mode = "dynamic" if legacy_dynamic else DEFAULT_THEME_MODE
+        settings.setValue("theme_mode", mode)
+        settings.sync()
+        return mode
+
+    mode = normalize_theme_mode(raw)
+    if mode != raw:
+        settings.setValue("theme_mode", mode)
+        settings.sync()
+    return mode
+
+
+def get_tokens_for_mode(mode: str = DEFAULT_THEME_MODE) -> dict:
+    """Return a complete token dict for *mode*."""
+    mode = normalize_theme_mode(mode)
     if mode == "light":
-        return LIGHT_TOKENS
+        return dict(LIGHT_TOKENS)
     if mode == "dark":
-        return DARK_TOKENS
+        return dict(DARK_TOKENS)
     if mode == "dynamic":
-        from system_sl.utils.aether_theme import get_current_tokens
+        from system_sl.utils.wallust_theme import cached_wallust_tokens
 
-        return get_current_tokens()
-    # default
+        return cached_wallust_tokens()
+
+    from system_sl.utils.system_theme import detect_system_color_scheme
+
+    if detect_system_color_scheme() == "light":
+        return dict(LIGHT_TOKENS)
     return _default_tokens()
 
 
+def set_active_tokens(tokens=None) -> None:
+    """Record the tokens the ThemeManager applied; used by every UI target."""
+    global _active_tokens
+    _active_tokens = dict(tokens) if tokens else None
+
+
 def get_current_theme_tokens() -> dict:
-    """Return tokens for the currently selected theme mode.
-
-    Reads ``theme_mode`` from QSettings (``system-sl`` / ``AppConfig``) and
-    resolves it via :func:`get_tokens_for_mode`. Falls back to ``default``
-    when no preference is stored yet. This is the single source of truth so
-    every UI target (main window, onboarding, chat panel, notifications)
-    respects the player's theme choice.
-    """
-    from PySide6.QtCore import QSettings
-
-    settings = QSettings("system-sl", "AppConfig")
-    mode = settings.value("theme_mode", "default", type=str)
-    return get_tokens_for_mode(mode)
+    """Return the tokens currently painted, resolving the saved mode if needed."""
+    if _active_tokens is not None:
+        return dict(_active_tokens)
+    return get_tokens_for_mode(get_saved_theme_mode())
 
 
 def apply_theme(app, tokens=None):
     """Restyle the whole application, including icons, with the given tokens."""
-    # Imported lazily: icons -> theme_gen -> utils/__init__ -> notifications_ui
-    # -> this module would otherwise be a circular import at startup.
+    # Imported lazily: icons -> theme_gen would otherwise be a circular import
+    # at startup.
     from system_sl.frontend.gui.icons import set_icon_theme
 
     if tokens is None:
         tokens = _default_tokens()
+    set_active_tokens(tokens)
     # Icons first: restyling repaints every widget, which is what recolours them.
     set_icon_theme(tokens)
     app.setStyleSheet(get_stylesheet(tokens))
 
 
+def _checkmark_uri(color: str) -> str:
+    svg = (
+        '<svg width="12" height="9" viewBox="0 0 12 9" fill="none" '
+        'xmlns="http://www.w3.org/2000/svg">'
+        '<path d="M1 4.5L4.5 8L11 1" stroke="' + color + '" stroke-width="2.5" '
+        'stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    )
+    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"url(data:image/svg+xml;base64,{encoded})"
+
+
 def get_stylesheet(t=None):
-    """Generates the QSS string dynamically based on the provided token dictionary."""
+    """Generate the QSS string for a token dictionary."""
     if t is None:
         t = _default_tokens()
+
+    checked_mark = _checkmark_uri(t["sys_color_on_primary"])
+    disabled_mark = _checkmark_uri(t["sys_color_text_muted"])
+
     return f"""
-/* === Solo Leveling System Dynamic Theme === */
+/* === THE SYSTEM theme === */
 
 QWidget {{
     background-color: {t['sys_color_surface']};
@@ -122,7 +207,7 @@ QLabel#profileHint {{
 /* --- Buttons --- */
 QPushButton {{
     background-color: {t['sys_color_primary_dim']};
-    color: {t['sys_color_primary_light']};
+    color: {t['sys_color_button_text']};
     border: 1px solid {t['sys_color_border']};
     border-radius: 0px;
     padding: 6px 14px;
@@ -147,7 +232,7 @@ QPushButton:checked {{
 }}
 
 QPushButton:disabled {{
-    background-color: rgba(255, 255, 255, 0.02);
+    background-color: {t['sys_color_disabled_surface']};
     color: {t['sys_color_text_muted']};
     border: 1px solid {t['sys_color_border_muted']};
 }}
@@ -188,7 +273,7 @@ QTabBar::tab:hover {{
 
 QTabBar::tab:selected {{
     background-color: {t['sys_color_primary_dim']};
-    color: {t['sys_color_primary_light']};
+    color: {t['sys_color_button_text']};
     border: 1px solid {t['sys_color_border']};
 }}
 
@@ -197,8 +282,13 @@ QTabBar::tab:disabled {{
 }}
 
 QLabel#settingsHeading {{
-    color: {t['sys_color_primary_light']};
+    color: {t['sys_color_button_text']};
     font-weight: bold;
+}}
+
+QLabel#themeStatus {{
+    color: {t['sys_color_alert']};
+    font-size: 11px;
 }}
 
 /* --- Checkbox --- */
@@ -215,7 +305,6 @@ QCheckBox::indicator {{
     border: 2px solid {t['sys_color_border']};
     border-radius: 3px;
     background-color: {t['sys_color_surface']};
-    /* SVG checkmark - white, 12x9, centered */
     image: none;
 }}
 
@@ -226,7 +315,7 @@ QCheckBox::indicator:hover {{
 QCheckBox::indicator:checked {{
     background-color: {t['sys_color_primary']};
     border: 2px solid {t['sys_color_primary']};
-    image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xIDQuNUw0LjUgOEwxMSAxIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPgo=);
+    image: {checked_mark};
 }}
 
 QCheckBox::indicator:disabled {{
@@ -238,7 +327,7 @@ QCheckBox::indicator:disabled {{
 QCheckBox::indicator:checked:disabled {{
     background-color: {t['sys_color_primary_dim']};
     border: 2px solid {t['sys_color_primary_dim']};
-    image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xIDQuNUw0LjUgOEwxMSAxIiBzdHJva2U9IiM5YWI4ZTUiIHN0cm9rZS13aWR0aD0iMi41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KPC9zdmc+Cg==);
+    image: {disabled_mark};
 }}
 
 /* --- Text inputs --- */
@@ -249,7 +338,7 @@ QLineEdit, QDateEdit, QTextEdit, QComboBox, QSpinBox, QPlainTextEdit {{
     border-radius: 0px;
     padding: 4px 6px;
     selection-background-color: {t['sys_color_border']};
-    selection-color: #ffffff;
+    selection-color: {t['sys_color_selection_text']};
 }}
 
 QLineEdit:focus, QDateEdit:focus, QTextEdit:focus,
@@ -326,7 +415,7 @@ QComboBox::down-arrow {{
     height: 6px;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-top: 5px solid {t['sys_color_primary_light']};
+    border-top: 5px solid {t['sys_color_button_text']};
     margin-right: 6px;
 }}
 
@@ -379,7 +468,7 @@ QCalendarWidget QAbstractItemView:enabled {{
     background-color: {t['sys_color_surface_raised']};
     color: {t['sys_color_text_main']};
     selection-background-color: {t['sys_color_primary_hover']};
-    selection-color: #ffffff;
+    selection-color: {t['sys_color_selection_text']};
 }}
 
 QCalendarWidget QAbstractItemView:disabled {{
@@ -461,7 +550,8 @@ QToolTip {{
 }}
 """
 
+
 # --- BACKWARD COMPATIBILITY ---
-# Any other file still doing `from system_sl.frontend.gui.theme import SOLO_LEVELING_QSS` 
-# will gracefully receive the default Solo Leveling theme generated by your new function!
+# Any other file still doing `from system_sl.frontend.gui.theme import SOLO_LEVELING_QSS`
+# receives the built-in dark stylesheet.
 SOLO_LEVELING_QSS = get_stylesheet(_default_tokens())

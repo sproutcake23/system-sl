@@ -674,6 +674,10 @@ class BatchProposalDialog(QDialog):
         self.setMinimumSize(700, 500)
         self.setModal(True)
 
+        tokens = get_current_theme_tokens()
+        self._duplicate_tint = QColor(tokens.get("sys_color_alert", "#ff6b8a"))
+        self._duplicate_tint.setAlpha(70)
+
         self._original_tasks = tasks
         self._existing_titles = {str(task.get("title", "")) for task in load_tasks()}
 
@@ -683,7 +687,10 @@ class BatchProposalDialog(QDialog):
 
         # Header label
         header = QLabel(f"Review {len(tasks)} task(s) extracted from document:")
-        header.setStyleSheet("font-weight: bold; font-size: 13px; color: #d6e7ff;")
+        header.setStyleSheet(
+            "font-weight: bold; font-size: 13px; "
+            f"color: {tokens.get('sys_color_text_main', '#d6e7ff')};"
+        )
         root.addWidget(header)
 
         # Table widget
@@ -739,7 +746,7 @@ class BatchProposalDialog(QDialog):
                 for col in range(4):
                     item = self.table.item(row, col)
                     if item:
-                        item.setBackground(QColor("#5a3a3a"))  # Reddish tint for duplicates
+                        item.setBackground(self._duplicate_tint)
                         item.setToolTip("Task with this title already exists — adding will update its deadline")
 
         root.addWidget(self.table, stretch=1)
