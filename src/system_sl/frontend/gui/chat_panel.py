@@ -68,6 +68,7 @@ from system_sl.chatbot import (
     UnsupportedFileError,
     ExtractionError,
 )
+from system_sl.chatbot.llm_factory import LLMFactoryError
 # --- Dynamic Theming Utilities ---
 from system_sl.core import add_tasks, load_tasks
 from system_sl.frontend.gui.theme import get_current_theme_tokens
@@ -881,8 +882,15 @@ class ChatPanel(QWidget):
         config = load_config()
         current_model = config.system_model
 
-        # 1. Current configured model (first, bold)
-        self.model_combo.addItem(f"✦ {current_model}", current_model)
+        has_config = bool(current_model and config.provider)
+
+        if has_config:
+            # 1. Current configured model (first, bold)
+            self.model_combo.addItem(f"✦ {current_model}", current_model)
+        else:
+            # Placeholder when no config
+            self.model_combo.addItem("⚙ Configure LLM in Settings…", "")
+            self.model_combo.model().item(0).setEnabled(False)
 
         # 2. Separator
         self.model_combo.insertSeparator(1)
@@ -913,9 +921,12 @@ class ChatPanel(QWidget):
             self.model_combo.addItem(display, model_id)
 
         # Select current model
-        idx = self.model_combo.findData(current_model)
-        if idx >= 0:
-            self.model_combo.setCurrentIndex(idx)
+        if has_config:
+            idx = self.model_combo.findData(current_model)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            else:
+                self.model_combo.setCurrentIndex(0)
         else:
             self.model_combo.setCurrentIndex(0)
 
@@ -1089,13 +1100,31 @@ class ChatPanel(QWidget):
         if model_name not in self._sessions:
             try:
                 self._sessions[model_name] = ChatSession(model_name=model_name)
-            except ChatConfigError as e:
-                self._append_alert(str(e))
+            except (ChatConfigError, LLMFactoryError) as e:
+                # Config missing/invalid — offer to configure
+                self._prompt_llm_config(str(e))
                 return None
             except Exception as e:
                 self._append_alert(f"Could not open channel: {e}")
                 return None
         return self._sessions[model_name]
+
+    def _prompt_llm_config(self, error: str) -> None:
+        """Prompt user to configure LLM when chat is used without valid config."""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("LLM Not Configured")
+        msg.setText("Chat features require an LLM provider.")
+        msg.setInformativeText(
+            f"{error}\n\n"
+            "Configure an API key in Settings to enable the AI assistant."
+        )
+        configure_btn = msg.addButton("Open Settings", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(configure_btn)
+        msg.exec()
+
+        if msg.clickedButton() == configure_btn:
+            self._open_settings()
 
     # ----- Transcript Rendering -----
 
