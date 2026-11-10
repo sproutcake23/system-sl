@@ -166,6 +166,7 @@ class LLMSettingsPage(QWidget):
         self._load_current_config()
 
     def _build_ui(self) -> None:
+        from system_sl.chatbot import list_preset_items
         layout = QVBoxLayout(self)
 
         # --- Provider & API Key Section ---
@@ -293,6 +294,7 @@ class LLMSettingsPage(QWidget):
 
     def reload(self) -> None:
         """Discard unsaved edits and show the saved config again."""
+        from system_sl.chatbot import load_config
         self._config = load_config()
         self._fetched_models = []
         self.model_table_frame.setVisible(False)
@@ -300,6 +302,7 @@ class LLMSettingsPage(QWidget):
 
     def _load_current_config(self) -> None:
         """Populate fields from current config."""
+        from system_sl.chatbot import list_preset_items, get_model_cache
         # Find matching preset
         preset_key = "custom"
         for key, preset in list_preset_items():
@@ -331,6 +334,7 @@ class LLMSettingsPage(QWidget):
 
     def _on_preset_changed(self, index: int) -> None:
         """Auto-fill fields when preset changes."""
+        from system_sl.chatbot import get_preset
         preset_key = self.preset_combo.currentData()
         if preset_key == "custom":
             self.base_url_edit.setEnabled(True)
@@ -353,6 +357,7 @@ class LLMSettingsPage(QWidget):
             self.fetch_btn.setEnabled(preset_key in ("openrouter", "ollama", "lm_studio"))
 
     def _get_current_preset(self) -> "Optional[ProviderPreset]":
+        from system_sl.chatbot import get_preset
         preset_key = self.preset_combo.currentData()
         if preset_key and preset_key != "custom":
             return get_preset(preset_key)
@@ -401,6 +406,7 @@ class LLMSettingsPage(QWidget):
 
     def _on_models_fetched(self, models: "list[ModelInfo]") -> None:
         """Handle successful model fetch."""
+        from system_sl.chatbot import set_model_cache
         self._fetched_models = models
         self._populate_model_table()
         self.model_table_frame.setVisible(True)
@@ -548,6 +554,7 @@ class LLMSettingsPage(QWidget):
         return "google"
 
     def _collect_config(self) -> "ChatConfig":
+        from system_sl.chatbot import ChatConfig, validate_config, save_config
         return ChatConfig(
             provider=self._get_provider_from_ui(),
             base_url=self.base_url_edit.text().strip() or None,
@@ -824,21 +831,30 @@ class ChatPanel(QWidget):
 
         # --- Input Row ---
         input_row = QHBoxLayout()
-        self.input_box = QLineEdit()
-        self.input_box.setPlaceholderText("Speak, Player...")
-        self.input_box.returnPressed.connect(self._on_send)
+        self.input_box = QTextEdit()
+        self.input_box.setPlaceholderText("Speak, Player... (Enter to send, Shift+Enter for new line)")
+        self.input_box.setMaximumHeight(100)
+        self.input_box.setMinimumHeight(44)
+        self.input_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.input_box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.input_box.installEventFilter(self)
         # Paperclip button for attachments
         self.attach_btn = QPushButton()
         self.attach_btn.setIcon(get_icon("attach"))
         self.attach_btn.setFixedWidth(36)
+        self.attach_btn.setFixedHeight(36)
         self.attach_btn.setToolTip("Attach document (PDF, DOCX, HTML, TXT, MD, CSV...)")
         self.attach_btn.clicked.connect(self._on_attach_clicked)
         self.send_button = QPushButton()
         self.send_button.setIcon(get_icon("send"))
-        self.send_button.setToolTip("Send message")
+        self.send_button.setFixedWidth(36)
+        self.send_button.setFixedHeight(36)
+        self.send_button.setToolTip("Send message (Enter)")
         self.send_button.clicked.connect(self._on_send)
         self.stop_button = QPushButton()
         self.stop_button.setIcon(get_icon("stop"))
+        self.stop_button.setFixedWidth(36)
+        self.stop_button.setFixedHeight(36)
         self.stop_button.setEnabled(False)
         self.stop_button.setToolTip("Interrupt the reply")
         self.stop_button.clicked.connect(self._on_stop)
@@ -846,6 +862,7 @@ class ChatPanel(QWidget):
         input_row.addWidget(self.attach_btn)
         input_row.addWidget(self.send_button)
         input_row.addWidget(self.stop_button)
+        input_row.setAlignment(Qt.AlignmentFlag.AlignBottom)
         root.addLayout(input_row)
 
         # Enable drag & drop on the panel itself
@@ -954,6 +971,22 @@ class ChatPanel(QWidget):
         from system_sl.chatbot import reload_agent
         reload_agent()
         self._populate_model_list()
+
+    def eventFilter(self, obj: QObject, event) -> bool:
+        """Handle Enter/Shift+Enter in the input box."""
+        if obj is self.input_box and event.type() == event.Type.KeyPress:
+            from PySide6.QtCore import Qt
+            from PySide6.QtGui import QKeyEvent
+            key_event: QKeyEvent = event
+            if key_event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if key_event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    # Shift+Enter: insert newline (default behavior)
+                    return False
+                else:
+                    # Enter: send message
+                    self._on_send()
+                    return True
+        return super().eventFilter(obj, event)
 
     # ----- Attachment Handling -----
 
@@ -1603,7 +1636,7 @@ class ChatPanel(QWidget):
         from system_sl.chatbot import load_config
         if self._thread is not None:
             return
-        text = self.input_box.text().strip()
+        text = self.input_box.toPlainText().strip()
         if not text:
             return
 
