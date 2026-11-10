@@ -859,34 +859,44 @@ def main():
         sys.exit(notifier_main())
 
 
-    # Load LLM configuration
+    # Load LLM configuration (optional — chat features need it, core tasks don't)
     from system_sl.chatbot import load_config, validate_config, ChatConfig
     from system_sl.chatbot.llm_factory import ProviderPreset
 
     config = load_config()
     errors = validate_config(config)
 
-    # If config is invalid or missing, show settings dialog
+    # If config is invalid or missing, offer to configure or skip
     if errors or not config.system_model:
-        from system_sl.frontend.gui.chat_panel import SettingsDialog
-        dialog = SettingsDialog()
-        if dialog.exec() != QDialog.Accepted:
-            QMessageBox.critical(
-                None,
-                "Configuration Required",
-                "LLM configuration is required to continue.",
-            )
-            sys.exit(1)
-        # Reload config after dialog
-        config = load_config()
-        errors = validate_config(config)
-        if errors:
-            QMessageBox.critical(
-                None,
-                "Invalid Configuration",
-                "\n".join(errors),
-            )
-            sys.exit(1)
+        msg = QMessageBox()
+        msg.setWindowTitle("LLM Configuration")
+        msg.setText("No LLM provider configured.")
+        msg.setInformativeText(
+            "Chat features (AI assistant, task proposals) require an LLM API key.\n"
+            "Core task management, prioritization, and notifications work without it."
+        )
+        configure_btn = msg.addButton("Configure Now", QMessageBox.ButtonRole.AcceptRole)
+        skip_btn = msg.addButton("Skip (No Chat)", QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(configure_btn)
+        msg.exec()
+
+        if msg.clickedButton() == configure_btn:
+            from system_sl.frontend.gui.chat_panel import SettingsDialog
+            dialog = SettingsDialog()
+            if dialog.exec() != QDialog.Accepted:
+                # User cancelled config dialog — treat as skip
+                pass
+            else:
+                # Reload config after dialog
+                config = load_config()
+                errors = validate_config(config)
+                if errors:
+                    QMessageBox.warning(
+                        None,
+                        "Invalid Configuration",
+                        "\n".join(errors) + "\n\nChat features may not work.",
+                    )
+        # If skipped or cancelled, continue without LLM config — chat will prompt later
 
     # Do not copy the API key into os.environ. create_llm() is handed the key
     # explicitly, and exporting it here froze the key loaded at startup: a key
