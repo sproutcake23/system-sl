@@ -166,6 +166,7 @@ class LLMSettingsPage(QWidget):
         self._load_current_config()
 
     def _build_ui(self) -> None:
+        from system_sl.chatbot import list_preset_items
         layout = QVBoxLayout(self)
 
         # --- Provider & API Key Section ---
