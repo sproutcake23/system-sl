@@ -43,7 +43,6 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
-from system_sl.frontend.gui.chat_panel import ChatPanel
 from system_sl.frontend.gui.settings_window import AppSettingsDialog
 from system_sl.frontend.gui.theme import THEME_MODE_LABELS, THEME_MODES
 from system_sl.frontend.gui.theme_manager import get_theme_manager
@@ -219,6 +218,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.settings_button)
 
         # right box — chatbot panel (system / friend modes)
+        from system_sl.frontend.gui.chat_panel import ChatPanel
         self.chat_panel = ChatPanel(self)
         self.chat_panel.settings_requested.connect(
             lambda: self.open_settings(AppSettingsDialog.LLM_TAB)
@@ -853,30 +853,10 @@ def main():
 
     # reload = DevelopmentAutoReloader(app)
 
-    view = None
-    controller = None
-    
+    # Delegate --bg to minimal notifier entry point to avoid loading chat stack
     if "--bg" in sys.argv:
-        # An autostart entry can outlive the preference: switching reminders
-        # off does not remove it. Exit instead of idling for the whole session
-        # and holding the lock the GUI needs.
-        if not load_notifications_enabled():
-            print(
-                "[INFO] Notifications are disabled; "
-                "not starting the background notifier."
-            )
-            sys.exit(0)
-        print("[INFO] Running in background notifier mode...")
-
-        view = SystemNotification()
-        controller = BackgroundServiceController(view)
-        controller.poll_and_render_task()
-
-        sys.exit(app.exec())
-    # Background notifier mode: the autostart systemd unit launches the app with
-    # `--bg`. In this mode we run ONLY the hourly task notifier, never the main
-    # menu. Opening the menu here would make the always-restarting service
-    # reopen it every time it was closed.
+        from system_sl.frontend.gui.notifier import main as notifier_main
+        sys.exit(notifier_main())
 
 
     # Load LLM configuration (optional — chat features need it, core tasks don't)

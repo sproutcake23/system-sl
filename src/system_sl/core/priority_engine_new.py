@@ -21,7 +21,6 @@ import numpy as np
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any
-from spellchecker import SpellChecker
 
 # ── Import Shared Dependencies to avoid repetition ──────────────────────
 from system_sl.core.vector_converter import Setup, Fusion
@@ -96,30 +95,34 @@ class TaskAnalyzer:
 
     def __init__(self):
         self.setup = Setup()
-        self.spell = (
-            SpellChecker()
-        )  # NOTE : We have to check is it working or making a blunder
-
-        self.spell.word_frequency.load_words(
-            [
-                "api",
-                "json",
-                "frontend",
-                "backend",
-                "refactor",
-                "repo",
-                "github",
-                "spacy",
-                "ui",
-                "ux",
-                "sql",
-                "css",
-                "html",
-            ]
-        )
+        self._spell = None  # Lazy-loaded SpellChecker
         self._nlp = self.setup._get_model()
-  
-
+   
+   
+    def _get_spell(self):
+        """Lazy-load SpellChecker with custom word list."""
+        if self._spell is None:
+            from spellchecker import SpellChecker
+            self._spell = SpellChecker()
+            self._spell.word_frequency.load_words(
+                [
+                    "api",
+                    "json",
+                    "frontend",
+                    "backend",
+                    "refactor",
+                    "repo",
+                    "github",
+                    "spacy",
+                    "ui",
+                    "ux",
+                    "sql",
+                    "css",
+                    "html",
+                ]
+            )
+        return self._spell
+   
     def correct_typos(self, text: str) -> str:
         """Fixes spelling mistakes in a string before NLP processing."""
         if not text:
@@ -130,7 +133,7 @@ class TaskAnalyzer:
 
         for word in words:
             # Get the single most likely correction
-            correction = self.spell.correction(word)
+            correction = self._get_spell().correction(word)
 
             # If spellchecker returns None (word completely unknown) or the correction,
             # we use it, otherwise fallback to original word
