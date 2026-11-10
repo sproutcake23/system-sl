@@ -301,6 +301,7 @@ class LLMSettingsPage(QWidget):
 
     def _load_current_config(self) -> None:
         """Populate fields from current config."""
+        from system_sl.chatbot import list_preset_items, get_model_cache
         # Find matching preset
         preset_key = "custom"
         for key, preset in list_preset_items():
@@ -332,6 +333,7 @@ class LLMSettingsPage(QWidget):
 
     def _on_preset_changed(self, index: int) -> None:
         """Auto-fill fields when preset changes."""
+        from system_sl.chatbot import get_preset
         preset_key = self.preset_combo.currentData()
         if preset_key == "custom":
             self.base_url_edit.setEnabled(True)
@@ -354,6 +356,7 @@ class LLMSettingsPage(QWidget):
             self.fetch_btn.setEnabled(preset_key in ("openrouter", "ollama", "lm_studio"))
 
     def _get_current_preset(self) -> "Optional[ProviderPreset]":
+        from system_sl.chatbot import get_preset
         preset_key = self.preset_combo.currentData()
         if preset_key and preset_key != "custom":
             return get_preset(preset_key)
@@ -402,6 +405,7 @@ class LLMSettingsPage(QWidget):
 
     def _on_models_fetched(self, models: "list[ModelInfo]") -> None:
         """Handle successful model fetch."""
+        from system_sl.chatbot import set_model_cache
         self._fetched_models = models
         self._populate_model_table()
         self.model_table_frame.setVisible(True)
@@ -549,6 +553,7 @@ class LLMSettingsPage(QWidget):
         return "google"
 
     def _collect_config(self) -> "ChatConfig":
+        from system_sl.chatbot import ChatConfig, validate_config, save_config
         return ChatConfig(
             provider=self._get_provider_from_ui(),
             base_url=self.base_url_edit.text().strip() or None,
