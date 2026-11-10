@@ -294,6 +294,7 @@ class LLMSettingsPage(QWidget):
 
     def reload(self) -> None:
         """Discard unsaved edits and show the saved config again."""
+        from system_sl.chatbot import load_config
         self._config = load_config()
         self._fetched_models = []
         self.model_table_frame.setVisible(False)
