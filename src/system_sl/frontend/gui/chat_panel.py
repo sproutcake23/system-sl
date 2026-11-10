@@ -44,34 +44,14 @@ from PySide6.QtGui import (
     QDropEvent,
 )
 
-from system_sl.chatbot import (
-    ChatSession,
-    ChatConfig,
-    ChatConfigError,
-    load_config,
-    save_config,
-    validate_config,
-    discover_local_models,
-    get_preset_models,
-    get_preset,
-    ProviderPreset,
-    list_preset_items,
-    get_model_cache,
-    set_model_cache,
-    invalidate_model_cache,
-    ModelInfo,
-    ModelFetcherError,
-    fetch_models_for_provider,
-    extract_document,
-    format_for_chat,
-    DocumentText,
-    UnsupportedFileError,
-    ExtractionError,
-)
 # --- Dynamic Theming Utilities ---
 from system_sl.core import add_tasks, load_tasks
 from system_sl.frontend.gui.theme import get_current_theme_tokens
 from system_sl.frontend.gui.icons import get_icon
+
+# Lazy-loaded chatbot imports (moved to functions to avoid startup cost)
+# from system_sl.chatbot import ...
+# from system_sl.chatbot.llm_factory import LLMFactoryError
 
 
 def _colorize_markdown_html(body: str, color: str) -> str:
@@ -152,6 +132,7 @@ class _ModelFetchWorker(QObject):
         self.base_url = base_url
 
     def run(self):
+        from system_sl.chatbot import fetch_models_for_provider, ModelFetcherError, ModelInfo
         try:
             self.progress.emit("Fetching models...")
             models = fetch_models_for_provider(self.provider, self.api_key, self.base_url)
@@ -175,8 +156,9 @@ class LLMSettingsPage(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
+        from system_sl.chatbot import load_config, ModelInfo
         self._config = load_config()
-        self._fetched_models: list[ModelInfo] = []
+        self._fetched_models: "list[ModelInfo]" = []
         self._fetch_thread: QThread | None = None
         self._fetch_worker: _ModelFetchWorker | None = None
 
@@ -370,7 +352,7 @@ class LLMSettingsPage(QWidget):
             self.model_edit.setEnabled(True)
             self.fetch_btn.setEnabled(preset_key in ("openrouter", "ollama", "lm_studio"))
 
-    def _get_current_preset(self) -> Optional[ProviderPreset]:
+    def _get_current_preset(self) -> "Optional[ProviderPreset]":
         preset_key = self.preset_combo.currentData()
         if preset_key and preset_key != "custom":
             return get_preset(preset_key)
@@ -417,7 +399,7 @@ class LLMSettingsPage(QWidget):
     def _on_fetch_progress(self, message: str) -> None:
         self.fetch_btn.setText(message)
 
-    def _on_models_fetched(self, models: list[ModelInfo]) -> None:
+    def _on_models_fetched(self, models: "list[ModelInfo]") -> None:
         """Handle successful model fetch."""
         self._fetched_models = models
         self._populate_model_table()
@@ -565,7 +547,7 @@ class LLMSettingsPage(QWidget):
             return "lm_studio"
         return "google"
 
-    def _collect_config(self) -> ChatConfig:
+    def _collect_config(self) -> "ChatConfig":
         return ChatConfig(
             provider=self._get_provider_from_ui(),
             base_url=self.base_url_edit.text().strip() or None,
@@ -646,13 +628,14 @@ class _ChatWorker(QObject):
     cancelled = Signal()
     proposal = Signal(dict)
 
-    def __init__(self, session: ChatSession, user_msg: str, attachment_paths: list[str] | None = None):
+    def __init__(self, session: "ChatSession", user_msg: str, attachment_paths: list[str] | None = None):
         super().__init__()
         self.session = session
         self.user_msg = user_msg
         self.attachment_paths = attachment_paths or []
 
     def run(self):
+        from system_sl.chatbot.documents import extract_document, format_for_chat, DocumentText, UnsupportedFileError, ExtractionError
         thread = QThread.currentThread()
         collected: list[str] = []
 
@@ -720,7 +703,7 @@ class ChatPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self._sessions: dict[str, ChatSession] = {}  # model_name -> ChatSession
+        self._sessions: "dict[str, ChatSession]" = {}  # model_name -> ChatSession
         self._current_model: str = ""
         self._thread: QThread | None = None
         self._worker: _ChatWorker | None = None
@@ -875,6 +858,7 @@ class ChatPanel(QWidget):
 
     def _populate_model_list(self) -> None:
         """Populate the model dropdown with configured + discovered + cached models."""
+        from system_sl.chatbot import load_config, discover_local_models, get_model_cache, get_preset_models
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
 
@@ -935,6 +919,7 @@ class ChatPanel(QWidget):
         if not model_id or model_id == self._current_model:
             return
 
+        from system_sl.chatbot import load_config, save_config, reload_agent
         # Update config with new model
         config = load_config()
         config.system_model = model_id
@@ -1084,7 +1069,7 @@ class ChatPanel(QWidget):
 
     # ----- Session Management -----
 
-    def _get_session(self, model_name: str) -> ChatSession | None:
+    def _get_session(self, model_name: str) -> "ChatSession | None":
         """Get or create a ChatSession for the given model."""
         if model_name not in self._sessions:
             try:
@@ -1587,6 +1572,7 @@ class ChatPanel(QWidget):
         return self._thread is not None
 
     def _on_send(self) -> None:
+        from system_sl.chatbot import load_config
         if self._thread is not None:
             return
         text = self.input_box.text().strip()
