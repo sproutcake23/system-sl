@@ -824,21 +824,30 @@ class ChatPanel(QWidget):
 
         # --- Input Row ---
         input_row = QHBoxLayout()
-        self.input_box = QLineEdit()
-        self.input_box.setPlaceholderText("Speak, Player...")
-        self.input_box.returnPressed.connect(self._on_send)
+        self.input_box = QTextEdit()
+        self.input_box.setPlaceholderText("Speak, Player... (Enter to send, Shift+Enter for new line)")
+        self.input_box.setMaximumHeight(100)
+        self.input_box.setMinimumHeight(44)
+        self.input_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.input_box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.input_box.installEventFilter(self)
         # Paperclip button for attachments
         self.attach_btn = QPushButton()
         self.attach_btn.setIcon(get_icon("attach"))
         self.attach_btn.setFixedWidth(36)
+        self.attach_btn.setFixedHeight(36)
         self.attach_btn.setToolTip("Attach document (PDF, DOCX, HTML, TXT, MD, CSV...)")
         self.attach_btn.clicked.connect(self._on_attach_clicked)
         self.send_button = QPushButton()
         self.send_button.setIcon(get_icon("send"))
-        self.send_button.setToolTip("Send message")
+        self.send_button.setFixedWidth(36)
+        self.send_button.setFixedHeight(36)
+        self.send_button.setToolTip("Send message (Enter)")
         self.send_button.clicked.connect(self._on_send)
         self.stop_button = QPushButton()
         self.stop_button.setIcon(get_icon("stop"))
+        self.stop_button.setFixedWidth(36)
+        self.stop_button.setFixedHeight(36)
         self.stop_button.setEnabled(False)
         self.stop_button.setToolTip("Interrupt the reply")
         self.stop_button.clicked.connect(self._on_stop)
@@ -846,6 +855,7 @@ class ChatPanel(QWidget):
         input_row.addWidget(self.attach_btn)
         input_row.addWidget(self.send_button)
         input_row.addWidget(self.stop_button)
+        input_row.setAlignment(Qt.AlignmentFlag.AlignBottom)
         root.addLayout(input_row)
 
         # Enable drag & drop on the panel itself
@@ -954,6 +964,22 @@ class ChatPanel(QWidget):
         from system_sl.chatbot import reload_agent
         reload_agent()
         self._populate_model_list()
+
+    def eventFilter(self, obj: QObject, event) -> bool:
+        """Handle Enter/Shift+Enter in the input box."""
+        if obj is self.input_box and event.type() == event.Type.KeyPress:
+            from PySide6.QtCore import Qt
+            from PySide6.QtGui import QKeyEvent
+            key_event: QKeyEvent = event
+            if key_event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if key_event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    # Shift+Enter: insert newline (default behavior)
+                    return False
+                else:
+                    # Enter: send message
+                    self._on_send()
+                    return True
+        return super().eventFilter(obj, event)
 
     # ----- Attachment Handling -----
 
@@ -1603,7 +1629,7 @@ class ChatPanel(QWidget):
         from system_sl.chatbot import load_config
         if self._thread is not None:
             return
-        text = self.input_box.text().strip()
+        text = self.input_box.toPlainText().strip()
         if not text:
             return
 
