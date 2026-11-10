@@ -13,6 +13,7 @@ This runs PyInstaller with `packaging/system-sl.spec`, which the release workflo
 - `--windowed --noconsole` — no terminal window on launch
 - Bundles `assets/`, the spaCy model, and the spellchecker dictionary
 - On Linux, bundles the `tesseract` and `poppler` binaries from `/usr/bin`, so install them first. On Windows, this script skips OCR; the release workflow collects those tools itself
+- Bundles `vendor/wallust/wallust` (or `wallust.exe`) when the release workflow has downloaded it. A local build without it warns, and Dynamic mode then needs `wallust` on `PATH` or `SYSTEM_SL_WALLUST` set
 - Leaves out parts of Qt and the Google API library that the app doesn't use
 - Entry point: `system_sl/frontend/gui/main.py`
 
@@ -46,7 +47,7 @@ The tag triggers the workflow, which builds on Linux and Windows and publishes a
 
 Users with **Auto Update** on receive it at their next launch.
 
-Pull requests that change the build also run the workflow, without publishing anything. Both platforms must pass two checks in the built binary: `--check-ocr` reads a generated scanned PDF using only the bundled tools, and `--check-gui` opens the main window, loads a sound, and confirms the Google Tasks API description is present.
+Pull requests that change the build also run the workflow, without publishing anything. Both platforms must pass three checks in the built binary: `--check-ocr` reads a generated scanned PDF using only the bundled tools, `--check-gui` opens the main window, loads a sound, and confirms the Google Tasks API description is present, and `--check-theme` runs the bundled wallust on a generated image and verifies Dynamic mode produces a complete palette.
 
 ## Google OAuth client
 

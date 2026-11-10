@@ -16,6 +16,8 @@ dist/
 system_sl.egg-info/
 *.spec
 !packaging/system-sl.spec
+# wallust binaries downloaded by the release workflow
+vendor/wallust/
 
 # Local Environment Variables & Secrets (CRITICAL)
 .env

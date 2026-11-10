@@ -38,6 +38,7 @@ from system_sl.core.priority_engine_new import (
     ThompsonSampler,
     save_manual_order,
 )  # we are importing run_prioritization from api section(priority_engine_new)
+from system_sl.frontend.gui.theme import get_current_theme_tokens
 
 
 # GUI-added tasks no longer carry a user-chosen category — the model assigns one
@@ -419,15 +420,18 @@ class OnboardingWindow(QWidget):
 
         self.stack.setCurrentIndex(0)
 
+        # Apply theme colors based on the selected theme mode.
+        self._tokens = get_current_theme_tokens()
+        self.refresh_theme()
+
     def _build_welcome_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(40, 40, 40, 40)
 
-        title = QLabel("THE SYSTEM AWAKENS")
-        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #67e8ff;")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
+        self.welcome_title = QLabel("THE SYSTEM AWAKENS")
+        self.welcome_title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.welcome_title)
 
         body = QLabel(
             '"Arise, Player."\n\n'
@@ -469,9 +473,7 @@ class OnboardingWindow(QWidget):
         layout.addWidget(self.progress_bar)
 
         self.quest_label = QLabel()
-        self.quest_label.setStyleSheet(
-            "font-size: 16px; font-weight: bold; color: #67e8ff;"
-        )
+        self.quest_label.setStyleSheet("font-size: 16px; font-weight: bold;")
         layout.addWidget(self.quest_label)
 
         self.question_label = QLabel()
@@ -481,7 +483,7 @@ class OnboardingWindow(QWidget):
 
         self.hint_label = QLabel()
         self.hint_label.setWordWrap(True)
-        self.hint_label.setStyleSheet("color: #7a9bcb; font-size: 13px;")
+        self.hint_label.setStyleSheet("font-size: 13px;")
         layout.addWidget(self.hint_label)
 
         self.answer_input = QLineEdit()
@@ -525,24 +527,21 @@ class OnboardingWindow(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(40, 40, 40, 40)
 
-        title = QLabel("PLAYER PROFILE CREATED")
-        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #67e8ff;")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
+        self.completion_title = QLabel("PLAYER PROFILE CREATED")
+        self.completion_title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.completion_title)
 
-        subtitle = QLabel('"The System has acknowledged your potential."')
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("font-size: 14px; color: #7a9bcb; margin-bottom: 20px;")
-        layout.addWidget(subtitle)
+        self.completion_subtitle = QLabel('"The System has acknowledged your potential."')
+        self.completion_subtitle.setAlignment(Qt.AlignCenter)
+        self.completion_subtitle.setStyleSheet("font-size: 14px; margin-bottom: 20px;")
+        layout.addWidget(self.completion_subtitle)
 
         self.stats_label = QLabel()
         self.stats_label.setStyleSheet("font-size: 14px;")
         layout.addWidget(self.stats_label)
 
         self.path_label = QLabel()
-        self.path_label.setStyleSheet(
-            "font-size: 12px; color: #7a9bcb; margin-top: 10px;"
-        )
+        self.path_label.setStyleSheet("font-size: 12px; margin-top: 10px;")
         self.path_label.setWordWrap(True)
         layout.addWidget(self.path_label)
 
@@ -556,6 +555,33 @@ class OnboardingWindow(QWidget):
         layout.addWidget(finish_btn)
 
         return page
+
+    def refresh_theme(self, tokens=None):
+        """Re-apply dynamic colors to all onboarding labels."""
+        if tokens is None:
+            tokens = get_current_theme_tokens()
+
+        primary = tokens.get("sys_color_primary", "#00d9ff")
+        text_secondary = tokens.get("sys_color_text_secondary", "#b3d4ff")
+
+        self.welcome_title.setStyleSheet(
+            f"font-size: 22px; font-weight: bold; color: {primary};"
+        )
+        self.quest_label.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; color: {primary};"
+        )
+        self.hint_label.setStyleSheet(
+            f"color: {text_secondary}; font-size: 13px;"
+        )
+        self.completion_title.setStyleSheet(
+            f"font-size: 22px; font-weight: bold; color: {primary};"
+        )
+        self.completion_subtitle.setStyleSheet(
+            f"font-size: 14px; color: {text_secondary}; margin-bottom: 20px;"
+        )
+        self.path_label.setStyleSheet(
+            f"font-size: 12px; color: {text_secondary}; margin-top: 10px;"
+        )
 
     def _on_begin(self):
         self.responses.clear()
@@ -648,6 +674,10 @@ class BatchProposalDialog(QDialog):
         self.setMinimumSize(700, 500)
         self.setModal(True)
 
+        tokens = get_current_theme_tokens()
+        self._duplicate_tint = QColor(tokens.get("sys_color_alert", "#ff6b8a"))
+        self._duplicate_tint.setAlpha(70)
+
         self._original_tasks = tasks
         self._existing_titles = {str(task.get("title", "")) for task in load_tasks()}
 
@@ -657,7 +687,10 @@ class BatchProposalDialog(QDialog):
 
         # Header label
         header = QLabel(f"Review {len(tasks)} task(s) extracted from document:")
-        header.setStyleSheet("font-weight: bold; font-size: 13px; color: #d6e7ff;")
+        header.setStyleSheet(
+            "font-weight: bold; font-size: 13px; "
+            f"color: {tokens.get('sys_color_text_main', '#d6e7ff')};"
+        )
         root.addWidget(header)
 
         # Table widget
@@ -713,7 +746,7 @@ class BatchProposalDialog(QDialog):
                 for col in range(4):
                     item = self.table.item(row, col)
                     if item:
-                        item.setBackground(QColor("#5a3a3a"))  # Reddish tint for duplicates
+                        item.setBackground(self._duplicate_tint)
                         item.setToolTip("Task with this title already exists — adding will update its deadline")
 
         root.addWidget(self.table, stretch=1)

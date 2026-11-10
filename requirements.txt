@@ -14,6 +14,5 @@ pyside6_addons==6.11.1
 pyside6_essentials==6.11.1
 python-dotenv==1.2.2
 spacy==3.8.14
-colorthief==1.1.0
 Pillow==12.3.0
 imagecodecs==2025.3.30

@@ -37,6 +37,17 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra build
 
+      - name: Bundle wallust 3.5.2
+        run: |
+          mkdir -p vendor/wallust
+          curl -fsSL -o "$RUNNER_TEMP/wallust.tar.gz" \
+            "https://codeberg.org/explosion-mental/wallust/releases/download/3.5.2/wallust-3.5.2-x86_64-unknown-linux-musl.tar.gz"
+          echo "92e11a841827ea6c2af28290d2cf4908db07dff4aee8dec1b7f1133cbf72c6e2  $RUNNER_TEMP/wallust.tar.gz" \
+            | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/wallust.tar.gz" -C vendor/wallust
+          chmod +x vendor/wallust/wallust
+          test -x vendor/wallust/wallust
+
       # Qt's xcb platform plugin links against these. PyInstaller only bundles
       # libraries present on the build machine, and without them the AppImage
       # aborts on systems that lack libxcb-cursor0 and friends.
@@ -94,6 +105,8 @@ jobs:
               "libxcb-util.so.1", "libxcb-xkb.so.1", "libxkbcommon-x11.so.0",
               # OCR language data: without it tesseract cannot read anything.
               "eng.traineddata",
+              # Dynamic theming runs this bundled binary.
+              "wallust",
           ]
           # OCR binaries
           ocr_required = [
@@ -105,7 +118,7 @@ jobs:
               missing.append("google_oauth_client.json")
           if missing:
               raise SystemExit(f"Not bundled: {', '.join(missing)}")
-          print("All Qt xcb libraries, OCR tools and the Google OAuth client are bundled.")
+          print("All Qt xcb libraries, OCR tools, wallust and the Google OAuth client are bundled.")
           EOF
 
       - name: Package binary (tar.xz)
@@ -149,6 +162,15 @@ jobs:
           HOME="$test_home" dist/system-sl --check-gui
           HOME="$test_home" dist/system-sl-*-x86_64.AppImage --appimage-extract-and-run --check-gui
 
+      - name: Check Dynamic theming works in the frozen builds
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          test_home="$RUNNER_TEMP/theme-home"
+          mkdir -p "$test_home"
+          HOME="$test_home" dist/system-sl --check-theme
+          HOME="$test_home" dist/system-sl-*-x86_64.AppImage --appimage-extract-and-run --check-theme
+
       - name: Upload Linux binary
         uses: actions/upload-artifact@v4
         with:
@@ -179,6 +201,21 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --extra build
+
+      - name: Bundle wallust 3.5.2
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force vendor/wallust | Out-Null
+          $archive = Join-Path $env:RUNNER_TEMP "wallust.tar.gz"
+          Invoke-WebRequest -Uri "https://codeberg.org/explosion-mental/wallust/releases/download/3.5.2/wallust-3.5.2-x86_64-pc-windows-gnu.tar.gz" -OutFile $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne "0f06d38ce329c9d0e26447eef63ba09ab2f3255663814986213cd7061f596e4f") {
+            throw "wallust archive checksum mismatch: $hash"
+          }
+          tar -xzf $archive -C vendor/wallust
+          if (-not (Test-Path vendor/wallust/wallust.exe)) {
+            throw "wallust.exe was not extracted"
+          }
 
       - name: Bundle Google OAuth client
         shell: pwsh
@@ -241,6 +278,17 @@ jobs:
           if (Test-Path $report) { Get-Content $report }
           if ($run.ExitCode -ne 0) {
             Write-Output "::error::GUI check failed with exit code $($run.ExitCode)."
+            exit 1
+          }
+
+      - name: Check Dynamic theming works in the frozen build
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "theme-report.txt"
+          $run = Start-Process dist/system-sl.exe -ArgumentList "--check-theme", "`"$report`"" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if ($run.ExitCode -ne 0) {
+            Write-Output "::error::Theme check failed with exit code $($run.ExitCode)."
             exit 1
           }
 
