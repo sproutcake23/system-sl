@@ -302,6 +302,10 @@ class ThemeManager(QObject):
             return
         self._detected_path = state.image_path or ""
         if state.fingerprint == self._fingerprint and self._last_good_tokens is not None:
+            # Same wallpaper, palette already applied. Detection may have
+            # failed on an earlier poll, so put back the status the last
+            # extraction reported instead of leaving that error showing.
+            self._set_status(self._palette_status)
             return
 
         if self._extract_running:
@@ -331,14 +335,15 @@ class ThemeManager(QObject):
             self._fingerprint = fingerprint
             self._last_good_tokens = tokens
             self._apply(tokens)
-            self._set_status(last_error() or self._wallpaper_status())
+            self._palette_status = last_error() or self._wallpaper_status()
         else:
             # A crash in the worker: keep the last good palette but remember the
             # wallpaper so the same failure is not retried every poll.
             self._fingerprint = fingerprint
-            self._set_status(
+            self._palette_status = (
                 "Could not refresh the wallpaper palette; keeping the previous colours."
             )
+        self._set_status(self._palette_status)
 
         pending = self._pending_state
         self._pending_state = None
