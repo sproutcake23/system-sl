@@ -362,9 +362,13 @@ class ThompsonSampler(BaseWeightOptimizer):
         return min(1.0, max(0.0, total / 30.0))
 
     def get_weights(self) -> Dict[str, float]:
+        # The posterior mean of each Beta, not a random draw. Thompson
+        # sampling proper would sample, but a task list that reshuffles on
+        # every refresh is unusable, so the estimate has to be stable.
         raw = {
-            k: float(np.random.beta(p["alpha"], p["beta"]))
+            k: p["alpha"] / (p["alpha"] + p["beta"])
             for k, p in self.state.items()
+            if not k.startswith("_")
         }
         total = sum(raw.values())
         return (
@@ -546,7 +550,9 @@ class PriorityPipeline:
             scored_tasks.append(
                 {
                     "title": task.get("title", "untitled"),
-                    "category": task.get("_category", ""),
+                    # Tasks are stored with "category" (see core/tasks.py).
+                    # Reading "_category" always yielded an empty string.
+                    "category": task.get("category", ""),
                     "deadline": task.get("deadline"),
                     "created_at": task.get("created_at"),
                     **scores,
@@ -564,15 +570,13 @@ class PriorityPipeline:
         # Sort & Map
         scored_tasks.sort(key=lambda t: t["P_final"], reverse=True)
 
-        # NOTE: LOGIC FOR THE MANAUL REORDERING JUST WE CHECK THAT MANAUL ORDER EXISTS OR NOTE
-
+        # The player's own drag order wins over the score. This is what
+        # "reordering is applied to the ranking" means: the manual order is
+        # read back and used to sort the ranked list.
         manual = load_manual_order()
-        print(scored_tasks)
         if manual:
             pos = {title: i for i, title in enumerate(manual)}
-            print(pos)
             scored_tasks.sort(key=lambda t: pos.get(t.get("title", ""), -1))
-        print(scored_tasks)
         task_title = []
         quadrants = {q: [] for q in self.QUADRANTS}
         for task in scored_tasks:
@@ -601,7 +605,6 @@ class PriorityPipeline:
             },
             "all_tasks_ranked": scored_tasks,
         }
-        print(output)
         with open(self.output_file, "w") as f:
             json.dump(output, f, indent=2, default=str)
         

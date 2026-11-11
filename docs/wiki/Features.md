@@ -10,7 +10,7 @@ The wizard is optional. If you skip it, tasks are ranked by urgency alone, and y
 
 - Add quests with optional deadlines
 - Edit, complete, or remove them
-- Drag a quest to reorder the list; the order is saved and also trains the ranking
+- Drag a quest to reorder the list; the order is saved and applied to the ranking
 - Deadlines feed into the priority engine
 
 Quests added in the Tasks window go into a default category. The chatbot and document import can set a category when they add quests.

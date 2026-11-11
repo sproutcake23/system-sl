@@ -22,7 +22,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 ## Features
 
 - **Persona Builder** — An optional 10-step onboarding process that builds your Player Profile from your real-world ambitions. Edit it any time from Settings.
-- **Task Management** — Add, edit, complete, and drag to reorder quests with deadlines. Your reordering also trains the ranking.
+- **Task Management** — Add, edit, complete, and drag to reorder quests with deadlines. Your reordering is saved and applied to the ranking.
 - **Priority Engine** — Context-aware scoring (PRESSURE / GROWTH / RECOVERY) of what to work on next.
 - **NLP Vectorizer** — spaCy-powered persona vectors built from your responses and task history, with temporal decay.
 - **AI Chatbot** — Talk to the System, an AI mentor with task-aware tools, streaming replies, and live markdown. It asks before adding a quest you didn't explicitly request.
