@@ -94,7 +94,8 @@ def main() -> None:
     assets = project_root / "src" / "system_sl" / "assets"
     desktop = assets / "system-sl-appimage.desktop"
     icon = assets / "system-sl.svg"
-    if not desktop.is_file() or not icon.is_file():
+    icon_png = assets / "system-sl.png"
+    if not desktop.is_file() or not icon.is_file() or not icon_png.is_file():
         raise SystemExit("AppImage desktop file or icon is missing from src/system_sl/assets.")
 
     output = project_root / "dist" / f"system-sl-{version}-x86_64.AppImage"
@@ -111,9 +112,11 @@ def main() -> None:
         shutil.copytree(bundle, app_lib_dir / "system-sl", symlinks=True)
         shutil.copy2(desktop, appdir / "system-sl.desktop")
         shutil.copy2(icon, appdir / "system-sl.svg")
+        shutil.copy2(icon_png, appdir / "system-sl.png")
         # appimagetool used to derive .DirIcon from the desktop file's icon;
-        # since its 2026-10-29 continuous build it requires one up front.
-        (appdir / ".DirIcon").symlink_to("system-sl.svg")
+        # since its 2026-10-29 continuous build it requires one up front, and
+        # it must be a PNG: an SVG is flagged as invalid.
+        (appdir / ".DirIcon").symlink_to("system-sl.png")
 
         apprun = appdir / "AppRun"
         apprun.write_text(
