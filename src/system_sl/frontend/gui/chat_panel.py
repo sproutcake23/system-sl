@@ -362,7 +362,6 @@ class LLMSettingsPage(QWidget):
 
     def _get_current_preset(self) -> "Optional[ProviderPreset]":
         from system_sl.chatbot import get_preset
-        from system_sl.chatbot.llm_factory import ProviderPreset
         preset_key = self.preset_combo.currentData()
         if preset_key and preset_key != "custom":
             return get_preset(preset_key)
@@ -411,7 +410,7 @@ class LLMSettingsPage(QWidget):
 
     def _on_models_fetched(self, models: "list[ModelInfo]") -> None:
         """Handle successful model fetch."""
-        from system_sl.chatbot import ModelInfo, set_model_cache
+        from system_sl.chatbot import set_model_cache
         self._fetched_models = models
         self._populate_model_table()
         self.model_table_frame.setVisible(True)
@@ -571,7 +570,7 @@ class LLMSettingsPage(QWidget):
     def _test_connection(self) -> None:
         """Test the current configuration by creating an LLM and sending a ping."""
         from system_sl.chatbot import validate_config
-        from system_sl.chatbot.llm_factory import create_llm, LLMFactoryError
+        from system_sl.chatbot.llm_factory import create_llm
 
         config = self._collect_config()
 
@@ -645,8 +644,6 @@ class _ChatWorker(QObject):
 
     def __init__(self, session: "ChatSession", user_msg: str, attachment_paths: list[str] | None = None):
         super().__init__()
-        if TYPE_CHECKING:
-            from system_sl.chatbot import ChatSession
         self.session = session
         self.user_msg = user_msg
         self.attachment_paths = attachment_paths or []
