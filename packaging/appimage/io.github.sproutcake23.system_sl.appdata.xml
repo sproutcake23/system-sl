@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata: lets software centres and AppImageHub list the app.
+     Add a <release> entry for each version you publish. -->
+<component type="desktop-application">
+  <id>io.github.sproutcake23.system_sl</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>System-SL</name>
+  <summary>Gamified task manager with an AI mentor</summary>
+
+  <developer id="io.github.sproutcake23">
+    <name>sproutcake23</name>
+  </developer>
+
+  <description>
+    <p>
+      System-SL is a personal progression system inspired by Solo Leveling.
+      You define your daily quests, and the SYSTEM keeps you on track from
+      your desktop.
+    </p>
+    <ul>
+      <li>Add, edit, complete and reorder quests with deadlines</li>
+      <li>A priority engine that ranks what to work on next</li>
+      <li>An AI mentor to chat with, using Gemini, Ollama, LM Studio, OpenRouter or any OpenAI-compatible endpoint</li>
+      <li>Pull tasks out of attached PDF, DOCX, HTML or text files</li>
+      <li>Google Tasks sync and desktop notifications</li>
+      <li>Themes that follow your wallpaper</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.sproutcake23.system_sl.desktop</launchable>
+
+  <url type="homepage">https://github.com/sproutcake23/system-sl</url>
+  <url type="bugtracker">https://github.com/sproutcake23/system-sl/issues</url>
+  <url type="vcs-browser">https://github.com/sproutcake23/system-sl</url>
+
+  <categories>
+    <category>Utility</category>
+  </categories>
+
+  <keywords>
+    <keyword>tasks</keyword>
+    <keyword>todo</keyword>
+    <keyword>productivity</keyword>
+    <keyword>gamification</keyword>
+    <keyword>AI</keyword>
+  </keywords>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Chat with the SYSTEM about your quests</caption>
+      <image>https://raw.githubusercontent.com/sproutcake23/system-sl/main/docs/screenshots/chat.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Ranked quests in the task manager</caption>
+      <image>https://raw.githubusercontent.com/sproutcake23/system-sl/main/docs/screenshots/tasks.png</image>
+    </screenshot>
+  </screenshots>
+
+  <provides>
+    <binary>system-sl</binary>
+  </provides>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.8.0" date="2026-11-11">
+      <url type="details">https://github.com/sproutcake23/system-sl/releases/tag/v1.8.0</url>
+    </release>
+    <release version="1.7.3" date="2026-11-08"/>
+  </releases>
+</component>
