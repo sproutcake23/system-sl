@@ -3,9 +3,9 @@
 import re
 import html
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer, QMimeData, QUrl
+from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QTextBrowser,
     QVBoxLayout,
     QWidget,
-    QMenu,
     QMessageBox,
     QDialog,
     QFormLayout,
@@ -27,9 +26,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QAbstractItemView,
     QProgressBar,
-    QSplitter,
     QFrame,
-    QScrollArea,
     QFileDialog,
     QSizePolicy,
 )
@@ -52,6 +49,10 @@ from system_sl.frontend.gui.icons import get_icon
 # Lazy-loaded chatbot imports (moved to functions to avoid startup cost)
 # from system_sl.chatbot import ...
 # from system_sl.chatbot.llm_factory import LLMFactoryError
+
+if TYPE_CHECKING:
+    from system_sl.chatbot import ChatConfig, ChatSession, ModelInfo
+    from system_sl.chatbot.llm_factory import ProviderPreset
 
 
 def _colorize_markdown_html(body: str, color: str) -> str:
@@ -132,7 +133,7 @@ class _ModelFetchWorker(QObject):
         self.base_url = base_url
 
     def run(self):
-        from system_sl.chatbot import fetch_models_for_provider, ModelFetcherError, ModelInfo
+        from system_sl.chatbot import fetch_models_for_provider, ModelFetcherError
         try:
             self.progress.emit("Fetching models...")
             models = fetch_models_for_provider(self.provider, self.api_key, self.base_url)
@@ -506,6 +507,7 @@ class LLMSettingsPage(QWidget):
 
     def _refresh_cache(self) -> None:
         """Force refresh model cache."""
+        from system_sl.chatbot import invalidate_model_cache
         invalidate_model_cache(self._get_fetch_provider())
         self._fetch_models()
 
@@ -554,7 +556,7 @@ class LLMSettingsPage(QWidget):
         return "google"
 
     def _collect_config(self) -> "ChatConfig":
-        from system_sl.chatbot import ChatConfig, validate_config, save_config
+        from system_sl.chatbot import ChatConfig
         return ChatConfig(
             provider=self._get_provider_from_ui(),
             base_url=self.base_url_edit.text().strip() or None,
@@ -564,7 +566,8 @@ class LLMSettingsPage(QWidget):
 
     def _test_connection(self) -> None:
         """Test the current configuration by creating an LLM and sending a ping."""
-        from system_sl.chatbot.llm_factory import create_llm, LLMFactoryError
+        from system_sl.chatbot import validate_config
+        from system_sl.chatbot.llm_factory import create_llm
 
         config = self._collect_config()
 
@@ -592,6 +595,7 @@ class LLMSettingsPage(QWidget):
             self.test_btn.setText("Test Connection")
 
     def _on_apply(self) -> bool:
+        from system_sl.chatbot import save_config, validate_config
         config = self._collect_config()
         errors = validate_config(config)
         if errors:
@@ -953,7 +957,6 @@ class ChatPanel(QWidget):
         save_config(config)
 
         # Reload agent with new model
-        from system_sl.chatbot import reload_agent
         reload_agent()
 
         # Clear session cache for new model
@@ -1115,6 +1118,10 @@ class ChatPanel(QWidget):
     def _get_session(self, model_name: str) -> "ChatSession | None":
         """Get or create a ChatSession for the given model."""
         if model_name not in self._sessions:
+            # Imported here, not at module level: the chatbot package pulls in
+            # langchain, and the panel is built during GUI startup.
+            from system_sl.chatbot import ChatSession, ChatConfigError
+            from system_sl.chatbot.llm_factory import LLMFactoryError
             try:
                 self._sessions[model_name] = ChatSession(model_name=model_name)
             except (ChatConfigError, LLMFactoryError) as e:

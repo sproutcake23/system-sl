@@ -31,13 +31,15 @@ from system_sl.utils.auto_updater import apply_pending_update
 def main():
     # Handle --install-desktop before Qt initialization
     if "--install-desktop" in sys.argv:
-        from system_sl.frontend.gui.main import install_desktop_entry
+        from system_sl.frontend.gui.desktop_entry import install_desktop_entry
         return install_desktop_entry()
 
     # Swap in a staged AppImage replacement before anything else touches disk.
     apply_pending_update()
 
-    app = QApplication(sys.argv)
+    # Reuse an existing QApplication when one is already alive. Creating a
+    # second one aborts with "Please destroy the QApplication singleton".
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     initialize_application_autostart()
 

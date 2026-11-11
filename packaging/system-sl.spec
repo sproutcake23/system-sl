@@ -94,11 +94,24 @@ else:
     binaries.append((str(wallust), "."))
 
 datas += collect_data_files("spellchecker")
-for package in ("en_core_web_md", "certifi"):
+for package in ("en_core_web_md", "certifi", "pillow_heif"):
     package_datas, package_binaries, package_imports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_imports
+
+# pillow-heif loads libheif from a sibling directory rather than importing it,
+# so PyInstaller's scanner does not find it. Copy it in explicitly or HEIC
+# wallpapers fail to decode in the frozen build.
+try:
+    import pillow_heif as _pillow_heif
+
+    _heif_libs = Path(_pillow_heif.__file__).parent.parent / "pillow_heif.libs"
+    if _heif_libs.is_dir():
+        for lib in sorted(_heif_libs.iterdir()):
+            binaries.append((str(lib), "pillow_heif.libs"))
+except Exception as exc:  # pragma: no cover - build-time only
+    print(f"[build] WARNING: could not bundle libheif: {exc}", file=sys.stderr)
 
 if not IS_WINDOWS:
     # On Linux, Analysis should scan these: it collects the libraries they need.
@@ -110,26 +123,18 @@ if not IS_WINDOWS:
         datas.append((tessdata, "tessdata"))
 
 a = Analysis(
-    [str(ROOT / "src/system_sl/frontend/gui/main.py")],
+    [str(ROOT / "src/system_sl/frontend/gui/entry.py")],
     pathex=[str(ROOT / "src")],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
 )
 
-# Separate analysis for the minimal notifier (--bg entry point)
-notifier_analysis = Analysis(
-    [str(ROOT / "src/system_sl/frontend/gui/notifier.py")],
-    pathex=[str(ROOT / "src")],
-    binaries=binaries,
-    datas=datas,
-    hiddenimports=hiddenimports,
-)
-
-notifier_analysis.binaries = [entry for entry in notifier_analysis.binaries if not is_unwanted(entry)]
-notifier_analysis.datas = [entry for entry in notifier_analysis.datas if not is_unwanted(entry)]
-if IS_WINDOWS:
-    notifier_analysis.datas += windows_ocr_files()
+# There is no separate notifier binary. The --bg mode used to be built as
+# its own executable, but nothing ever shipped or launched it: the autostart
+# entry runs the main binary with --bg. Now that entry.py dispatches --bg
+# before the GUI stack is imported, that path costs no more than the notifier
+# did, so a second copy of a ~280 MB bundle is pure build time.
 
 a.binaries = [entry for entry in a.binaries if not is_unwanted(entry)]
 a.datas = [entry for entry in a.datas if not is_unwanted(entry)]
@@ -137,7 +142,6 @@ if IS_WINDOWS:
     a.datas += windows_ocr_files()
 
 pyz = PYZ(a.pure)
-notifier_pyz = PYZ(notifier_analysis.pure)
 
 if os.environ.get("SYSTEM_SL_ONEDIR") == "1":
     exe = EXE(
@@ -145,14 +149,6 @@ if os.environ.get("SYSTEM_SL_ONEDIR") == "1":
         a.scripts,
         exclude_binaries=True,
         name="system-sl",
-        console=False,
-        upx=False,
-    )
-    notifier_exe = EXE(
-        notifier_pyz,
-        notifier_analysis.scripts,
-        exclude_binaries=True,
-        name="system-sl-notifier",
         console=False,
         upx=False,
     )
@@ -164,15 +160,6 @@ else:
         a.binaries,
         a.datas,
         name="system-sl",
-        console=False,
-        upx=False,
-    )
-    notifier_exe = EXE(
-        notifier_pyz,
-        notifier_analysis.scripts,
-        notifier_analysis.binaries,
-        notifier_analysis.datas,
-        name="system-sl-notifier",
         console=False,
         upx=False,
     )

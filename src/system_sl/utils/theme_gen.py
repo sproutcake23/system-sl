@@ -11,6 +11,17 @@ import re
 
 from PIL import Image
 
+try:
+    # HEIC/HEIF is not a format Pillow reads on its own. pillow-heif ships
+    # the decoder; registering its opener is what makes .heic wallpapers
+    # readable at all. The import is optional so a Pillow-only install still
+    # works for every other format.
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+except Exception:  # pragma: no cover - optional dependency
+    pillow_heif = None
+
 # The default (System dark) palette: THE SYSTEM's Solo Leveling navy.
 DEFAULT_TOKENS = {
     "sys_color_background": "#060912",
@@ -37,7 +48,7 @@ DEFAULT_TOKENS = {
 }
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
-              ".tif", ".tiff", ".avif", ".jxl")
+              ".tif", ".tiff", ".avif", ".jxl", ".heic", ".heif")
 
 # Formats wallust's bundled image decoder may not read. They are converted to
 # PNG with Pillow/imagecodecs before extraction.
