@@ -29,6 +29,7 @@ from system_sl.frontend.gui.theme import (
 from system_sl.utils.wallpaper_path import WallpaperState, get_wallpaper_state, watch_paths
 from system_sl.utils.wallust_theme import (
     cached_wallust_tokens,
+    cancel_extractions,
     find_wallust,
     generate_wallust_tokens,
     last_error,
@@ -97,6 +98,9 @@ class ThemeManager(QObject):
         self._last_good_tokens: Optional[dict] = None
         self._fingerprint: Optional[str] = None
         self._detected_path: str = ""
+        # The status the last extraction reported, restored when detection
+        # recovers after a failed poll.
+        self._palette_status: str = ""
 
         self._probe_thread: Optional[_ProbeThread] = None
         self._extract_thread: Optional[_ExtractThread] = None
@@ -135,11 +139,14 @@ class ThemeManager(QObject):
         QThread.terminate() is deliberately not used: it kills the thread at an
         arbitrary point, which can land inside a subprocess call or a file
         write and leave the process in a broken state on exit. Instead the
-        workers are asked to stop and given time to return on their own.
+        workers are asked to stop, any running wallust process is killed so
+        the extractor is not left waiting on it, and the threads return on
+        their own.
         """
         self._timer.stop()
         self._scheme_timer.stop()
         self._debounce.stop()
+        cancel_extractions()
         for attribute in ("_probe_thread", "_extract_thread"):
             thread = getattr(self, attribute, None)
             if thread is None or not thread.isRunning():

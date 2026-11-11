@@ -20,9 +20,11 @@ import logging
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -38,6 +40,14 @@ LOG = logging.getLogger(__name__)
 WALLUST_CONFIG_VERSION = "1"
 WALLUST_BIN_ENV = "SYSTEM_SL_WALLUST"
 WALLUST_TIMEOUT = 25.0
+
+# Running wallust processes, so a shutdown can end them. Without this a worker
+# thread blocked in communicate() can outlive the 5 s shutdown wait (the
+# timeout is 25 s), and Qt aborts when it destroys a thread that is still
+# running.
+_process_lock = threading.Lock()
+_active_processes: "set[subprocess.Popen]" = set()
+_cancelled = threading.Event()
 
 PALETTE_KEYS = (
     "background",
@@ -284,26 +294,42 @@ def _run_wallust_once(binary: str, image_path: str) -> Optional[Dict[str, str]]:
         creationflags = 0
         if os.name == "nt":
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        try:
-            # Popen rather than run(), so a shutdown can end the child
-            # process instead of killing the thread that is waiting on it.
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                creationflags=creationflags,
-            )
-        except OSError as exc:
-            LOG.debug("wallust failed to start: %s", exc)
-            return None
+        # Popen rather than run(), so cancel_extractions() can end the child
+        # process instead of the thread that is waiting on it having to be
+        # killed. The start and the registration share the lock, so a cancel
+        # cannot slip in between them and miss the new process.
+        with _process_lock:
+            if _cancelled.is_set():
+                return None
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    creationflags=creationflags,
+                    # Its own process group on POSIX, so a kill also reaches
+                    # any child it spawned. A child that survives would keep
+                    # the pipes open and communicate() blocked.
+                    start_new_session=os.name != "nt",
+                )
+            except OSError as exc:
+                LOG.debug("wallust failed to start: %s", exc)
+                return None
+            _active_processes.add(process)
 
         try:
             stdout, stderr = process.communicate(timeout=WALLUST_TIMEOUT)
         except subprocess.TimeoutExpired:
-            process.kill()
+            _kill_process(process)
             process.communicate()
             LOG.debug("wallust timed out after %ss", WALLUST_TIMEOUT)
+            return None
+        finally:
+            with _process_lock:
+                _active_processes.discard(process)
+
+        if _cancelled.is_set():
             return None
 
         result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
@@ -336,6 +362,31 @@ def _validate_palette(palette: object) -> Optional[Dict[str, str]]:
             return None
         cleaned[key] = _normalise_hex(value)
     return cleaned
+
+
+def cancel_extractions() -> None:
+    """Kill any running wallust process and refuse to start new ones.
+
+    Called once at shutdown. It is final: extraction stays disabled for the
+    rest of the process, so a worker cannot start its next retry after its
+    current wallust run is killed.
+    """
+    with _process_lock:
+        _cancelled.set()
+        processes = list(_active_processes)
+    for process in processes:
+        _kill_process(process)
+
+
+def _kill_process(process: subprocess.Popen) -> None:
+    """Kill wallust and, on POSIX, every process in its group."""
+    try:
+        if os.name != "nt":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except OSError:
+        pass  # It already exited.
 
 
 def _extract_palette(image_path: str) -> Optional[Dict[str, str]]:
@@ -400,6 +451,9 @@ def generate_wallust_tokens(image_path: str, *, use_cache: bool = True) -> Dict[
             return dict(cache["tokens"])
 
     palette = _extract_palette(resolved)
+    if not palette and _cancelled.is_set():
+        # Shutting down: this is not a failure worth reporting.
+        return dict(DEFAULT_TOKENS)
     if not palette:
         global _warned_failure
         _last_error = (
