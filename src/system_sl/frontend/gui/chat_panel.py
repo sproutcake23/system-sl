@@ -5,7 +5,7 @@ import html
 from pathlib import Path
 from typing import Callable, Optional, TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer, QMimeData, QUrl
+from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QTextBrowser,
     QVBoxLayout,
     QWidget,
-    QMenu,
     QMessageBox,
     QDialog,
     QFormLayout,
@@ -27,9 +26,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QAbstractItemView,
     QProgressBar,
-    QSplitter,
     QFrame,
-    QScrollArea,
     QFileDialog,
     QSizePolicy,
 )
@@ -136,7 +133,7 @@ class _ModelFetchWorker(QObject):
         self.base_url = base_url
 
     def run(self):
-        from system_sl.chatbot import fetch_models_for_provider, ModelFetcherError, ModelInfo
+        from system_sl.chatbot import fetch_models_for_provider, ModelFetcherError
         try:
             self.progress.emit("Fetching models...")
             models = fetch_models_for_provider(self.provider, self.api_key, self.base_url)
