@@ -125,8 +125,11 @@ jobs:
         run: tar -cJf system-sl-linux.tar.xz -C dist system-sl
 
       # Makes its own one-folder build, separate from the one-file dist/system-sl.
+      # appimagetool validates the AppStream metadata with appstreamcli, and
+      # silently skips the check when it isn't installed.
       - name: Build AppImage
         run: |
+          sudo apt-get install -y appstream
           uv run python packaging/appimage/build-appimage.py
 
       - name: Smoke-test AppImage launcher
