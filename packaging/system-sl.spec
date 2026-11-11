@@ -94,11 +94,24 @@ else:
     binaries.append((str(wallust), "."))
 
 datas += collect_data_files("spellchecker")
-for package in ("en_core_web_md", "certifi"):
+for package in ("en_core_web_md", "certifi", "pillow_heif"):
     package_datas, package_binaries, package_imports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_imports
+
+# pillow-heif loads libheif from a sibling directory rather than importing it,
+# so PyInstaller's scanner does not find it. Copy it in explicitly or HEIC
+# wallpapers fail to decode in the frozen build.
+try:
+    import pillow_heif as _pillow_heif
+
+    _heif_libs = Path(_pillow_heif.__file__).parent.parent / "pillow_heif.libs"
+    if _heif_libs.is_dir():
+        for lib in sorted(_heif_libs.iterdir()):
+            binaries.append((str(lib), "pillow_heif.libs"))
+except Exception as exc:  # pragma: no cover - build-time only
+    print(f"[build] WARNING: could not bundle libheif: {exc}", file=sys.stderr)
 
 if not IS_WINDOWS:
     # On Linux, Analysis should scan these: it collects the libraries they need.
@@ -110,7 +123,7 @@ if not IS_WINDOWS:
         datas.append((tessdata, "tessdata"))
 
 a = Analysis(
-    [str(ROOT / "src/system_sl/frontend/gui/main.py")],
+    [str(ROOT / "src/system_sl/frontend/gui/entry.py")],
     pathex=[str(ROOT / "src")],
     binaries=binaries,
     datas=datas,

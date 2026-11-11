@@ -1,28 +1,10 @@
 import os
 import sys
-from pathlib import Path
 import subprocess
 
 from dotenv import load_dotenv, set_key
 
-
-def install_desktop_entry() -> int:
-    """Move the AppImage to ~/Applications and add a menu entry for it."""
-    appimage_path = os.environ.get("APPIMAGE")
-    if not appimage_path or not Path(appimage_path).is_file():
-        print("❌ This command only works when running from an AppImage.")
-        return 1
-
-    from system_sl.utils.appimage_install import DESKTOP_FILE, install_appimage
-
-    try:
-        installed = install_appimage(Path(appimage_path))
-    except OSError as e:
-        print(f"❌ Failed to install the AppImage: {e}")
-        return 1
-    print(f"✅ Installed to: {installed}")
-    print(f"   Menu entry: {DESKTOP_FILE}")
-    return 0
+from system_sl.frontend.gui.desktop_entry import install_desktop_entry
 from PySide6.QtCore import QSize, QTimer, QSettings, Qt, Slot, QObject, QThread, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
@@ -38,7 +20,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QFileDialog,
     QSizePolicy,
-    QDialog,
     QSystemTrayIcon,
     QMenu,
 )
@@ -873,55 +854,15 @@ def main():
 
     # reload = DevelopmentAutoReloader(app)
 
-    # Delegate --bg to minimal notifier entry point to avoid loading chat stack
-    if "--bg" in sys.argv:
-        from system_sl.frontend.gui.notifier import main as notifier_main
-        sys.exit(notifier_main())
-
-
-    # Load LLM configuration (optional — chat features need it, core tasks don't)
-    from system_sl.chatbot import load_config, validate_config, ChatConfig
-    from system_sl.chatbot.llm_factory import ProviderPreset
-
-    config = load_config()
-    errors = validate_config(config)
-
-    # If config is invalid or missing, offer to configure or skip
-    if errors or not config.system_model:
-        msg = QMessageBox()
-        msg.setWindowTitle("LLM Configuration")
-        msg.setText("No LLM provider configured.")
-        msg.setInformativeText(
-            "Chat features (AI assistant, task proposals) require an LLM API key.\n"
-            "Core task management, prioritization, and notifications work without it."
-        )
-        configure_btn = msg.addButton("Configure Now", QMessageBox.ButtonRole.AcceptRole)
-        skip_btn = msg.addButton("Skip (No Chat)", QMessageBox.ButtonRole.RejectRole)
-        msg.setDefaultButton(configure_btn)
-        msg.exec()
-
-        if msg.clickedButton() == configure_btn:
-            from system_sl.frontend.gui.chat_panel import SettingsDialog
-            dialog = SettingsDialog()
-            if dialog.exec() != QDialog.Accepted:
-                # User cancelled config dialog — treat as skip
-                pass
-            else:
-                # Reload config after dialog
-                config = load_config()
-                errors = validate_config(config)
-                if errors:
-                    QMessageBox.warning(
-                        None,
-                        "Invalid Configuration",
-                        "\n".join(errors) + "\n\nChat features may not work.",
-                    )
-        # If skipped or cancelled, continue without LLM config — chat will prompt later
-
     # Do not copy the API key into os.environ. create_llm() is handed the key
     # explicitly, and exporting it here froze the key loaded at startup: a key
     # entered later in the settings dialog was ignored for the rest of the
     # process and then written back over the stored one.
+    #
+    # The LLM is deliberately not configured here. Task management, ranking and
+    # notifications all work without a provider, so a first-run player is never
+    # blocked by a missing API key. The chat panel prompts for one the first
+    # time a message is sent.
 
     try:
         storage = PersonaStorageHandler()
