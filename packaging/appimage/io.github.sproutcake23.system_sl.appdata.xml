@@ -33,7 +33,6 @@
 
   <url type="homepage">https://github.com/sproutcake23/system-sl</url>
   <url type="bugtracker">https://github.com/sproutcake23/system-sl/issues</url>
-  <url type="vcs-browser">https://github.com/sproutcake23/system-sl</url>
 
   <categories>
     <category>Utility</category>
@@ -50,11 +49,11 @@
   <screenshots>
     <screenshot type="default">
       <caption>Chat with the SYSTEM about your quests</caption>
-      <image>https://raw.githubusercontent.com/sproutcake23/system-sl/main/docs/screenshots/chat.png</image>
+      <image>https://raw.githubusercontent.com/sproutcake23/system-sl/14463f2329aa1a2463f7a036cb6fe4c3bc7c713d/docs/screenshots/chat.png</image>
     </screenshot>
     <screenshot>
       <caption>Ranked quests in the task manager</caption>
-      <image>https://raw.githubusercontent.com/sproutcake23/system-sl/main/docs/screenshots/tasks.png</image>
+      <image>https://raw.githubusercontent.com/sproutcake23/system-sl/14463f2329aa1a2463f7a036cb6fe4c3bc7c713d/docs/screenshots/tasks.png</image>
     </screenshot>
   </screenshots>
 

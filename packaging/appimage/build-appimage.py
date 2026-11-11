@@ -124,6 +124,11 @@ def main() -> None:
         # since its 2026-10-29 continuous build it requires one up front, and
         # it must be a PNG: an SVG is flagged as invalid.
         (appdir / ".DirIcon").symlink_to("system-sl.png")
+        # Older appstreamcli (Ubuntu 22.04's 0.15) looks for the desktop file
+        # here rather than at the AppDir root.
+        applications_dir = appdir / "usr" / "share" / "applications"
+        applications_dir.mkdir(parents=True)
+        shutil.copy2(desktop, applications_dir / f"{APP_ID}.desktop")
         metainfo_dir = appdir / "usr" / "share" / "metainfo"
         metainfo_dir.mkdir(parents=True)
         shutil.copy2(metainfo, metainfo_dir / f"{APP_ID}.appdata.xml")
