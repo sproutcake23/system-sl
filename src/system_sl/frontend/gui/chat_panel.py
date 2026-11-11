@@ -3,7 +3,7 @@
 import re
 import html
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer, QMimeData, QUrl
 from PySide6.QtWidgets import (
@@ -52,6 +52,10 @@ from system_sl.frontend.gui.icons import get_icon
 # Lazy-loaded chatbot imports (moved to functions to avoid startup cost)
 # from system_sl.chatbot import ...
 # from system_sl.chatbot.llm_factory import LLMFactoryError
+
+if TYPE_CHECKING:
+    from system_sl.chatbot import ChatConfig, ChatSession, ModelInfo
+    from system_sl.chatbot.llm_factory import ProviderPreset
 
 
 def _colorize_markdown_html(body: str, color: str) -> str:
@@ -358,6 +362,7 @@ class LLMSettingsPage(QWidget):
 
     def _get_current_preset(self) -> "Optional[ProviderPreset]":
         from system_sl.chatbot import get_preset
+        from system_sl.chatbot.llm_factory import ProviderPreset
         preset_key = self.preset_combo.currentData()
         if preset_key and preset_key != "custom":
             return get_preset(preset_key)
@@ -406,7 +411,7 @@ class LLMSettingsPage(QWidget):
 
     def _on_models_fetched(self, models: "list[ModelInfo]") -> None:
         """Handle successful model fetch."""
-        from system_sl.chatbot import set_model_cache
+        from system_sl.chatbot import ModelInfo, set_model_cache
         self._fetched_models = models
         self._populate_model_table()
         self.model_table_frame.setVisible(True)
@@ -506,6 +511,7 @@ class LLMSettingsPage(QWidget):
 
     def _refresh_cache(self) -> None:
         """Force refresh model cache."""
+        from system_sl.chatbot import invalidate_model_cache
         invalidate_model_cache(self._get_fetch_provider())
         self._fetch_models()
 
@@ -554,7 +560,7 @@ class LLMSettingsPage(QWidget):
         return "google"
 
     def _collect_config(self) -> "ChatConfig":
-        from system_sl.chatbot import ChatConfig, validate_config, save_config
+        from system_sl.chatbot import ChatConfig
         return ChatConfig(
             provider=self._get_provider_from_ui(),
             base_url=self.base_url_edit.text().strip() or None,
@@ -564,6 +570,7 @@ class LLMSettingsPage(QWidget):
 
     def _test_connection(self) -> None:
         """Test the current configuration by creating an LLM and sending a ping."""
+        from system_sl.chatbot import validate_config
         from system_sl.chatbot.llm_factory import create_llm, LLMFactoryError
 
         config = self._collect_config()
@@ -592,6 +599,7 @@ class LLMSettingsPage(QWidget):
             self.test_btn.setText("Test Connection")
 
     def _on_apply(self) -> bool:
+        from system_sl.chatbot import save_config, validate_config
         config = self._collect_config()
         errors = validate_config(config)
         if errors:
@@ -637,6 +645,8 @@ class _ChatWorker(QObject):
 
     def __init__(self, session: "ChatSession", user_msg: str, attachment_paths: list[str] | None = None):
         super().__init__()
+        if TYPE_CHECKING:
+            from system_sl.chatbot import ChatSession
         self.session = session
         self.user_msg = user_msg
         self.attachment_paths = attachment_paths or []
@@ -953,7 +963,6 @@ class ChatPanel(QWidget):
         save_config(config)
 
         # Reload agent with new model
-        from system_sl.chatbot import reload_agent
         reload_agent()
 
         # Clear session cache for new model
@@ -1115,6 +1124,10 @@ class ChatPanel(QWidget):
     def _get_session(self, model_name: str) -> "ChatSession | None":
         """Get or create a ChatSession for the given model."""
         if model_name not in self._sessions:
+            # Imported here, not at module level: the chatbot package pulls in
+            # langchain, and the panel is built during GUI startup.
+            from system_sl.chatbot import ChatSession, ChatConfigError
+            from system_sl.chatbot.llm_factory import LLMFactoryError
             try:
                 self._sessions[model_name] = ChatSession(model_name=model_name)
             except (ChatConfigError, LLMFactoryError) as e:

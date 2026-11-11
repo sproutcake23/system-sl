@@ -294,11 +294,10 @@ def get_system_agent():
     Uses the configured LLM provider and model.
     Rebuilds if config changes (cache keyed on config hash via lru_cache).
     """
-    try:
-        llm = _get_cached_llm()
-    except LLMFactoryError as e:
-        # Provide a helpful error message
-        raise RuntimeError(f"Failed to initialize LLM: {e}") from e
+    # LLMFactoryError is raised unchanged so callers can tell "no API key
+    # configured" apart from a genuine failure. The chat panel uses that to
+    # offer the settings dialog instead of showing a raw error.
+    llm = _get_cached_llm()
 
     return create_agent(
         model=llm,
