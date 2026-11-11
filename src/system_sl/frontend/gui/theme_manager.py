@@ -48,11 +48,15 @@ class _ProbeThread(QThread):
     stateReady = Signal(object)
 
     def run(self):
+        if self.isInterruptionRequested():
+            return
         try:
             state = get_wallpaper_state()
         except Exception:
             LOG.exception("Could not detect the wallpaper")
             state = None
+        if self.isInterruptionRequested():
+            return
         self.stateReady.emit(state)
 
 
@@ -66,11 +70,15 @@ class _ExtractThread(QThread):
         self._state = state
 
     def run(self):
+        if self.isInterruptionRequested():
+            return
         try:
             tokens = generate_wallust_tokens(self._state.image_path or "")
         except Exception:
             LOG.exception("Could not generate wallust tokens")
             tokens = None
+        if self.isInterruptionRequested():
+            return
         self.tokensReady.emit(self._state.fingerprint, tokens)
 
 
@@ -88,6 +96,7 @@ class ThemeManager(QObject):
         self._status_message = ""
         self._last_good_tokens: Optional[dict] = None
         self._fingerprint: Optional[str] = None
+        self._detected_path: str = ""
 
         self._probe_thread: Optional[_ProbeThread] = None
         self._extract_thread: Optional[_ExtractThread] = None
@@ -121,7 +130,13 @@ class ThemeManager(QObject):
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
-        """Stop watchers and let in-flight detection finish before exiting."""
+        """Stop watchers and let in-flight detection finish before exiting.
+
+        QThread.terminate() is deliberately not used: it kills the thread at an
+        arbitrary point, which can land inside a subprocess call or a file
+        write and leave the process in a broken state on exit. Instead the
+        workers are asked to stop and given time to return on their own.
+        """
         self._timer.stop()
         self._scheme_timer.stop()
         self._debounce.stop()
@@ -129,9 +144,11 @@ class ThemeManager(QObject):
             thread = getattr(self, attribute, None)
             if thread is None or not thread.isRunning():
                 continue
-            if not thread.wait(3000):
-                thread.terminate()
-                thread.wait(1000)
+            thread.requestInterruption()
+            # The workers poll isInterruptionRequested() between steps, so
+            # this returns promptly without killing anything mid-flight.
+            if not thread.wait(5000):
+                LOG.warning("%s did not stop in time; leaving it to exit", attribute)
 
     # ------------------------------------------------------------------
     # Public API
@@ -269,9 +286,14 @@ class ThemeManager(QObject):
             extra.append(state.image_path)
         self._refresh_watch_paths(extra)
 
-        # A transient detection failure must not wipe a good palette.
+        # A transient detection failure must not wipe a good palette, but it
+        # must not be silent either: the status line is the only place the
+        # player can learn that detection failed.
         if state is None or not state.ok:
+            error = state.error if state is not None else None
+            self._set_status(error or "Could not detect the wallpaper.")
             return
+        self._detected_path = state.image_path or ""
         if state.fingerprint == self._fingerprint and self._last_good_tokens is not None:
             return
 
@@ -302,7 +324,7 @@ class ThemeManager(QObject):
             self._fingerprint = fingerprint
             self._last_good_tokens = tokens
             self._apply(tokens)
-            self._set_status(last_error() or "")
+            self._set_status(last_error() or self._wallpaper_status())
         else:
             # A crash in the worker: keep the last good palette but remember the
             # wallpaper so the same failure is not retried every poll.
@@ -315,6 +337,18 @@ class ThemeManager(QObject):
         self._pending_state = None
         if pending is not None and pending.fingerprint != fingerprint:
             self._start_extract(pending)
+
+    def _wallpaper_status(self) -> str:
+        """Describe the wallpaper the palette was taken from.
+
+        Without this the Settings panel shows a blank status in Dynamic mode,
+        which is indistinguishable from Dark mode and leaves the player
+        guessing which wallpaper was picked up.
+        """
+        path = self._detected_path
+        if not path:
+            return ""
+        return f"Using wallpaper: {path}"
 
     def _on_watch_event(self, _path: str) -> None:
         if self._mode == "dynamic":

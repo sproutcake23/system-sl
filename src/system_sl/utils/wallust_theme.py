@@ -285,17 +285,28 @@ def _run_wallust_once(binary: str, image_path: str) -> Optional[Dict[str, str]]:
         if os.name == "nt":
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            result = subprocess.run(
+            # Popen rather than run(), so a shutdown can end the child
+            # process instead of killing the thread that is waiting on it.
+            process = subprocess.Popen(
                 command,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=WALLUST_TIMEOUT,
                 creationflags=creationflags,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except OSError as exc:
             LOG.debug("wallust failed to start: %s", exc)
             return None
 
+        try:
+            stdout, stderr = process.communicate(timeout=WALLUST_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            LOG.debug("wallust timed out after %ss", WALLUST_TIMEOUT)
+            return None
+
+        result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         if result.returncode != 0 or not target.is_file():
             LOG.debug(
                 "wallust exited %s: %s",
