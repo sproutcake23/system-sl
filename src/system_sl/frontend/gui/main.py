@@ -47,6 +47,7 @@ from system_sl.frontend.gui.settings_window import AppSettingsDialog
 from system_sl.frontend.gui.theme import THEME_MODE_LABELS, THEME_MODES
 from system_sl.frontend.gui.theme_manager import get_theme_manager
 from system_sl.frontend.gui.icons import get_icon, initialize_icons
+from system_sl import __version__
 from system_sl.utils import (
     CrossPlatformAutostart,
     SystemNotification,
@@ -322,6 +323,10 @@ class MainWindow(QMainWindow):
         self.install_desktop_btn.setIcon(get_icon("install"))
         self.install_desktop_btn.clicked.connect(self.install_desktop_shortcut)
 
+        self.about_button = QPushButton("About")
+        self.about_button.setIcon(get_icon("info"))
+        self.about_button.clicked.connect(self.show_about_dialog)
+
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setSpacing(SIDEBAR_SPACING)
@@ -337,6 +342,7 @@ class MainWindow(QMainWindow):
                     self.auto_update_check,
                     self.google_sync_toggle,
                     self.install_desktop_btn,
+                    self.about_button,
                 ),
             ),
         )
@@ -660,6 +666,20 @@ class MainWindow(QMainWindow):
             )
         else:
             QMessageBox.warning(self, "Failed", "Could not install the app.\nMake sure you're running from the AppImage.")
+
+    def show_about_dialog(self):
+        """Show the About dialog with version information."""
+        QMessageBox.about(
+            self,
+            "About THE SYSTEM",
+            f"<b>THE SYSTEM</b><br>"
+            f"Version: {__version__}<br>"
+            f"<br>"
+            f"A Solo Leveling-inspired task management system.<br>"
+            f"<br>"
+            f"© 2024–2026 sproutcake23<br>"
+            f"Licensed under GPL-3.0",
+        )
 
     def _on_theme_combo_changed(self, index: int) -> None:
         if index < 0:
