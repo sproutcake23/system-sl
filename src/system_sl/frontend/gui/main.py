@@ -835,6 +835,15 @@ def main():
     if "--check-theme" in sys.argv:
         _run_theme_check()
 
+    # The background notifier. The frozen binary and the console script reach
+    # this through entry.py, which dispatches before importing the GUI stack.
+    # A direct "python main.py --bg" lands here instead, so it is handled
+    # before the QApplication is created: notifier.main() makes its own, and
+    # a second one aborts with "Please destroy the QApplication singleton".
+    if "--bg" in sys.argv:
+        from system_sl.frontend.gui.notifier import main as notifier_main
+        return notifier_main()
+
     # Handle --install-desktop flag before Qt initialization
     if "--install-desktop" in sys.argv:
         return install_desktop_entry()
