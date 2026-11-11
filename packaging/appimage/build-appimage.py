@@ -19,10 +19,6 @@ from pathlib import Path
 
 # Lets AppImageUpdate and similar tools find newer releases. appimagetool
 # writes the matching .zsync file next to the AppImage; publish both.
-# AppStream ID. The desktop file and metainfo in the AppDir are named after
-# it, which is what software centres and appstreamcli expect.
-APP_ID = "io.github.sproutcake23.system_sl"
-
 UPDATE_INFORMATION = (
     "gh-releases-zsync|sproutcake23|system-sl|latest|system-sl-*-x86_64.AppImage.zsync"
 )
@@ -99,11 +95,8 @@ def main() -> None:
     desktop = assets / "system-sl-appimage.desktop"
     icon = assets / "system-sl.svg"
     icon_png = assets / "system-sl.png"
-    metainfo = project_root / "packaging" / "appimage" / f"{APP_ID}.appdata.xml"
     if not desktop.is_file() or not icon.is_file() or not icon_png.is_file():
         raise SystemExit("AppImage desktop file or icon is missing from src/system_sl/assets.")
-    if not metainfo.is_file():
-        raise SystemExit(f"AppStream metadata is missing: {metainfo}")
 
     output = project_root / "dist" / f"system-sl-{version}-x86_64.AppImage"
     output.unlink(missing_ok=True)
@@ -117,21 +110,13 @@ def main() -> None:
         # Copy the bundle, not the Python packaging entry point. The former is
         # portable; the latter embeds the builder's virtualenv in its shebang.
         shutil.copytree(bundle, app_lib_dir / "system-sl", symlinks=True)
-        shutil.copy2(desktop, appdir / f"{APP_ID}.desktop")
+        shutil.copy2(desktop, appdir / "system-sl.desktop")
         shutil.copy2(icon, appdir / "system-sl.svg")
         shutil.copy2(icon_png, appdir / "system-sl.png")
         # appimagetool used to derive .DirIcon from the desktop file's icon;
         # since its 2026-10-29 continuous build it requires one up front, and
         # it must be a PNG: an SVG is flagged as invalid.
         (appdir / ".DirIcon").symlink_to("system-sl.png")
-        # Older appstreamcli (Ubuntu 22.04's 0.15) looks for the desktop file
-        # here rather than at the AppDir root.
-        applications_dir = appdir / "usr" / "share" / "applications"
-        applications_dir.mkdir(parents=True)
-        shutil.copy2(desktop, applications_dir / f"{APP_ID}.desktop")
-        metainfo_dir = appdir / "usr" / "share" / "metainfo"
-        metainfo_dir.mkdir(parents=True)
-        shutil.copy2(metainfo, metainfo_dir / f"{APP_ID}.appdata.xml")
 
         apprun = appdir / "AppRun"
         apprun.write_text(
