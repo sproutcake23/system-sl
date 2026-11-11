@@ -335,7 +335,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Full history and tags, so the notes step can find the previous release.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download Linux binary
         uses: actions/download-artifact@v4
@@ -368,6 +371,12 @@ jobs:
           system-sl-setup.exe
           > SHA256SUMS.txt
 
+      # Scope the notes to changes since the previous tag. A fixed start tag
+      # here made every release list everything since that tag.
+      - name: Find previous release tag
+        id: prev
+        run: echo "tag=$(git describe --tags --abbrev=0 '${{ github.ref_name }}^')" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -381,4 +390,4 @@ jobs:
           SHA256SUMS.txt
           --title "THE SYSTEM ${{ github.ref_name }}"
           --generate-notes
-          --notes-start-tag v1.1.0
+          --notes-start-tag "${{ steps.prev.outputs.tag }}"
