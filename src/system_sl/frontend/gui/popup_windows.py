@@ -49,12 +49,13 @@ DEFAULT_CATEGORY = "general"
 class ReorderableTaskList(QListWidget):
     """Task list the user can drag to re-rank.
 
-    Emits ``reordered(moved_text, old_rank, new_rank, new_texts)`` after a drag,
-    where the ranks are 1-based positions and ``new_texts`` is the full new
-    order of the item labels.
+    Emits ``reordered(moved_text, old_rank, new_rank, new_texts, new_titles)``
+    after a drag, where the ranks are 1-based positions, ``new_texts`` is the
+    full new order of the item display labels, and ``new_titles`` is the full
+    new order of the item titles (from Qt.UserRole).
     """
 
-    reordered = Signal(str, int, int, list)
+    reordered = Signal(str, int, int, list, list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -66,15 +67,18 @@ class ReorderableTaskList(QListWidget):
             super().dropEvent(event)
             return
         moved_text = moved_item.text()
+        moved_title = moved_item.data(Qt.UserRole)
         old_texts = [self.item(i).text() for i in range(self.count())]
+        old_titles = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
         super().dropEvent(event)
         new_texts = [self.item(i).text() for i in range(self.count())]
+        new_titles = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
         if moved_text not in old_texts or moved_text not in new_texts:
             return
         old_rank = old_texts.index(moved_text) + 1
         new_rank = new_texts.index(moved_text) + 1
         if old_rank != new_rank:
-            self.reordered.emit(moved_text, old_rank, new_rank, new_texts)
+            self.reordered.emit(moved_text, old_rank, new_rank, new_texts, new_titles)
 
 
 class TasksWindow(QWidget):
@@ -239,29 +243,18 @@ class TasksWindow(QWidget):
             self.tasks_list_widget.addItem(item)
             self._text_to_task[title] = task
 
-    def _on_reordered(self, moved_text, old_rank, new_rank, new_texts):
+    def _on_reordered(self, moved_text, old_rank, new_rank, new_texts, new_titles):
         # BUG: REMEBER TO DEAL WITH THIS FUNCTION CAREFULLY
 
-        # new_texts contains display strings, but _text_to_task is keyed by title.
-        # Extract titles from the display strings (format: "N. Title [extras]")
-        def extract_title(display: str) -> str:
-            # Remove leading "N. " and anything after "  →" or " [P="
-            title = display
-            if ". " in title:
-                title = title.split(". ", 1)[1]
-            for sep in ("  →", " [P="):
-                if sep in title:
-                    title = title.split(sep)[0]
-            return title.strip()
-
-        new_titles = [extract_title(t) for t in new_texts]
+        # new_titles contains the actual task titles from Qt.UserRole (no parsing needed)
         new_order_dicts = [
             self._text_to_task[t] for t in new_titles if t in self._text_to_task
         ]
-        moved_title = extract_title(moved_text)
+        # The moved item is now at new_rank in the new order
+        moved_title = new_titles[new_rank - 1] if 0 <= new_rank - 1 < len(new_titles) else None
         moved = self._text_to_task.get(moved_title)
 
-        if moved is None or len(new_order_dicts) != len(new_texts):
+        if moved is None or len(new_order_dicts) != len(new_titles):
             # Safe deferred rendering
             QTimer.singleShot(0, lambda: self._render(self._order))
             return
