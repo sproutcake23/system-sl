@@ -3403,9 +3403,20 @@ class ChatPanel(QWidget):
         self._attachments = [Path(p) for p in (message.attachments or []) if Path(p).exists()]
         self._update_attach_chips()
         later = len([m for m in self._messages.after(message.id) if m.role == USER])
+        note = ""
+        # A reopened conversation only kept the document names; the text was
+        # compacted out of the stored history. Editing and resending cannot
+        # recover it, so say so instead of silently dropping the context.
+        if message.documents and not self._attachments:
+            count = len(message.documents)
+            note = (
+                f" {count} attached document(s) are only names now; "
+                "their text is not resent."
+            )
         self.edit_label.setText(
             "Editing an earlier message — sending replaces it"
             + (f" and the {later} message(s) after it." if later else ".")
+            + note
             + " Esc to cancel."
         )
         self.edit_bar.setVisible(True)

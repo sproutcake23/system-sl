@@ -265,3 +265,20 @@ def test_streaming_writes_completed_blocks_once_and_keeps_selection(panel):
     after = widget.transcript.textCursor()
     assert after.hasSelection()
     assert after.selectedText() == selected
+
+
+def test_edit_bar_warns_when_documents_are_only_names(panel):
+    widget, _app = panel
+    from system_sl.chatbot.transcript import USER, ChatMessage
+
+    message = ChatMessage(
+        id="m-doc",
+        role=USER,
+        text="summarise this",
+        documents=["report.pdf"],
+    )
+    widget._messages.messages.append(message)
+    widget._edit_and_resend("m-doc")
+    assert "only names" in widget.edit_label.text()
+    assert "not resent" in widget.edit_label.text()
+    widget._cancel_edit()
