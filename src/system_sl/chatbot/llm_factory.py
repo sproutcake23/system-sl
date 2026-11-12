@@ -8,8 +8,9 @@ Supports:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal, Optional, Any
 
+import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
 
 # Optional imports - only loaded when needed
@@ -22,6 +23,98 @@ try:
     from langchain_openai import ChatOpenAI
 except ImportError:
     ChatOpenAI = None  # type: ignore
+
+# Track the HTTP client(s) of the currently active LLM for cancellation support.
+# Only one chat request runs at a time (enforced by ChatPanel), so a single
+# reference is sufficient. Set to None when no request is active.
+_current_llm_client: Any = None
+_current_llm_async_client: Any = None
+
+# Reference to the cached LLM instance, so we can access its HTTP clients.
+_cached_llm_instance: BaseChatModel | None = None
+
+
+def _set_current_llm_clients(sync_client: Any = None, async_client: Any = None) -> None:
+    """Register the HTTP client(s) of the LLM currently handling a request."""
+    global _current_llm_client, _current_llm_async_client
+    _current_llm_client = sync_client
+    _current_llm_async_client = async_client
+
+
+def _clear_current_llm_clients() -> None:
+    """Clear the tracked HTTP clients (called when request completes or is cancelled)."""
+    global _current_llm_client, _current_llm_async_client
+    _current_llm_client = None
+    _current_llm_async_client = None
+
+
+def _register_cached_llm(llm: BaseChatModel) -> None:
+    """Store a reference to the cached LLM for client access."""
+    global _cached_llm_instance
+    _cached_llm_instance = llm
+
+
+def get_cached_llm_clients() -> tuple[Any, Any]:
+    """Get the HTTP client(s) from the cached LLM instance.
+
+    Returns (sync_client, async_client) or (None, None) if not available.
+    For OpenAI-compatible LLMs, returns the httpx.Client / httpx.AsyncClient.
+    For Google GenAI, returns the google.genai.Client / its aio attribute.
+    """
+    global _cached_llm_instance
+    if _cached_llm_instance is None:
+        return None, None
+
+    llm = _cached_llm_instance
+    # OpenAI-compatible (ChatOpenAI / ReasoningChatOpenAI) - uses http_client/http_async_client
+    if hasattr(llm, "http_client") and hasattr(llm, "http_async_client"):
+        return getattr(llm, "http_client", None), getattr(llm, "http_async_client", None)
+    # Google GenAI (ChatGoogleGenerativeAI)
+    if hasattr(llm, "client"):
+        client = getattr(llm, "client", None)
+        if client is not None:
+            return client, getattr(client, "aio", None)
+    return None, None
+
+
+def cancel_current_stream() -> bool:
+    """Cancel the in-flight LLM streaming request by closing its HTTP client(s).
+
+    Returns True if a client was closed, False if no active stream was tracked.
+    Callers should follow up with reset_agent_cache() to ensure a fresh LLM
+    with new HTTP clients for the next request.
+    """
+    global _current_llm_client, _current_llm_async_client
+    closed = False
+    if _current_llm_client is not None:
+        try:
+            # OpenAI-compatible: httpx.Client has close()
+            # Google GenAI: google.genai.Client has close()
+            _current_llm_client.close()
+            closed = True
+        except Exception:
+            pass
+    if _current_llm_async_client is not None:
+        try:
+            # OpenAI-compatible: httpx.AsyncClient has aclose()
+            # Google GenAI: client.aio has aclose()
+            import asyncio
+
+            asyncio.run(_current_llm_async_client.aclose())
+            closed = True
+        except Exception:
+            pass
+    _clear_current_llm_clients()
+    return closed
+
+
+def clear_cached_llm() -> None:
+    """Clear the cached LLM instance reference.
+
+    Called by reset_agent_cache() to ensure the next request creates a fresh LLM.
+    """
+    global _cached_llm_instance
+    _cached_llm_instance = None
 
 
 if ChatOpenAI is not None:
@@ -211,12 +304,19 @@ def create_llm(
             )
         if not base_url:
             raise LLMFactoryError("OpenAI-compatible provider requires base_url")
-        # api_key can be empty/dummy for local servers (Ollama, LM Studio)
+        # Create dedicated HTTP clients for this LLM instance so we can cancel
+        # the in-flight request by closing them.
+        http_client = httpx.Client()
+        http_async_client = httpx.AsyncClient()
+        _set_current_llm_clients(sync_client=http_client, async_client=http_async_client)
+
         return ReasoningChatOpenAI(
             model=model,
             temperature=temperature,
             base_url=base_url,
             api_key=api_key or "dummy",
+            http_client=http_client,
+            http_async_client=http_async_client,
             **kwargs,
         )
 
@@ -226,9 +326,11 @@ def create_llm(
 
 def create_llm_from_config(config: "ChatConfig") -> BaseChatModel:
     """Convenience: create LLM from a ChatConfig object."""
-    return create_llm(
+    llm = create_llm(
         provider=config.provider,
         model=config.system_model,
         base_url=config.base_url,
         api_key=config.api_key,
     )
+    _register_cached_llm(llm)
+    return llm

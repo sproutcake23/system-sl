@@ -1641,6 +1641,7 @@ class ChatPanel(QWidget):
 
     def _on_send(self) -> None:
         from system_sl.chatbot import load_config
+        from system_sl.chatbot.llm_factory import get_cached_llm_clients, _set_current_llm_clients
         if self._thread is not None:
             return
         text = self.input_box.toPlainText().strip()
@@ -1667,6 +1668,10 @@ class ChatPanel(QWidget):
 
         # Clear attachments after sending
         self._clear_attachments()
+
+        # Track the LLM's HTTP clients so we can cancel the stream on Stop.
+        sync_client, async_client = get_cached_llm_clients()
+        _set_current_llm_clients(sync_client, async_client)
 
         self._thread = QThread(self)
         self._worker = _ChatWorker(session, text, attachment_paths)
@@ -1698,6 +1703,14 @@ class ChatPanel(QWidget):
         self._reasoning_shown = False
         if not had_output:
             self._append_alert("stopped before any reply")
+        # Cancel the in-flight HTTP request by closing the LLM's HTTP client(s).
+        from system_sl.chatbot.llm_factory import cancel_current_stream
+        cancel_current_stream()
+        # Reset the agent cache so the next request gets a fresh LLM with new HTTP clients.
+        from system_sl.chatbot import reset_agent_cache
+        reset_agent_cache()
+        # Clear the session cache so a new session with the new agent is created.
+        self._sessions.clear()
         self._thread.requestInterruption()
         self.stop_button.setEnabled(False)
         self.stop_button.setToolTip("Stopping...")
@@ -1754,6 +1767,9 @@ class ChatPanel(QWidget):
         if self._thread is not None:
             self._thread.deleteLater()
             self._thread = None
+        # Clear tracked LLM HTTP clients so they can be re-acquired for next request.
+        from system_sl.chatbot.llm_factory import _clear_current_llm_clients
+        _clear_current_llm_clients()
         notes, self._notes_after_turn = self._notes_after_turn, []
         for append, text in notes:
             append(text)
