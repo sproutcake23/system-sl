@@ -327,7 +327,13 @@ class BaseWeightOptimizer:
 
 
 class ThompsonSampler(BaseWeightOptimizer):
-    """Multi-Armed Bandit strategy. Can be omitted safely."""
+    """Multi-Armed Bandit strategy, opt-in only.
+
+    GravityEngine uses this optimiser's confidence but not the per-signal
+    weights it reports, so feedback would shift timings without actually
+    training the semantic/urgency/momentum mix. Leaving it off is honest;
+    enabling it needs the scoring blend to consume ``get_weights()``.
+    """
 
     _DEFAULT_STATE = {
         "semantic_w": {"alpha": 2, "beta": 2},
@@ -481,7 +487,7 @@ class PriorityPipeline:
         },
     }
 
-    def __init__(self, use_thompson_sampling: bool = True):
+    def __init__(self, use_thompson_sampling: bool = False):
         self.setup = Setup()
         self.tasks_file = Path(self.setup._get_file_path("tasks.json"))
         self.output_file = Path(self.setup._get_file_path("prioritize.json"))
@@ -664,7 +670,14 @@ def save_manual_order(tasks: list) -> None:
 
 
 def run_prioritization(display: bool = True, use_thompson: bool = False) -> dict:
-    """Main application entry point."""
+    """Main application entry point.
+
+    Thompson sampling is off by default. Its posterior weights are reported in
+    the output but the gravity blend only uses its confidence, so feedback
+    changed timings rather than the actual semantic/urgency/momentum mix.
+    Enabling it would imply training that does not happen; see the note on
+    ``ThompsonSampler`` before turning it back on.
+    """
     degradation = None
     fusion = Fusion()
 
@@ -745,4 +758,4 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"✗ Error updating bandit: {e}")
     else:
-        run_prioritization(use_thompson=False)  # FIXME: ThompsonSampling not working
+        run_prioritization(use_thompson=False)
