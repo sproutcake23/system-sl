@@ -358,10 +358,13 @@ class TasksWindow(QWidget):
             self._status_message = f"Could not load tasks: {e}"
             return []
 
-        position = {title: i for i, title in enumerate(load_manual_order())}
+        order = load_manual_order()
+        position = {key: i for i, key in enumerate(order)}
         return sorted(
             stored,
-            key=lambda t: position.get(t.get("title", ""), len(position)),
+            key=lambda t: position.get(
+                t.get("id") or t.get("title", ""), len(position)
+            ),
         )
 
     def _render(self, tasks):
@@ -382,12 +385,11 @@ class TasksWindow(QWidget):
             if p_score is not None:
                 display += f" [P={p_score:.3f}]"
             item = QListWidgetItem(display)
-            # Keep (category, title) so complete/remove still address the right
-            # task even though the category is no longer shown.
-            # NOTE: removed the category thing
-            item.setData(Qt.UserRole, title)
+            # Key by the stable task id: titles can be edited or duplicated.
+            key = task.get("id") or title
+            item.setData(Qt.UserRole, key)
             self.tasks_list_widget.addItem(item)
-            self._text_to_task[title] = task
+            self._text_to_task[key] = task
 
     def _on_reordered(self, moved_text, old_rank, new_rank, new_texts, new_titles):
         # BUG: REMEBER TO DEAL WITH THIS FUNCTION CAREFULLY
@@ -397,8 +399,8 @@ class TasksWindow(QWidget):
             self._text_to_task[t] for t in new_titles if t in self._text_to_task
         ]
         # The moved item is now at new_rank in the new order
-        moved_title = new_titles[new_rank - 1] if 0 <= new_rank - 1 < len(new_titles) else None
-        moved = self._text_to_task.get(moved_title)
+        moved_key = new_titles[new_rank - 1] if 0 <= new_rank - 1 < len(new_titles) else None
+        moved = self._text_to_task.get(moved_key)
 
         if moved is None or len(new_order_dicts) != len(new_titles):
             # Safe deferred rendering
@@ -430,11 +432,13 @@ class TasksWindow(QWidget):
         return item.data(Qt.UserRole)
 
     def _on_complete(self):
-        title = self._selected()
-        if title is None:
+        task_id = self._selected()
+        if task_id is None:
             return
+        task = self._text_to_task.get(task_id) or {}
+        title = task.get("title", "")
         try:
-            mark_task_completed(task_title=title)  # Removed the category thing
+            mark_task_completed(task_id=task_id)
             self._set_status(f"Completed: {title}")
         except ValueError as e:
             self._set_status(str(e))
@@ -443,11 +447,13 @@ class TasksWindow(QWidget):
         self._refresh_list()
 
     def _on_remove(self):
-        title = self._selected()
-        if title is None:
+        task_id = self._selected()
+        if task_id is None:
             return
+        task = self._text_to_task.get(task_id) or {}
+        title = task.get("title", "")
         try:
-            remove_tasks(task_title=title)
+            remove_tasks(task_id=task_id)
             self._set_status(f"Removed: {title}")
         except ValueError as e:
             self._set_status(str(e))
@@ -457,14 +463,15 @@ class TasksWindow(QWidget):
 
     def _on_edit(self):
         """Open a dialog to edit the selected task's title and deadline."""
-        title = self._selected()
-        if title is None:
+        task_id = self._selected()
+        if task_id is None:
             return
 
-        task = self._text_to_task.get(title)
+        task = self._text_to_task.get(task_id)
         if task is None:
             self._set_status("Could not find task data.")
             return
+        title = task.get("title", "")
 
         current_deadline = task.get("deadline")
 
@@ -480,10 +487,18 @@ class TasksWindow(QWidget):
         deadline_edit = QDateEdit()
         deadline_edit.setCalendarPopup(True)
         deadline_edit.setDisplayFormat("yyyy-MM-dd")
+        # A task with a deadline opens with it already checked and filled in.
+        deadline_check.setChecked(bool(current_deadline))
         deadline_edit.setEnabled(bool(current_deadline))
         if current_deadline:
             from PySide6.QtCore import QDate
-            deadline_edit.setDate(QDate.fromString(current_deadline, "yyyy-MM-dd"))
+            parsed = QDate.fromString(current_deadline, "yyyy-MM-dd")
+            deadline_edit.setDate(
+                parsed if parsed.isValid() else QDate.currentDate()
+            )
+        else:
+            from PySide6.QtCore import QDate
+            deadline_edit.setDate(QDate.currentDate())
         deadline_check.toggled.connect(deadline_edit.setEnabled)
         form.addRow(deadline_check, deadline_edit)
 
@@ -505,7 +520,8 @@ class TasksWindow(QWidget):
             self._set_status("Title is required.")
             return
         try:
-            edit_task(title, new_title, new_deadline)
+            edit_task(task_id=task_id, old_title=title, new_title=new_title,
+                      new_deadline=new_deadline)
             self._set_status(f"Edited: {new_title}")
         except ValueError as e:
             self._set_status(str(e))

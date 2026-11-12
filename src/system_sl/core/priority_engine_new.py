@@ -601,8 +601,12 @@ class PriorityPipeline:
         # read back and used to sort the ranked list.
         manual = load_manual_order()
         if manual:
-            pos = {title: i for i, title in enumerate(manual)}
-            scored_tasks.sort(key=lambda t: pos.get(t.get("title", ""), -1))
+            pos = {key: i for i, key in enumerate(manual)}
+            scored_tasks.sort(
+                key=lambda t: pos.get(
+                    t.get("id") or t.get("title", ""), -1
+                )
+            )
         task_title = []
         quadrants = {q: [] for q in self.QUADRANTS}
         for task in scored_tasks:
@@ -680,8 +684,18 @@ def load_manual_order() -> list:
 
 # NOTE: Changed and removed the category thing
 def save_manual_order(tasks: list) -> None:
-    """Persist the manual task order atomically under the shared task lock."""
-    order = [t.get("title", "") for t in tasks if isinstance(t, dict)]
+    """Persist the manual task order atomically under the shared task lock.
+
+    Stable ids are preferred; titles are kept only for order files written
+    before tasks had ids.
+    """
+    order = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        key = task.get("id") or task.get("title")
+        if key:
+            order.append(key)
     file = Path(get_tasks_file_path("task_order.json"))
     with file_lock(get_tasks_file_path("tasks.lock")):
         atomic_write_json(file, {"order": order})

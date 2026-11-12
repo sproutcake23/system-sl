@@ -34,6 +34,11 @@ class GoogleProvider(ABC):
         """Extracts the uniform (title, raw_deadline) from a service-specific dictionary structure."""
         pass
 
+    def extract_item_id(self, raw_item: Dict[str, Any]) -> Optional[str]:
+        """Return the provider's stable id for this item, if it has one."""
+        value = raw_item.get("id")
+        return str(value) if value else None
+
 
 # =====================================================================
 # 2. CONCRETE IMPLEMENTATIONS (Polymorphism)
@@ -51,6 +56,9 @@ class TasksProvider(GoogleProvider):
         title = raw_item.get("title", "Untitled Task")
         deadline = raw_item.get("due")
         return title, deadline
+
+    def extract_item_id(self, raw_item: Dict[str, Any]) -> Optional[str]:
+        return str(raw_item.get("id")) if raw_item.get("id") else None
 
 
 # =====================================================================
@@ -82,10 +90,16 @@ class GoogleSyncEngine:
         except Exception:
             return deadline_str
 
-    def _process_and_add_task(self, source_type: str, title: str, deadline: Optional[str]) -> int:
-        """Saves individual tasks to core storage, ignoring duplicates."""
+    def _process_and_add_task(
+        self,
+        source_type: str,
+        title: str,
+        deadline: Optional[str],
+        source_id: Optional[str] = None,
+    ) -> int:
+        """Saves an individual task, keyed by its remote id when it has one."""
         try:
-            add_tasks(source_type, title, deadline=deadline)
+            add_tasks(source_type, title, deadline=deadline, source_id=source_id)
             print(f" [+] Imported [{source_type}]: {title} (Due: {deadline})")
             return 1
         except ValueError:
@@ -125,7 +139,10 @@ class GoogleSyncEngine:
                 raise GoogleSyncCancelled("Google sync was cancelled.")
             title, raw_deadline = provider.extract_item_details(item)
             clean_deadline = self._format_deadline(raw_deadline)
-            count += self._process_and_add_task(provider.source_name, title, clean_deadline)
+            source_id = provider.extract_item_id(item)
+            count += self._process_and_add_task(
+                provider.source_name, title, clean_deadline, source_id
+            )
 
         print(f"\n[{provider.source_name}] Sync complete. {count} items processed.")
         return count, len(raw_items) - count

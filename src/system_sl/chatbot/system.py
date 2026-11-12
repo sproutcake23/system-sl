@@ -180,11 +180,25 @@ def add_task(category: str, title: str, deadline: Optional[str] = None) -> Any:
         return {"error": kind, "message": msg}
 
 
+def _resolve_task_id(title: str) -> str:
+    """Return the stable id of the task the model named, by title."""
+    wanted = (title or "").strip()
+    for task in load_tasks():
+        if not isinstance(task, dict):
+            continue
+        if task.get("title") == wanted:
+            task_id = task.get("id")
+            if task_id:
+                return str(task_id)
+    raise ValueError(f"Task '{title}' not found")
+
+
 @tool
 def remove_task(title: str, category: str) -> Any:
     """Remove/delete a specific task from a targeted category completely."""
     try:
-        return remove_tasks(title, category)
+        task_id = _resolve_task_id(title)
+        return remove_tasks(task_id=task_id, task_type=category)
     except ValueError as e:
         return {"error": "not_found", "message": str(e)}
 
@@ -193,7 +207,8 @@ def remove_task(title: str, category: str) -> Any:
 def mark_task_completed(title: str, category: str) -> Any:
     """Move a task from the open status to the completed status pool."""
     try:
-        return core_mark_task_completed(title, category)
+        task_id = _resolve_task_id(title)
+        return core_mark_task_completed(task_id=task_id, task_type=category)
     except ValueError as e:
         return {"error": "not_found", "message": str(e)}
 
