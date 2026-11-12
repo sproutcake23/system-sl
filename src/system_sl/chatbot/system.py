@@ -4,7 +4,7 @@ Provides a LangGraph agent with tools for task management,
 using a configurable LLM backend (Google Gemini or OpenAI-compatible).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 from functools import lru_cache
 import re
@@ -301,6 +301,24 @@ def get_system_agent():
 
     return create_agent(
         model=llm,
+        tools=SYSTEM_TOOLS,
+        system_prompt=SYSTEM_MENTOR_PROMPT,
+    )
+
+
+def get_system_agent_for_model(model_name: str):
+    """Build an agent for ``model_name`` without changing the saved default.
+
+    The chat panel lets the Player try another model for the current
+    conversation. Writing that choice into the global config used to make a
+    casual switch the new default, so the override stays ephemeral here.
+    """
+    config = replace(load_config(), system_model=model_name)
+    errors = validate_config(config)
+    if errors:
+        raise LLMFactoryError("; ".join(errors))
+    return create_agent(
+        model=create_llm_from_config(config),
         tools=SYSTEM_TOOLS,
         system_prompt=SYSTEM_MENTOR_PROMPT,
     )

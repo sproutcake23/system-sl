@@ -101,6 +101,7 @@ class ChatSession:
         thread_id: str | None = None,
         config: dict | None = None,
         model_name: str | None = None,
+        agent=None,
     ):
         """Initializes a new or existing ChatSession.
 
@@ -110,6 +111,8 @@ class ChatSession:
             config (dict | None, optional): A complete pre-built LangChain/LangGraph
                 configuration dictionary. Overrides thread_id if provided. Defaults to None.
             model_name (str | None, optional): Display name of the model being used.
+            agent (optional): A pre-built agent for a model chosen for this
+                session only. Defaults to the shared, config-backed agent.
         """
         if config:
             self.config = config
@@ -118,7 +121,7 @@ class ChatSession:
             self.config = {"configurable": {"thread_id": chosen_id}}
 
         # Select the pre-compiled agent (built on first use via lazy init)
-        self.agent = get_system_agent()
+        self.agent = agent or get_system_agent()
         self.model_name = model_name or "system"
 
     def wrap_message(self, user_msg: Union[str, List[str]]) -> List[dict]:

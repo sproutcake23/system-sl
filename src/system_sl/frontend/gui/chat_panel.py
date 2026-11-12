@@ -886,6 +886,16 @@ class ChatPanel(QWidget):
         self.settings_btn.clicked.connect(self._open_settings)
         header.addWidget(self.settings_btn)
 
+        # Model choice is per-conversation. Saving it as the default is an
+        # explicit action, never a side effect of browsing the dropdown.
+        self.default_model_btn = QPushButton("Set as default")
+        self.default_model_btn.setToolTip(
+            "Use this model for new conversations from now on"
+        )
+        self.default_model_btn.setEnabled(False)
+        self.default_model_btn.clicked.connect(self._set_model_as_default)
+        header.addWidget(self.default_model_btn)
+
         root.addLayout(header)
 
         # --- Transcript ---
@@ -1007,7 +1017,9 @@ class ChatPanel(QWidget):
         self.model_combo.clear()
 
         config = load_config()
-        current_model = config.system_model
+        # A per-conversation choice survives discovery refreshes; only fall
+        # back to the configured default when nothing has been picked yet.
+        current_model = self._current_model or config.system_model
 
         has_config = bool(current_model and config.provider)
 
@@ -1063,6 +1075,7 @@ class ChatPanel(QWidget):
 
         self._current_model = current_model
         self.model_combo.blockSignals(False)
+        self._update_default_button()
 
     # ----- Background model discovery -----
 
@@ -1112,7 +1125,7 @@ class ChatPanel(QWidget):
         self._start_discovery()
 
     def _on_model_changed(self, index: int) -> None:
-        """Handle model selection change."""
+        """Handle model selection change for this conversation only."""
         if index < 0:
             return
 
@@ -1120,17 +1133,9 @@ class ChatPanel(QWidget):
         if not model_id or model_id == self._current_model:
             return
 
-        from system_sl.chatbot import load_config, save_config, reload_agent
-        # Update config with new model
-        config = load_config()
-        config.system_model = model_id
-        save_config(config)
-
-        # Reload agent with new model
-        reload_agent()
-
-        # Clear session cache for new model
-        self._sessions.clear()
+        # Deliberately not saved to the global config: browsing the dropdown
+        # must not change the default for every future conversation. The
+        # "Set as default" button is the explicit way to persist it.
         self._current_model = model_id
         self._clear_proposals()
         # Queued messages were composed for the previous model; sending them
@@ -1141,7 +1146,66 @@ class ChatPanel(QWidget):
             self._update_queue_badge()
             self._append_alert(f"dropped {dropped} queued message(s) — model changed")
 
+        # The transcript showed the previous model's conversation, so it is no
+        # longer the context the new model will answer from. Start a new one
+        # with a visible divider.
+        #
+        # TODO(chat-history): carry the conversation across models instead.
+        # That needs a persistent LangGraph checkpointer on
+        # get_system_agent(); each turn currently starts from empty state.
+        self._reset_stream_state()
+        self._clear_transcript_for_model(model_id)
+        self._update_default_button()
         self._append_alert(f"Switched to model: {model_id}")
+
+    def _update_default_button(self) -> None:
+        """Offer to save the current model only when it is not the default."""
+        from system_sl.chatbot import load_config
+
+        is_default = bool(
+            self._current_model
+            and self._current_model == load_config().system_model
+        )
+        self.default_model_btn.setEnabled(bool(self._current_model) and not is_default)
+
+    def _set_model_as_default(self) -> None:
+        """Persist the current model as the default, on explicit request."""
+        if not self._current_model:
+            return
+
+        from system_sl.chatbot import load_config, save_config, reload_agent
+
+        config = load_config()
+        if config.system_model == self._current_model:
+            return
+        config.system_model = self._current_model
+        save_config(config)
+        # The shared agent was built for the old default; rebuild it and drop
+        # sessions so the next turn uses the newly saved configuration.
+        reload_agent()
+        self._sessions.clear()
+        self._update_default_button()
+        self._append_alert(f"Default model set to: {self._current_model}")
+
+    def _clear_transcript_for_model(self, model_id: str) -> None:
+        """Clear the transcript and mark where the new conversation starts."""
+        self.transcript.clear()
+        tokens = self._get_live_tokens()
+        dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
+
+        cursor = QTextCursor(self.transcript.document())
+        block_fmt = QTextBlockFormat()
+        block_fmt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        block_fmt.setTopMargin(8)
+        block_fmt.setBottomMargin(8)
+        cursor.insertBlock(block_fmt)
+
+        char_fmt = QTextCharFormat()
+        char_fmt.setForeground(QColor(dim))
+        char_fmt.setFontPointSize(11)
+        char_fmt.setFontItalic(True)
+        cursor.setCharFormat(char_fmt)
+        cursor.insertText(f"— New conversation with {model_id} —")
 
     def _open_settings(self) -> None:
         self.settings_requested.emit()
@@ -1150,6 +1214,8 @@ class ChatPanel(QWidget):
         """Pick up a newly saved LLM config."""
         from system_sl.chatbot import reload_agent
         reload_agent()
+        # Existing sessions hold agents built from the previous config.
+        self._sessions.clear()
         self._populate_model_list()
         self._start_discovery()
 
@@ -1298,10 +1364,18 @@ class ChatPanel(QWidget):
         if model_name not in self._sessions:
             # Imported here, not at module level: the chatbot package pulls in
             # langchain, and the panel is built during GUI startup.
-            from system_sl.chatbot import ChatSession, ChatConfigError
+            from system_sl.chatbot import ChatSession, ChatConfigError, load_config
             from system_sl.chatbot.llm_factory import LLMFactoryError
+            from system_sl.chatbot.system import get_system_agent_for_model
             try:
-                self._sessions[model_name] = ChatSession(model_name=model_name)
+                # A model picked in the dropdown is a per-conversation
+                # override; only the configured default uses the shared agent.
+                agent = None
+                if model_name != load_config().system_model:
+                    agent = get_system_agent_for_model(model_name)
+                self._sessions[model_name] = ChatSession(
+                    model_name=model_name, agent=agent
+                )
             except (ChatConfigError, LLMFactoryError) as e:
                 # Config missing/invalid — offer to configure
                 self._prompt_llm_config(str(e))
