@@ -152,6 +152,46 @@ class ChatSession:
         """Return this conversation's stored messages (oldest first)."""
         return load_thread_messages(self.thread_id)
 
+    def compact_attachment_references(self, keep_chars: int = 400) -> int:
+        """Replace the full text of attachments in the stored history.
+
+        An attachment's text is only useful for the turn that used it. Left
+        in the history, it is paid for again in every later turn (and it
+        grows the checkpoint on disk), so the body is replaced by a short
+        reference: the file name, the first lines and how much was there.
+
+        The message is replaced in place — same id, same position — so the
+        conversation keeps its order.
+
+        Returns the number of messages that were compacted.
+        """
+        from system_sl.chatbot.documents import compact_document_blocks
+
+        updates = []
+        for message in self.messages():
+            if getattr(message, "type", "") != "human":
+                continue
+            content = getattr(message, "content", None)
+            if not isinstance(content, str) or "<document" not in content:
+                continue
+            compacted = compact_document_blocks(content, keep_chars=keep_chars)
+            if compacted != content:
+                updates.append(message.model_copy(update={"content": compacted}))
+
+        if not updates:
+            return 0
+
+        try:
+            self.agent.update_state(self.config, {"messages": updates})
+        except Exception:
+            logger.warning(
+                "could not compact the attachments of conversation %s",
+                self.thread_id,
+                exc_info=True,
+            )
+            return 0
+        return len(updates)
+
     def _prepare_turn(self) -> None:
         """Make the checkpoint safe to continue from before a new turn.
 
