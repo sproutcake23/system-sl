@@ -1597,14 +1597,27 @@ class ChatPanel(QWidget):
         if self.is_busy():
             return
         from system_sl.chatbot import load_config
-        from system_sl.chatbot.memory import create_conversation
+        from system_sl.chatbot.memory import new_thread_id
 
         try:
             model = self._current_model or load_config().system_model
         except Exception:
             model = self._current_model
-        entry = create_conversation(model_name=model)
-        self._open_conversation(entry["id"])
+
+        # Hand out a thread id without writing an index entry: a new chat that
+        # is never used must not leave an empty "New conversation" behind. The
+        # entry is created by the first sent message (see _send_now).
+        self._thread_id = new_thread_id()
+        self._current_model = model
+        self._session = None
+        self._reset_stream_state()
+        self._cancel_edit(clear_input=False)
+        self._turn_user_id = None
+        self._last_failed_user_id = None
+        self._clear_quotes()
+        self._render_transcript([])
+        self._refresh_history_combo()
+        self.input_box.setFocus()
 
     def _on_history_changed(self, index: int) -> None:
         """Reopen the conversation picked in the dropdown."""
@@ -3555,7 +3568,10 @@ class ChatPanel(QWidget):
             register_active_llm,
             _set_current_llm_clients,
         )
-        from system_sl.chatbot.memory import title_from_message, update_conversation
+        from system_sl.chatbot.memory import (
+            ensure_conversation,
+            title_from_message,
+        )
 
         model = self._current_model or load_config().system_model
         session = self._get_session()
@@ -3585,10 +3601,12 @@ class ChatPanel(QWidget):
         # Title the conversation from its first message and remember which
         # model is answering; both are read by the history dropdown. The title
         # comes from what the Player typed, not from the quotes above it.
-        update_conversation(
+        # The conversation may still be local-only (New chat was never used);
+        # the first message is what makes it appear in history.
+        ensure_conversation(
             self._thread_id,
-            title_if_empty=title_from_message(player_message.body or text),
-            last_model=model,
+            model_name=model,
+            title=title_from_message(player_message.body or text),
         )
         self._refresh_history_combo()
 

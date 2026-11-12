@@ -628,3 +628,22 @@ def test_agent_is_rebuilt_when_the_config_file_changes(config_dir, monkeypatch):
     os.utime(config_file, (stat.st_atime, stat.st_mtime + 5))
     assert system_mod.build_agent_for_model("m")[0] is not first, "edited config: rebuild"
     reset_agent_cache()
+
+
+def test_new_conversation_is_not_indexed_until_used(config_dir):
+    """New chat must not leave an empty history entry if it is never used."""
+    thread_id = memory_mod.new_thread_id()
+    assert memory_mod.get_conversation(thread_id) is None
+
+    entry = memory_mod.ensure_conversation(
+        thread_id, model_name="model-a", title="first words"
+    )
+    assert entry is not None
+    assert memory_mod.get_conversation(thread_id)["title"] == "first words"
+    # A second call updates rather than duplicating the entry.
+    memory_mod.ensure_conversation(thread_id, model_name="model-b")
+    conversations = [
+        c for c in memory_mod.list_conversations() if c["id"] == thread_id
+    ]
+    assert len(conversations) == 1
+    assert conversations[0]["last_model"] == "model-b"

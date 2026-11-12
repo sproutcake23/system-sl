@@ -424,11 +424,13 @@ def active_conversation_id() -> str | None:
     return load_conversation_index()["active"]
 
 
-def create_conversation(model_name: str = "", title: str = "") -> dict:
+def create_conversation(
+    model_name: str = "", title: str = "", thread_id: str | None = None
+) -> dict:
     """Create a conversation, make it active, and return its entry."""
     index = load_conversation_index()
     entry = {
-        "id": new_thread_id(),
+        "id": thread_id or new_thread_id(),
         "title": title or "",
         "created": _now(),
         "updated": _now(),
@@ -437,6 +439,44 @@ def create_conversation(model_name: str = "", title: str = "") -> dict:
     index["conversations"].append(entry)
     index["active"] = entry["id"]
     save_conversation_index(index)
+    return entry
+
+
+def ensure_conversation(
+    thread_id: str,
+    *,
+    model_name: str = "",
+    title: str = "",
+    touch: bool = True,
+) -> dict | None:
+    """Return a conversation entry, creating it when it is still only local.
+
+    ``New chat`` hands out a thread id without writing an index entry, so an
+    unused conversation never appears in history. The first sent message calls
+    this to persist it.
+    """
+    index = load_conversation_index()
+    entry = next(
+        (e for e in index["conversations"] if e["id"] == thread_id), None
+    )
+    if entry is None:
+        entry = create_conversation(
+            model_name=model_name, title=title, thread_id=thread_id
+        )
+        return entry
+    changed = False
+    if model_name and entry.get("last_model") != model_name:
+        entry["last_model"] = model_name
+        changed = True
+    if title and not entry.get("title"):
+        entry["title"] = title
+        changed = True
+    if touch:
+        entry["updated"] = _now()
+        changed = True
+    if changed:
+        index["active"] = thread_id
+        save_conversation_index(index)
     return entry
 
 
