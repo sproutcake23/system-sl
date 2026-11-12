@@ -1777,6 +1777,10 @@ class ChatPanel(QWidget):
                     add_tasks(category, title, deadline)
                 except ValueError as e:
                     self._show_after_turn(self._append_alert, str(e))
+                except OSError as e:
+                    self._show_after_turn(
+                        self._append_alert, f"could not save the new task: {e}"
+                    )
                 else:
                     self._show_after_turn(
                         self._append_confirmation, f'Added "{title}" to {category}.'
@@ -1838,6 +1842,8 @@ class ChatPanel(QWidget):
                 added_tasks.append((title, category))
             except ValueError as e:
                 errors.append(f"{title}: {e}")
+            except OSError as e:
+                errors.append(f"{title}: could not save: {e}")
 
         if added > 0:
             # Re-prioritize after adding tasks

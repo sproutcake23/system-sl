@@ -8,8 +8,21 @@ import json
 import os
 import tempfile
 import shutil
+from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from system_sl.utils.data_health import DataIssue, record_issue
+
+
+class LoadStatus(str, Enum):
+    """Outcome of reading a JSON data file."""
+
+    OK = "ok"
+    MISSING = "missing"
+    EMPTY = "empty"
+    CORRUPT = "corrupt"
+    UNREADABLE = "unreadable"
 
 
 def atomic_write_json(filepath: str | Path, data: dict | list) -> None:
@@ -39,6 +52,46 @@ def atomic_write_json(filepath: str | Path, data: dict | list) -> None:
     os.replace(temp_name, path)
 
 
+def load_json_with_status(
+    filepath: str | Path,
+) -> tuple[LoadStatus, Any, Path | None]:
+    """Load JSON and report why a read produced no data.
+
+    Does NOT catch OSError (permission denied, etc.) — those propagate so the
+    caller can report an unreadable file.
+
+    On JSONDecodeError, backs up the corrupt file to <filepath>.corrupt before
+    returning ``LoadStatus.CORRUPT``, so the user can recover manually.
+
+    Returns:
+        ``(status, data, corrupt_backup)``. ``data`` is the parsed value for
+        ``OK`` and None otherwise; ``corrupt_backup`` is the quarantine path
+        only for ``CORRUPT``.
+    """
+    path = Path(filepath)
+
+    if not path.exists():
+        return LoadStatus.MISSING, None, None
+
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+
+    if not content:
+        return LoadStatus.EMPTY, None, None
+
+    try:
+        return LoadStatus.OK, json.loads(content), None
+    except json.JSONDecodeError:
+        # Back up corrupt file for recovery
+        corrupt_backup = path.with_suffix(path.suffix + ".corrupt")
+        try:
+            shutil.move(str(path), str(corrupt_backup))
+        except OSError:
+            pass  # Best effort; original stays in place
+        record_issue(DataIssue("corrupt", path, corrupt_backup))
+        return LoadStatus.CORRUPT, None, corrupt_backup
+
+
 def safe_load_json(filepath: str | Path) -> dict | list | None:
     """Load JSON from file; return None on corruption or missing file.
 
@@ -54,31 +107,8 @@ def safe_load_json(filepath: str | Path) -> dict | list | None:
     Returns:
         Parsed dict/list, or None if file missing/empty/corrupt.
     """
-    path = Path(filepath)
-
-    if not path.exists():
-        return None
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-    except OSError:
-        # Permission error, etc. — let caller decide
-        raise
-
-    if not content:
-        return None
-
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        # Back up corrupt file for recovery
-        corrupt_backup = path.with_suffix(path.suffix + ".corrupt")
-        try:
-            shutil.move(str(path), str(corrupt_backup))
-        except OSError:
-            pass  # Best effort; original stays in place
-        return None
+    status, data, _ = load_json_with_status(filepath)
+    return data if status is LoadStatus.OK else None
 
 
 def load_json_or_default(filepath: str | Path, default: dict | list) -> dict | list:

@@ -80,6 +80,7 @@ Documentation = "https://github.com/sproutcake23/System-SL/tree/main/docs/wiki"
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.20.0"]
+test = ["pytest>=8.0"]
 
 [project.scripts]
 system-sl = "system_sl.frontend.gui.entry:main"

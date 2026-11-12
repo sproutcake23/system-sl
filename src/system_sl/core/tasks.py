@@ -1,11 +1,16 @@
 import html
+import logging
 import random
 from datetime import datetime
 
 from system_sl.utils import get_tasks_file_path
 from system_sl.utils import load_data, save_data
-from system_sl.utils.atomic_json import safe_load_json
+from system_sl.utils.atomic_json import LoadStatus
 from system_sl.utils.file_lock import file_lock
+from system_sl.utils.json_client import load_data_result
+
+
+log = logging.getLogger(__name__)
 
 
 TASKS_FILE_PATH = get_tasks_file_path("tasks.json")
@@ -30,17 +35,16 @@ def sanitize_title(title: str) -> str:
 def load_tasks():
     """Fetches active tasks from storage and automatically processes system migrations.
 
-    Does NOT auto-save on corrupt read — corrupt files are backed up by safe_load_json
-    and an empty list is returned. The caller decides whether to persist.
+    Does NOT auto-save on corrupt read — corrupt files are backed up by
+    safe_load_json and an empty list is returned. The caller decides whether
+    to persist.
     """
-    # Use safe_load_json directly to distinguish corrupt (None) from empty dict ({})
-    try:
-        raw = safe_load_json(TASKS_FILE_PATH)
-    except OSError as e:
-        # Unreadable file (permissions, etc). Reads are non-destructive, so
-        # degrade to empty rather than crashing the caller.
-        print(f"Could not read tasks file {TASKS_FILE_PATH}: {e}")
+    # Use load_data_result to distinguish corrupt/unreadable from empty
+    result = load_data_result(TASKS_FILE_PATH)
+    if result.status is LoadStatus.UNREADABLE:
+        # Already logged and queued for the GUI by load_data_result().
         return []
+    raw = result.data
 
     if raw is None:
         # File missing, empty, or corrupt (backed up to .corrupt)

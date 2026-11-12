@@ -1,4 +1,5 @@
 from PySide6.QtCore import QDate, QSize, Qt, Signal, QTimer, QRegularExpression
+from pathlib import Path
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -39,6 +40,8 @@ from system_sl.core.priority_engine_new import (
     save_manual_order,
 )  # we are importing run_prioritization from api section(priority_engine_new)
 from system_sl.frontend.gui.theme import get_current_theme_tokens
+from system_sl.utils.data_health import DataIssue, pop_issues, record_issue
+from system_sl.utils.paths import get_tasks_file_path
 
 
 # GUI-added tasks no longer carry a user-chosen category — the model assigns one
@@ -96,6 +99,10 @@ class TasksWindow(QWidget):
         # wiped by, nor endlessly appended to, a standing ranking notice.
         self._status_message = ""
         self._priority_note = ""
+
+        # Quarantine notices are shown once per file per session, not on every
+        # refresh.
+        self._reported_corrupt: set[str] = set()
 
         root = QVBoxLayout(self)
         root.addWidget(QLabel("Here are your tasks!!"))
@@ -171,6 +178,39 @@ class TasksWindow(QWidget):
             text = f"{text} · {self._priority_note}" if text else self._priority_note
         self.status_label.setText(text)
 
+    def _report_data_issues(self) -> None:
+        """Show any data-file problems recorded since the last refresh.
+
+        Read failures and quarantine happen below the GUI, so the interface
+        drains the queue and explains them once instead of letting a corrupt
+        file look like an empty task list.
+        """
+        for issue in pop_issues():
+            self._status_message = issue.message()
+            if issue.kind != "corrupt" or issue.corrupt_path is None:
+                continue
+            key = str(issue.corrupt_path)
+            if key in self._reported_corrupt:
+                continue
+            self._reported_corrupt.add(key)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Task data recovered")
+            box.setText(issue.message())
+            box.setInformativeText(
+                "The original file was kept so you can inspect or recover it. "
+                "Move it back to restore those tasks."
+            )
+            box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            box.setModal(False)
+            box.open()
+        self._apply_status()
+
+    def _report_write_failure(self, path: str, error: OSError) -> None:
+        """Record and show a failed save without crashing the window."""
+        record_issue(DataIssue("write_failed", Path(path), detail=str(error)))
+        self._set_status(f"Changes could not be saved: {error}")
+
     def _refresh_list(self):
         # Re-rank from scratch via the prioritization engine, then render.
         result = run_prioritization(
@@ -196,6 +236,7 @@ class TasksWindow(QWidget):
 
         self._apply_status()
         self._render(self._order)
+        self._report_data_issues()
 
     @staticmethod
     def _explain(reason: str | None) -> str:
@@ -263,7 +304,10 @@ class TasksWindow(QWidget):
         self._order = new_order_dicts
 
         # 2. HYBRID ACTION A: Save exact layout to disk
-        save_manual_order(self._order)
+        try:
+            save_manual_order(self._order)
+        except OSError as e:
+            self._report_write_failure(get_tasks_file_path("task_order.json"), e)
 
         # 3. HYBRID ACTION B: Silently train the offline AI Bandit
         try:
@@ -293,6 +337,8 @@ class TasksWindow(QWidget):
             self._set_status(f"Completed: {title}")
         except ValueError as e:
             self._set_status(str(e))
+        except OSError as e:
+            self._report_write_failure(get_tasks_file_path("tasks.json"), e)
         self._refresh_list()
 
     def _on_remove(self):
@@ -304,6 +350,8 @@ class TasksWindow(QWidget):
             self._set_status(f"Removed: {title}")
         except ValueError as e:
             self._set_status(str(e))
+        except OSError as e:
+            self._report_write_failure(get_tasks_file_path("tasks.json"), e)
         self._refresh_list()
 
     def _on_edit(self):
@@ -360,6 +408,8 @@ class TasksWindow(QWidget):
             self._set_status(f"Edited: {new_title}")
         except ValueError as e:
             self._set_status(str(e))
+        except OSError as e:
+            self._report_write_failure(get_tasks_file_path("tasks.json"), e)
         self._refresh_list()
 
     def _on_add(self):
@@ -381,6 +431,8 @@ class TasksWindow(QWidget):
             self.deadline_edit.setDate(QDate.currentDate())
         except ValueError as e:
             self._set_status(str(e))
+        except OSError as e:
+            self._report_write_failure(get_tasks_file_path("tasks.json"), e)
         self._refresh_list()
 
 
