@@ -138,3 +138,67 @@ def test_tasks_window_shutdown_ignores_late_result(qapp, monkeypatch):
     assert _pump(lambda: not window.is_ranking() and window._ranking_thread is None, 2.0)
     assert rendered == []
     window.deleteLater()
+
+
+def _patch_slow_notifier(monkeypatch, gate):
+    from system_sl.services import background_service
+
+    monkeypatch.setattr(
+        background_service, "run_prioritization", lambda display=False: gate.wait(10)
+    )
+    monkeypatch.setattr(background_service, "get_topn_task", lambda: ["Late task"])
+    monkeypatch.setattr(background_service, "load_notifications_enabled", lambda: True)
+    return background_service
+
+
+class _FakeView:
+    def __init__(self):
+        self.shown = []
+
+    def display_message(self, titles):
+        self.shown.append(titles)
+
+
+def test_notifier_stop_does_not_wait_for_ranking(qapp, monkeypatch):
+    gate = threading.Event()
+    background_service = _patch_slow_notifier(monkeypatch, gate)
+
+    view = _FakeView()
+    controller = background_service.BackgroundServiceController(view)
+    controller.poll_and_render_task()
+    assert controller.is_running()
+
+    started = time.monotonic()
+    controller.stop()
+    assert time.monotonic() - started < 1.0, "stop() must not wait for the pass"
+    assert not controller.lock.isLocked()
+
+    # The main window deletes the controller right after stopping it.
+    controller.deleteLater()
+    _pump(lambda: False, 0.05)
+    assert worker_threads.running_count() == 1
+
+    gate.set()
+    assert worker_threads.wait_for_workers(5000)
+    _pump(lambda: not worker_threads._live, 2.0)
+    assert view.shown == [], "a result after stop() must be discarded"
+
+
+def test_notifier_stop_discards_result_while_controller_alive(qapp, monkeypatch):
+    gate = threading.Event()
+    background_service = _patch_slow_notifier(monkeypatch, gate)
+
+    view = _FakeView()
+    controller = background_service.BackgroundServiceController(view)
+    controller.poll_and_render_task()
+    controller.stop()
+    gate.set()
+    assert worker_threads.wait_for_workers(5000)
+    assert _pump(
+        lambda: not controller.is_running() and controller._worker_thread is None, 2.0
+    )
+    assert view.shown == []
+    # A stopped controller does not start new passes.
+    controller.poll_and_render_task()
+    assert controller._worker_thread is None
+    controller.deleteLater()
