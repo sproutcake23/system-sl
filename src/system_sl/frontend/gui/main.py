@@ -556,6 +556,11 @@ class MainWindow(QMainWindow):
         self.hide()
         self._stop_notifier()
         shutdown_workers()
+        # The SQLite checkpointer is process-wide and shared with the chat
+        # worker; close it only after that worker has stopped.
+        from system_sl.chatbot.memory import close_checkpointer
+
+        close_checkpointer()
 
     def open_tasks_window(self):
         if self.tasks_window is None:
