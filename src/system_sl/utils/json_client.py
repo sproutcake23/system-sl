@@ -1,54 +1,47 @@
-"""Module for raw JSON serialization and deserialization file operations."""
+"""Module for raw JSON serialization and deserialization file operations.
 
-import os
-import json
+Uses atomic writes (temp file + fsync + rename) and safe loads that
+return None on corruption instead of silently returning {}.
+"""
+
+from system_sl.utils.atomic_json import atomic_write_json, safe_load_json
 
 
-def load_data(filepath: str) -> dict:
-    """Reads and parses raw dictionary contents from a specified target JSON file.
+def load_data(filepath: str) -> dict | list:
+    """Reads and parses raw JSON contents from a specified target file.
 
     Args:
         filepath (str): The absolute path of the file to load.
 
     Returns:
-        dict: The parsed data dictionary from the JSON file. Returns an empty dictionary if loading fails or file is empty.
+        dict | list: The parsed data (dict or list). Returns an empty dict if
+            the file is missing, empty, or corrupt. Corrupt files are backed
+            up to ``<file>.corrupt`` before an empty dict is returned.
     """
-    if not os.path.exists(filepath):
-        print(f"File {os.path.basename(filepath)} not found. Creating it.")
-        try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write("{}")
-            return {}
-        except Exception as e:
-            print(f"Could not create file {filepath}: {e}")
-            return {}
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = f.read().strip()
-
-            if not data:
-                return {}
-
-            return json.loads(data)
-    except Exception as e:
-        print(f"Error loading data {e}")
+        data = safe_load_json(filepath)
+    except OSError as e:
+        # Unreadable file (permissions, etc). Reads are non-destructive, so
+        # degrade to empty rather than crashing the caller.
+        print(f"Could not read {filepath}: {e}")
         return {}
+    if data is None:
+        # File missing, empty, or corrupt (backed up)
+        return {}
+    return data
 
 
-def save_data(filepath: str, data: dict|list) -> None:
-    """Serializes and saves a dictionary structure directly into a target JSON file.
+def save_data(filepath: str, data: dict | list) -> None:
+    """Serializes and saves a dictionary/list structure directly into a target JSON file.
+
+    Uses atomic write: temp file + fsync + atomic rename.
 
     Args:
         filepath (str): The destination path where the data should be saved.
-        data (dict): The data dictionary to serialize and write.
+        data (dict | list): The data to serialize and write.
 
-    Returns:
-        None
+    Raises:
+        OSError: On write/fsync/rename failure (not swallowed).
+        TypeError: If data is not JSON-serializable.
     """
-    try:
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
-    except Exception as e:
-        print(f"Could not save data to the file {filepath}: {e}")
+    atomic_write_json(filepath, data)

@@ -24,6 +24,9 @@ from typing import Optional, Dict, List, Any
 
 # ── Import Shared Dependencies to avoid repetition ──────────────────────
 from system_sl.core.vector_converter import Setup, Fusion
+from system_sl.utils.atomic_json import atomic_write_json, safe_load_json
+from system_sl.utils.paths import get_tasks_file_path
+from system_sl.utils.file_lock import file_lock
 
 logging.basicConfig(level=logging.INFO, format="[priority_engine] %(message)s")
 log = logging.getLogger(__name__)
@@ -350,8 +353,7 @@ class ThompsonSampler(BaseWeightOptimizer):
         return {k: v.copy() for k, v in self._DEFAULT_STATE.items()}
 
     def _save_state(self) -> None:
-        with open(self.state_file, "w") as f:
-            json.dump(self.state, f, indent=2)
+        atomic_write_json(self.state_file, self.state)
 
     def get_confidence(self) -> float:
         total = sum(
@@ -605,9 +607,7 @@ class PriorityPipeline:
             },
             "all_tasks_ranked": scored_tasks,
         }
-        with open(self.output_file, "w") as f:
-            json.dump(output, f, indent=2, default=str)
-        
+        atomic_write_json(self.output_file, output)
         return output
 
     def _empty_result(self, reason: str) -> dict:
@@ -644,25 +644,23 @@ def empty_ranking(reason: str) -> dict:
 #
 # NOTE: ADDED TO SAVE THE DRAG ORDER FROM THE USER AND
 def load_manual_order() -> list:
-    file = Path(Setup()._get_file_path("task_order.json"))
-    if file.exists():
-        try:
-            with open(file, "r") as f:
-                return json.load(f).get("order", [])
-        except Exception:
-            pass
+    """Load manual task order from disk. Returns empty list if missing/corrupt."""
+    file = Path(get_tasks_file_path("task_order.json"))
+    data = safe_load_json(file)
+    if data is None:
+        return []
+    if isinstance(data, dict) and "order" in data:
+        return data["order"]
     return []
 
 
 # NOTE: Changed and removed the category thing
 def save_manual_order(tasks: list) -> None:
-    file = Path(Setup()._get_file_path("task_order.json"))
-    order = [t.get("title", "") for t in tasks]
-    try:
-        with open(file, "w") as f:
-            json.dump({"order": order}, f)
-    except Exception:
-        pass
+    """Persist the manual task order atomically under the shared task lock."""
+    order = [t.get("title", "") for t in tasks if isinstance(t, dict)]
+    file = Path(get_tasks_file_path("task_order.json"))
+    with file_lock(get_tasks_file_path("tasks.lock")):
+        atomic_write_json(file, {"order": order})
 
 
 def run_prioritization(display: bool = True, use_thompson: bool = False) -> dict:
