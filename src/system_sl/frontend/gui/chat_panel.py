@@ -1729,6 +1729,15 @@ class ChatPanel(QWidget):
             selected_tasks = [task for _row, task in dialog.get_selected_tasks()]
             if selected_tasks:
                 self._add_batch_tasks(selected_tasks)
+        else:
+            # User declined - feed back confirmation for all proposed tasks
+            session = self._get_session(self._current_model)
+            if session is not None:
+                for task in tasks:
+                    title = task.get("title", "").strip()
+                    category = task.get("category", "study").strip().lower()
+                    if title:
+                        session.inject_confirmation_result(title, category, False)
         # Dialog handles its own cleanup
 
     def _show_next_proposal(self) -> None:
@@ -1772,14 +1781,40 @@ class ChatPanel(QWidget):
                     self._show_after_turn(
                         self._append_confirmation, f'Added "{title}" to {category}.'
                     )
+                    # Feed confirmation result back to the model
+                    session = self._get_session(self._current_model)
+                    if session is not None:
+                        session.inject_confirmation_result(title, category, True)
 
         self._show_next_proposal()
 
     def _on_confirm_no(self) -> None:
+        proposal = self._current_proposal
+        if proposal is not None:
+            title = str(proposal.get("title") or "").strip()
+            category = str(proposal.get("category") or "none")
+            # Feed confirmation result back to the model
+            session = self._get_session(self._current_model)
+            if session is not None:
+                session.inject_confirmation_result(title, category, False)
         self._current_proposal = None
         self._show_next_proposal()
 
     def _clear_proposals(self) -> None:
+        # Feed back "declined" for all pending proposals when clearing
+        session = self._get_session(self._current_model)
+        if session is not None:
+            for proposal in self._pending_proposals:
+                title = str(proposal.get("title") or "").strip()
+                category = str(proposal.get("category") or "none")
+                if title:
+                    session.inject_confirmation_result(title, category, False)
+            if self._current_proposal is not None:
+                title = str(self._current_proposal.get("title") or "").strip()
+                category = str(self._current_proposal.get("category") or "none")
+                if title:
+                    session.inject_confirmation_result(title, category, False)
+
         self._pending_proposals.clear()
         self._current_proposal = None
         self.confirm_bar.setVisible(False)
@@ -1788,6 +1823,7 @@ class ChatPanel(QWidget):
         """Add multiple tasks from batch proposal and re-prioritize."""
         from system_sl.core.priority_engine_new import run_prioritization
 
+        added_tasks = []  # Track (title, category) for confirmation feedback
         added = 0
         errors = []
         for task in tasks:
@@ -1799,6 +1835,7 @@ class ChatPanel(QWidget):
             try:
                 add_tasks(category, title, deadline)
                 added += 1
+                added_tasks.append((title, category))
             except ValueError as e:
                 errors.append(f"{title}: {e}")
 
@@ -1813,6 +1850,11 @@ class ChatPanel(QWidget):
             self._show_after_turn(
                 self._append_confirmation, f"Added {added} task(s) from document."
             )
+            # Feed confirmation results back to the model for each added task
+            session = self._get_session(self._current_model)
+            if session is not None:
+                for title, category in added_tasks:
+                    session.inject_confirmation_result(title, category, True)
         for err in errors:
             self._show_after_turn(self._append_alert, err)
 
@@ -1962,6 +2004,8 @@ class ChatPanel(QWidget):
             self._message_queue.clear()
             self._update_queue_badge()
             self._append_alert(f"stopped — dropped {dropped} queued message(s)")
+        # Clear pending proposals and feed back "declined" to the model
+        self._clear_proposals()
         # Cancel the in-flight HTTP request by closing the LLM's HTTP client(s).
         from system_sl.chatbot.llm_factory import cancel_current_stream
         cancel_current_stream()
@@ -2013,6 +2057,8 @@ class ChatPanel(QWidget):
         if not self._halted:
             # Interrupted without a Stop press (e.g. shutdown).
             self._mark_stopped()
+        # Clear pending proposals and feed back "declined" to the model
+        self._clear_proposals()
         self.reasoning_view.clear()
         self.reasoning_view.setVisible(False)
         self._reasoning_shown = False
