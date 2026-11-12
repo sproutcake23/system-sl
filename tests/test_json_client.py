@@ -61,7 +61,8 @@ def test_corrupt_file_is_quarantined_and_reported(tmp_path):
 
     assert result.status is LoadStatus.CORRUPT
     assert result.data is None
-    assert result.corrupt_path == tmp_path / "tasks.json.corrupt"
+    assert result.corrupt_path.parent == tmp_path
+    assert result.corrupt_path.name.startswith("tasks.json.corrupt-")
     assert result.corrupt_path.is_file()
     assert not path.exists()
     assert load_data(str(path)) == {}

@@ -6,12 +6,19 @@ it records the messages it was given so a test can assert what the model
 actually saw.
 """
 
+import json
 from typing import Any, Iterator, List, Optional
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+
+
+# A test whose script keeps asking for tools would loop until LangGraph's
+# recursion limit (or forever, if a subclass resets it) and grow the
+# checkpoint database without bound. Fail fast instead.
+MAX_CALLS = 50
 
 
 class FakeChatModel(BaseChatModel):
@@ -35,6 +42,10 @@ class FakeChatModel(BaseChatModel):
         self.calls += 1
         return self.replies[index]
 
+    def _guard(self) -> None:
+        if len(self.seen) > MAX_CALLS:
+            raise RuntimeError(f"FakeChatModel called more than {MAX_CALLS} times; the test is looping")
+
     def _generate(
         self,
         messages: List[BaseMessage],
@@ -42,7 +53,9 @@ class FakeChatModel(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        return ChatResult(generations=[ChatGeneration(message=self._next_reply(messages))])
+        reply = self._next_reply(messages)
+        self._guard()
+        return ChatResult(generations=[ChatGeneration(message=reply)])
 
     def _stream(
         self,
@@ -52,8 +65,25 @@ class FakeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
         reply = self._next_reply(messages)
+        self._guard()
         for token in str(reply.content).split(" "):
             chunk = ChatGenerationChunk(message=AIMessageChunk(content=token + " "))
             if run_manager:
                 run_manager.on_llm_new_token(token + " ")
             yield chunk
+        # Tool calls stream as chunks too, like a real provider's.
+        if reply.tool_calls:
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": call["name"],
+                            "args": json.dumps(call.get("args") or {}),
+                            "id": call.get("id"),
+                            "index": index,
+                        }
+                        for index, call in enumerate(reply.tool_calls)
+                    ],
+                )
+            )

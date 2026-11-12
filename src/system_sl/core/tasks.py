@@ -47,7 +47,7 @@ def load_tasks():
     raw = result.data
 
     if raw is None:
-        # File missing, empty, or corrupt (backed up to .corrupt)
+        # File missing, empty, or corrupt (backed up to .corrupt-<timestamp>)
         # Do NOT auto-save [] — that would destroy recoverable data
         return []
 

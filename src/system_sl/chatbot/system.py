@@ -52,13 +52,42 @@ _EXPLICIT_ADD = re.compile(
     re.IGNORECASE,
 )
 
-# Attachment marker inserted by the chat panel when a document is uploaded.
-_ATTACHMENT_MARKER = "[uploaded document:"
+# Content the chat panel puts around the Player's own words: attached
+# documents (<document …>…</document>, or a "[uploaded document: …]" line when
+# extraction failed) and quoted messages (<quote …>…</quote>).
+_BLOCK_RE = re.compile(
+    r"<\s*(document|quote)\b[^>]*>.*?<\s*/\s*\1\s*>", re.IGNORECASE | re.DOTALL
+)
+_FAILED_ATTACHMENT_RE = re.compile(r"^\[uploaded document:[^\n]*\]\s*$", re.MULTILINE)
+_LEFTOVER_TAG_RE = re.compile(r"<\s*/?\s*(?:document|quote)\b", re.IGNORECASE)
+_DOCUMENT_RE = re.compile(
+    r"<\s*document\b|^\[uploaded document:", re.IGNORECASE | re.MULTILINE
+)
 
 
-def _attached_doc_present(text: str) -> bool:
-    """Return True when the user message contains an uploaded document marker."""
-    return _ATTACHMENT_MARKER in (text or "")
+def message_has_documents(message: str) -> bool:
+    """True when a composed chat message carries an attached document.
+
+    A document can hide instructions ("create a task to ..."). Even when the
+    Player typed an explicit request alongside it, the model could add other
+    tasks the document asked for, so with a document attached every task
+    still needs the Player's Yes.
+    """
+    return bool(_DOCUMENT_RE.search(message or ""))
+
+
+def player_typed_text(message: str) -> str:
+    """Recover the Player's own words from a composed chat message.
+
+    Fallback for callers that did not pass the typed text separately. Fails
+    closed: if a document or quote block cannot be cleanly removed (a tag left
+    over), nothing is treated as typed, so the task gate asks for confirmation.
+    """
+    text = _BLOCK_RE.sub("", message or "")
+    text = _FAILED_ATTACHMENT_RE.sub("", text)
+    if _LEFTOVER_TAG_RE.search(text):
+        return ""
+    return text.strip()
 
 
 def is_explicit_task_request(text: str) -> bool:
@@ -67,6 +96,9 @@ def is_explicit_task_request(text: str) -> bool:
     Deliberately strict: only clause-initial commands count ("add a task X",
     "please create task X", "remind me to X"). Suggestions, questions and
     hypotheticals fall through to the confirmation prompt.
+
+    ``text`` must be only what the Player typed: quoted messages and attached
+    documents are not the Player's instruction (see ``player_typed_text``).
     """
     return bool(text and _EXPLICIT_ADD.search(text))
 
@@ -124,13 +156,13 @@ def add_task(category: str, title: str, deadline: Optional[str] = None) -> Any:
     result is ``pending_confirmation`` — do not claim it was added.
     """
     user_text, on_proposal = _get_turn_context()
-    if not is_explicit_task_request(user_text) or _attached_doc_present(user_text):
+    if not is_explicit_task_request(user_text):
         proposal = {"category": category, "title": title, "deadline": deadline}
         if on_proposal is not None:
             try:
                 on_proposal(proposal)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("on_proposal callback failed: %s", e)
         return {
             "status": "pending_confirmation",
             "message": (
@@ -218,8 +250,8 @@ def propose_tasks_batch(tasks: list[dict]) -> Any:
     if on_proposal is not None:
         try:
             on_proposal(proposal)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("on_proposal callback failed: %s", e)
 
     return {
         "status": "pending_confirmation",
@@ -273,7 +305,6 @@ def _get_cached_llm():
     Construction is deferred until first use so that config is loaded
     and any required API keys are available.
     """
-    _maybe_reset_on_config_change()
     config = load_config()
     errors = validate_config(config)
     if errors:
@@ -281,8 +312,21 @@ def _get_cached_llm():
     return create_llm_from_config(config)
 
 
-@lru_cache(maxsize=8)
 def build_agent_for_model(model_name: str):
+    """Return the agent for ``model_name`` and its LLM, as ``(agent, llm)``.
+
+    Built once per model and cached. The config file is checked first on
+    every call: if it was changed outside the app (another window, an
+    editor), the cache is dropped so the new settings take effect. The check
+    has to sit in front of the cache — inside a cached builder it would only
+    ever run on the first build.
+    """
+    _maybe_reset_on_config_change()
+    return _build_agent_for_model(model_name)
+
+
+@lru_cache(maxsize=8)
+def _build_agent_for_model(model_name: str):
     """Build (once per model) an agent and return ``(agent, llm)``.
 
     Every agent shares the one process-wide checkpointer, so switching models
@@ -291,7 +335,6 @@ def build_agent_for_model(model_name: str):
     HTTP clients belong to the model that is about to answer, to cancel a
     stream on Stop.
     """
-    _maybe_reset_on_config_change()
     config = load_config()
 
     # LLMFactoryError is raised unchanged so callers can tell "no API key
@@ -324,11 +367,11 @@ def build_agent_for_model(model_name: str):
     return agent, llm
 
 
-@lru_cache(maxsize=1)
 def get_system_agent():
-    """Build (once) and return the SYSTEM mentor agent for the saved default.
+    """Return the SYSTEM mentor agent for the saved default model.
 
-    The cache is invalidated by ``reset_agent_cache()`` when config changes.
+    Cached per model by ``build_agent_for_model``, which also notices config
+    changes made outside the app; ``reset_agent_cache()`` drops it explicitly.
     """
     return build_agent_for_model(load_config().system_model)[0]
 
@@ -352,6 +395,5 @@ def reset_agent_cache() -> None:
     """
     from system_sl.chatbot.llm_factory import clear_cached_llm
     _get_cached_llm.cache_clear()
-    get_system_agent.cache_clear()
-    build_agent_for_model.cache_clear()
+    _build_agent_for_model.cache_clear()
     clear_cached_llm()

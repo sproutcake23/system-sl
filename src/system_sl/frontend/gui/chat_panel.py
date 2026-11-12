@@ -129,6 +129,46 @@ def _preserve_line_breaks(text: str) -> str:
 
     return "\n".join(out)
 
+# Spin-box value shown as "Model default" (temperature left out of requests).
+_TEMPERATURE_DEFAULT = -0.1
+
+
+# Background threads whose owner went away while they were still blocked in
+# I/O (an HTTP request cannot be interrupted). They are detached from the
+# owner and kept referenced here until they finish, instead of being destroyed
+# while running ("QThread: Destroyed while thread is still running").
+_retired_threads: set = set()
+
+
+def _retire_thread(thread: "QThread | None", worker: "QObject | None", wait_ms: int = 200) -> None:
+    """Stop using a worker thread without blocking the GUI or crashing.
+
+    The caller must already have dropped its own references, so late results
+    are ignored (its slots check ``sender()``).
+    """
+    if thread is None:
+        return
+    thread.requestInterruption()
+    thread.quit()
+    if thread.wait(wait_ms):
+        if worker is not None:
+            worker.deleteLater()
+        thread.deleteLater()
+        return
+
+    # Still running: let it finish on its own, then clean up.
+    thread.setParent(None)
+    _retired_threads.add(thread)
+
+    def _finished() -> None:
+        _retired_threads.discard(thread)
+        if worker is not None:
+            worker.deleteLater()
+        thread.deleteLater()
+
+    thread.finished.connect(_finished)
+
+
 class _ModelFetchWorker(QObject):
     """Background worker for fetching models from provider API."""
     finished = Signal(list)
@@ -326,10 +366,16 @@ class LLMSettingsPage(QWidget):
 
         # Temperature
         self.temperature_spin = QDoubleSpinBox()
-        self.temperature_spin.setRange(0.0, 2.0)
+        # The lowest value stands for "model default": no temperature is sent,
+        # which some (mostly reasoning) models require.
+        self.temperature_spin.setRange(_TEMPERATURE_DEFAULT, 2.0)
         self.temperature_spin.setSingleStep(0.1)
         self.temperature_spin.setDecimals(2)
-        self.temperature_spin.setToolTip("Sampling temperature (0.0 = deterministic, higher = more creative)")
+        self.temperature_spin.setSpecialValueText("Model default")
+        self.temperature_spin.setToolTip(
+            "Sampling temperature (0.0 = deterministic, higher = more creative). "
+            "\"Model default\" sends none, for models that reject it."
+        )
         self.temperature_spin.setAccessibleName("Temperature")
         self.temperature_spin.setAccessibleDescription("Controls randomness in model outputs. 0.0 for consistent answers, higher for more creative responses")
         form.addRow("Temperature:", self.temperature_spin)
@@ -463,7 +509,10 @@ class LLMSettingsPage(QWidget):
         self.base_url_edit.setText(self._config.base_url or "")
         self.api_key_edit.setText(self._config.api_key or "")
         self.model_edit.setText(self._config.system_model or "")
-        self.temperature_spin.setValue(self._config.temperature)
+        temperature = self._config.temperature
+        self.temperature_spin.setValue(
+            _TEMPERATURE_DEFAULT if temperature is None else temperature
+        )
         self.max_tokens_spin.setValue(self._config.max_tokens or 0)
         self.system_prompt_addendum_edit.setPlainText(self._config.system_prompt_addendum or "")
 
@@ -542,15 +591,21 @@ class LLMSettingsPage(QWidget):
         self._fetch_worker.progress.connect(self._on_fetch_progress)
         self._fetch_worker.finished.connect(self._fetch_thread.quit)
         self._fetch_worker.failed.connect(self._fetch_thread.quit)
-        self._fetch_thread.finished.connect(self._cleanup_fetch_thread)
-        self._fetch_thread.start()
+        thread = self._fetch_thread
+        thread.finished.connect(lambda: self._cleanup_fetch_thread(thread))
+        thread.start()
 
     def _on_fetch_progress(self, message: str) -> None:
+        if self.sender() is not self._fetch_worker:
+            return  # a fetch abandoned when the dialog closed
         self.fetch_btn.setText(message)
 
     def _on_models_fetched(self, models: "list[ModelInfo]") -> None:
         """Handle successful model fetch."""
         from system_sl.chatbot import set_model_cache
+
+        if self.sender() is not self._fetch_worker:
+            return
         self._fetched_models = models
         self._populate_model_table()
         self.model_table_frame.setVisible(True)
@@ -564,9 +619,13 @@ class LLMSettingsPage(QWidget):
 
     def _on_fetch_failed(self, error: str) -> None:
         """Handle fetch failure."""
+        if self.sender() is not self._fetch_worker:
+            return
         QMessageBox.critical(self, "Fetch Failed", f"Could not fetch models:\n{error}")
 
-    def _cleanup_fetch_thread(self) -> None:
+    def _cleanup_fetch_thread(self, thread: "QThread | None" = None) -> None:
+        if thread is not None and thread is not self._fetch_thread:
+            return  # a retired fetch finishing late; it cleans up itself
         self.fetch_btn.setEnabled(True)
         self.fetch_btn.setText("Fetch Models")
         self.fetch_progress.setVisible(False)
@@ -705,7 +764,11 @@ class LLMSettingsPage(QWidget):
             base_url=self.base_url_edit.text().strip() or None,
             api_key=self.api_key_edit.text().strip(),
             system_model=self.model_edit.text().strip(),
-            temperature=self.temperature_spin.value(),
+            temperature=(
+                None
+                if self.temperature_spin.value() < 0
+                else self.temperature_spin.value()
+            ),
             max_tokens=self.max_tokens_spin.value() or None,
             system_prompt_addendum=self.system_prompt_addendum_edit.toPlainText().strip(),
         )
@@ -744,16 +807,23 @@ class LLMSettingsPage(QWidget):
         self._test_worker.failed.connect(self._on_test_failed)
         self._test_worker.finished.connect(self._test_thread.quit)
         self._test_worker.failed.connect(self._test_thread.quit)
-        self._test_thread.finished.connect(self._cleanup_test_thread)
-        self._test_thread.start()
+        thread = self._test_thread
+        thread.finished.connect(lambda: self._cleanup_test_thread(thread))
+        thread.start()
 
     def _on_test_succeeded(self, response: str) -> None:
+        if self.sender() is not self._test_worker:
+            return  # a test abandoned when the dialog closed
         QMessageBox.information(self, "Success", f"Connection OK!\nResponse: {response}")
 
     def _on_test_failed(self, error: str) -> None:
+        if self.sender() is not self._test_worker:
+            return
         QMessageBox.critical(self, "Connection Failed", error)
 
-    def _cleanup_test_thread(self) -> None:
+    def _cleanup_test_thread(self, thread: "QThread | None" = None) -> None:
+        if thread is not None and thread is not self._test_thread:
+            return
         self.test_btn.setEnabled(True)
         self.test_btn.setText("Test Connection")
         if self._test_worker is not None:
@@ -779,20 +849,26 @@ class LLMSettingsPage(QWidget):
         if self._on_apply():
             self.finished.emit(True)
 
+    def shutdown_threads(self) -> None:
+        """Abandon a running fetch or connection test without blocking.
+
+        Called whenever the dialog holding this page closes (Close, Esc,
+        accept, reject or the window's X all go through ``QDialog.done``).
+        """
+        fetch = (self._fetch_thread, self._fetch_worker)
+        self._fetch_thread = self._fetch_worker = None
+        _retire_thread(*fetch)
+        test = (self._test_thread, self._test_worker)
+        self._test_thread = self._test_worker = None
+        _retire_thread(*test)
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.setText("Fetch Models")
+        self.fetch_progress.setVisible(False)
+        self.test_btn.setEnabled(True)
+        self.test_btn.setText("Test Connection")
+
     def closeEvent(self, event) -> None:
-        """Cancel any running background threads when the page is closed."""
-        # Cancel fetch thread
-        if self._fetch_thread is not None:
-            self._fetch_thread.requestInterruption()
-            self._fetch_thread.quit()
-            self._fetch_thread.wait(1000)
-            self._cleanup_fetch_thread()
-        # Cancel test thread
-        if self._test_thread is not None:
-            self._test_thread.requestInterruption()
-            self._test_thread.quit()
-            self._test_thread.wait(1000)
-            self._cleanup_test_thread()
+        self.shutdown_threads()
         super().closeEvent(event)
 
 
@@ -811,6 +887,11 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.page)
         self.page.finished.connect(lambda ok: self.accept() if ok else self.reject())
 
+    def done(self, result: int) -> None:
+        # Every way of closing the dialog ends here, unlike closeEvent.
+        self.page.shutdown_threads()
+        super().done(result)
+
 
 # =============================================================================
 # CHAT WORKER
@@ -826,11 +907,23 @@ class _ChatWorker(QObject):
     attachment_notice = Signal(str)
     tool_activity = Signal(str, str, str)  # tool_name, status, detail
 
-    def __init__(self, session: "ChatSession", user_msg: str, attachment_paths: list[str] | None = None):
+    def __init__(
+        self,
+        session: "ChatSession",
+        user_msg: str,
+        attachment_paths: list[str] | None = None,
+        typed_text: str | None = None,
+        message_id: str | None = None,
+    ):
         super().__init__()
         self.session = session
         self.user_msg = user_msg
         self.attachment_paths = attachment_paths or []
+        # What the Player typed themselves, without quotes or documents. The
+        # task gate only trusts this text (see system.add_task).
+        self.typed_text = typed_text
+        # Id the Player's message is stored under, so it can be rewound to.
+        self.message_id = message_id
 
     def run(self):
         from system_sl.chatbot.context_window import (
@@ -847,7 +940,10 @@ class _ChatWorker(QObject):
         augmented_msg = self.user_msg
         if self.attachment_paths:
             window = context_window_for_llm(getattr(self.session, "llm", None))
-            budget = attachment_budget_chars(window)
+            # One budget per message: quotes already in it are paid for out
+            # of the same allowance, not on top of it.
+            quoted = max(0, len(self.user_msg) - len(self.typed_text or self.user_msg))
+            budget = max(2_000, attachment_budget_chars(window) - quoted)
             attachments = build_attachments(self.attachment_paths, budget)
 
             doc_parts = []
@@ -870,7 +966,11 @@ class _ChatWorker(QObject):
 
         try:
             for kind, delta in self.session.stream_turn(
-                augmented_msg, on_proposal=self.proposal.emit, on_tool=on_tool
+                augmented_msg,
+                on_proposal=self.proposal.emit,
+                on_tool=on_tool,
+                typed_text=self.typed_text,
+                message_id=self.message_id,
             ):
                 if thread.isInterruptionRequested():
                     self.cancelled.emit()
@@ -884,7 +984,10 @@ class _ChatWorker(QObject):
             # Provider or model cannot stream; fall back to a blocking turn.
             try:
                 reply = self.session.run_turn(
-                    augmented_msg, on_proposal=self.proposal.emit
+                    augmented_msg,
+                    on_proposal=self.proposal.emit,
+                    typed_text=self.typed_text,
+                    message_id=self.message_id,
                 )
             except Exception as e:
                 self.failed.emit(f"{type(e).__name__}: {e}")
@@ -899,14 +1002,8 @@ class _ChatWorker(QObject):
             self.cancelled.emit()
             return
 
-        # The attachment text only mattered for this turn: shrink it in the
-        # stored history so later turns do not pay for it again.
-        if self.attachment_paths:
-            try:
-                self.session.compact_attachment_references()
-            except Exception:
-                logger.warning("could not compact the attachments", exc_info=True)
-
+        # Attachment text is compacted by the panel once the turn is over,
+        # whatever the outcome (see ChatPanel._cleanup_thread).
         self.finished.emit("".join(collected))
 
 
@@ -997,6 +1094,13 @@ class ChatPanel(QWidget):
         # so they are flushed from _cleanup_thread().
         self._pending_confirmations: list[tuple] = []
         self._notes_after_turn: list[tuple[Callable[[str], None], str]] = []
+        # Transcript id of the Player message whose reply is running, and of
+        # the one whose reply failed last (offered as "Retry").
+        self._turn_user_id: str | None = None
+        self._last_failed_user_id: str | None = None
+        # The earlier Player message being edited (edit-and-resend), if any.
+        self._editing_message = None
+        self._shut_down = False
 
         root = QVBoxLayout(self)
 
@@ -1081,7 +1185,6 @@ class ChatPanel(QWidget):
         root.addWidget(self.transcript, stretch=1)
 
         # Store raw error details for alert detail links
-        self._alert_details: dict[str, str] = {}
 
         # --- Live reasoning ("thinking") view ---
         # Only shown while a reasoning model is thinking; cleared as soon as
@@ -1113,6 +1216,23 @@ class ChatPanel(QWidget):
         root.addWidget(self.confirm_bar)
         # addWidget() re-parents and hides, so visibility is set afterwards.
         self.confirm_bar.setVisible(False)
+
+        # --- Edit banner (shown while an earlier message is being edited) ---
+        self.edit_bar = QFrame()
+        edit_layout = QHBoxLayout(self.edit_bar)
+        edit_layout.setContentsMargins(6, 2, 6, 2)
+        self.edit_label = QLabel(
+            "Editing an earlier message — sending replaces it and everything after it."
+        )
+        self.edit_label.setWordWrap(True)
+        self.edit_cancel = QPushButton("Cancel")
+        self.edit_cancel.setToolTip("Stop editing (Esc)")
+        self.edit_cancel.setAccessibleName("Cancel editing")
+        self.edit_cancel.clicked.connect(self._cancel_edit)
+        edit_layout.addWidget(self.edit_label, 1)
+        edit_layout.addWidget(self.edit_cancel)
+        root.addWidget(self.edit_bar)
+        self.edit_bar.setVisible(False)
 
         # --- Quote chips row (hidden when nothing is quoted) ---
         # Sits directly above the input: these are the quotes that will be
@@ -1485,6 +1605,9 @@ class ChatPanel(QWidget):
         self._thread_id = thread_id
         self._session = None
         self._reset_stream_state()
+        self._cancel_edit(clear_input=False)
+        self._turn_user_id = None
+        self._last_failed_user_id = None
         # Quotes composed for the previous conversation make no sense here.
         self._clear_quotes()
 
@@ -1553,6 +1676,8 @@ class ChatPanel(QWidget):
             self._append_bot(message)
         elif message.role == NOTE:
             self._append_system_note(message.text, message_id=message.id)
+        elif message.role == ALERT and message.error:
+            self._render_alert_with_details(message)
         elif message.role == ALERT:
             self._append_alert_bubble(message.text, message_id=message.id, timestamp=message.timestamp)
         elif message.role == CONFIRMATION:
@@ -1649,6 +1774,9 @@ class ChatPanel(QWidget):
             from PySide6.QtCore import Qt
             from PySide6.QtGui import QKeyEvent
             key_event: QKeyEvent = event
+            if key_event.key() == Qt.Key.Key_Escape and self._editing_message is not None:
+                self._cancel_edit()
+                return True
             if key_event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 if key_event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                     # Shift+Enter: insert newline (default behavior)
@@ -1815,7 +1943,7 @@ class ChatPanel(QWidget):
         the menu is the caller's job, which keeps the menu testable without a
         running event loop.
         """
-        from system_sl.chatbot.transcript import ASSISTANT, USER
+        from system_sl.chatbot.transcript import ALERT, ASSISTANT, USER
 
         message = self._messages.get(message_id) if message_id else None
         has_selection = bool((selection or "").strip())
@@ -1823,7 +1951,15 @@ class ChatPanel(QWidget):
         # Notes and alerts are the app talking to itself; only what a
         # participant said can be quoted back to the model.
         quoteable = message is not None and message.role in (USER, ASSISTANT)
-        if not has_selection and not quoteable:
+        # A failed reply is shown as an alert; offer Retry there too.
+        retryable = (
+            message is not None
+            and self._last_failed_user_id is not None
+            and (message.role == ALERT or (message.role == ASSISTANT and message.error))
+            and self._messages.index_of(message.id)
+            > self._messages.index_of(self._last_failed_user_id)
+        )
+        if not has_selection and not quoteable and not retryable:
             return None, []
 
         menu = QMenu(self.transcript)
@@ -1865,13 +2001,15 @@ class ChatPanel(QWidget):
                 menu.addSeparator()
                 regenerate_action = menu.addAction("Regenerate reply")
                 entries.append((regenerate_action, lambda: self._regenerate_reply(message_id)))
-                if message.error:
-                    retry_action = menu.addAction("Retry")
-                    entries.append((retry_action, lambda: self._retry_message(message_id)))
             elif message.role == USER:
                 menu.addSeparator()
                 edit_resend_action = menu.addAction("Edit and resend")
                 entries.append((edit_resend_action, lambda: self._edit_and_resend(message_id)))
+
+        if retryable:
+            menu.addSeparator()
+            retry_action = menu.addAction("Retry")
+            entries.append((retry_action, lambda: self._retry_message(message_id)))
 
         return menu, entries
 
@@ -2000,10 +2138,11 @@ class ChatPanel(QWidget):
 
         try:
             if self._session is not None and self._session.thread_id == self._thread_id:
-                if self._session.model_name == model_name:
-                    return self._session
+                # Asked every time: the agent is rebuilt when the config file
+                # changed, and the open session must pick that up too.
                 agent, llm = build_agent_for_model(model_name)
-                self._session.switch_model(model_name, agent=agent, llm=llm)
+                if self._session.model_name != model_name or self._session.agent is not agent:
+                    self._session.switch_model(model_name, agent=agent, llm=llm)
                 return self._session
 
             agent, llm = build_agent_for_model(model_name)
@@ -2114,28 +2253,36 @@ class ChatPanel(QWidget):
     def _player_html(self, message: "ChatMessage") -> str:
         """Bubble contents for a Player message: attachments, quotes, text."""
         parts: list[str] = []
-        if message.attachments:
-            parts.append(self._attachment_summary_html(message.attachments))
+        if message.attachments or message.documents:
+            parts.append(
+                self._attachment_summary_html(message.attachments, message.documents)
+            )
         for quote in message.quotes:
             parts.append(self._quote_block_html(quote))
         parts.append(html.escape(message.body or "").replace("\n", "<br>"))
         return "".join(parts)
 
     @staticmethod
-    def _attachment_summary_html(paths: list[str]) -> str:
-        """The "📎 Attached:" preview shown inside a Player message."""
+    def _attachment_summary_html(paths: list[str], documents: list[str] = ()) -> str:
+        """The "📎 Attached:" preview shown inside a Player message.
+
+        ``documents`` are names only (a message reopened from history: the
+        text was read when it was sent).
+        """
         attach_lines = ["📎 Attached:"]
         for path_str in paths:
             path = Path(path_str)
             try:
                 size_kb = path.stat().st_size / 1024
                 size_str = (
-                    f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.0f} KB"
+                    f" ({size_kb / 1024:.1f} MB)" if size_kb >= 1024 else f" ({size_kb:.0f} KB)"
                 )
             except OSError:
                 # The file is only decoration here; the text was already read.
-                size_str = "not found"
-            attach_lines.append(f"  • {path.name} ({size_str})")
+                size_str = ""
+            attach_lines.append(f"  • {path.name}{size_str}")
+        for name in documents:
+            attach_lines.append(f"  • {name}")
         return html.escape("\n".join(attach_lines)).replace("\n", "<br>") + "<br><br>"
 
     @staticmethod
@@ -2349,7 +2496,12 @@ class ChatPanel(QWidget):
         """Append an alert with a 'Details' link that opens a dialog with the raw error."""
         from system_sl.chatbot.transcript import ALERT
 
-        message = self._messages.append(ALERT, friendly)
+        message = self._messages.append(ALERT, friendly, error=detail)
+        self._render_alert_with_details(message)
+
+    def _render_alert_with_details(self, message) -> None:
+        """Draw an alert whose raw error is kept on the message."""
+        friendly = message.text
         tokens = self._get_live_tokens()
         alert_color = tokens.get("sys_color_alert", "#ff6b8a")
         alert_text = tokens.get("sys_color_on_alert", "#ffffff")
@@ -2371,12 +2523,11 @@ class ChatPanel(QWidget):
             timestamp=message.timestamp,
         )
 
-        # Store the detail for the link handler
-        self._alert_details[message.id] = detail
 
     def _handle_alert_detail_link(self, message_id: str) -> None:
         """Show the raw error detail in a dialog."""
-        detail = self._alert_details.get(message_id)
+        message = self._messages.get(message_id)
+        detail = message.error if message is not None else ""
         if not detail:
             return
         from PySide6.QtWidgets import QMessageBox, QTextEdit
@@ -2653,11 +2804,18 @@ class ChatPanel(QWidget):
             self.reasoning_view.clear()
             self.reasoning_view.setPlainText(friendly)
         elif status == "end":
-            # Tool finished, show brief confirmation then clear after a delay
-            self.reasoning_view.clear()
-            self.reasoning_view.setPlainText(f"✓ {friendly}")
-            # Clear after 1.5 seconds
-            QTimer.singleShot(1500, lambda: self.reasoning_view.clear() if self.reasoning_view.toPlainText() == f"✓ {friendly}" else None)
+            # Tool finished: show a brief tick, then hide the view unless
+            # something else (reasoning, another tool) has replaced it.
+            done = f"✓ {friendly.rstrip('…')}"
+            self.reasoning_view.setPlainText(done)
+
+            def clear_if_unchanged() -> None:
+                if self.reasoning_view.toPlainText() == done:
+                    self.reasoning_view.clear()
+                    self.reasoning_view.setVisible(False)
+                    self._reasoning_shown = False
+
+            QTimer.singleShot(1500, clear_if_unchanged)
 
     # --- answer ---
 
@@ -2704,12 +2862,18 @@ class ChatPanel(QWidget):
         if self._halted:
             return  # the Player abandoned this turn; drop late proposals
 
+        # The answer belongs to the conversation that proposed it, even if the
+        # Player has switched conversation (or pressed Stop) before answering.
+        session = self._worker.session if self._worker is not None else self._session
+
         # Handle batch proposals from document attachments
         if proposal.get("type") == "batch":
-            self._show_batch_proposal_dialog(proposal)
+            self._show_batch_proposal_dialog(proposal, session)
             return
 
-        self._pending_proposals.append(dict(proposal))
+        queued = dict(proposal)
+        queued["_session"] = session
+        self._pending_proposals.append(queued)
         self._show_next_proposal()
 
     def _on_attachment_notice(self, notice: str) -> None:
@@ -2718,7 +2882,7 @@ class ChatPanel(QWidget):
             return
         self._append_alert(f"attachment: {notice}")
 
-    def _show_batch_proposal_dialog(self, proposal: dict) -> None:
+    def _show_batch_proposal_dialog(self, proposal: dict, session=None) -> None:
         """Show the batch task proposal dialog (non-modal)."""
         from system_sl.frontend.gui.popup_windows import BatchProposalDialog
 
@@ -2736,25 +2900,30 @@ class ChatPanel(QWidget):
             return pairs
 
         dialog = BatchProposalDialog(tasks, self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.confirmed.connect(
-            lambda selected_tasks: self._on_batch_confirmed(selected_tasks, tasks, as_pairs)
+            lambda selected_tasks: self._on_batch_confirmed(
+                selected_tasks, tasks, as_pairs, session
+            )
         )
         dialog.cancelled.connect(
-            lambda: self._on_batch_cancelled(tasks, as_pairs)
+            lambda: self._on_batch_cancelled(tasks, as_pairs, session)
         )
         dialog.show()
 
     def _on_batch_confirmed(
-        self, selected_tasks: list[dict], all_tasks: list[dict], as_pairs
+        self, selected_tasks: list[dict], all_tasks: list[dict], as_pairs, session=None
     ) -> None:
         """Handle batch dialog confirmation."""
-        selected_titles = {task["title"] for task in selected_tasks}
-        skipped = [task for task in all_tasks if task.get("title") not in selected_titles]
-        self._add_batch_tasks(selected_tasks, declined=as_pairs(skipped))
+        # Matched by row, not title: titles can be edited in the dialog and
+        # two proposed tasks can share one.
+        chosen = {task.get("source_index") for task in selected_tasks}
+        skipped = [task for i, task in enumerate(all_tasks) if i not in chosen]
+        self._add_batch_tasks(selected_tasks, declined=as_pairs(skipped), session=session)
 
-    def _on_batch_cancelled(self, all_tasks: list[dict], as_pairs) -> None:
-        """Handle batch dialog cancellation."""
-        self._record_task_confirmation(declined=as_pairs(all_tasks))
+    def _on_batch_cancelled(self, all_tasks: list[dict], as_pairs, session=None) -> None:
+        """Handle batch dialog cancellation (Cancel, Esc or the window's X)."""
+        self._record_task_confirmation(declined=as_pairs(all_tasks), session=session)
 
     def _show_next_proposal(self) -> None:
         """Show the next queued proposal, or hide the bar when none remain."""
@@ -2779,6 +2948,7 @@ class ChatPanel(QWidget):
         self._current_proposal = None
 
         if proposal is not None:
+            session = proposal.get("_session")
             title = str(proposal.get("title") or "").strip()
             category = str(proposal.get("category") or "none")
             deadline = proposal.get("deadline")
@@ -2788,23 +2958,23 @@ class ChatPanel(QWidget):
                 self._show_after_turn(self._append_alert, "cannot add a task without a title")
             elif title in existing:
                 self._show_after_turn(self._append_alert, f"task '{title}' already exists")
-                self._record_task_confirmation(failed=[(title, category)])
+                self._record_task_confirmation(failed=[(title, category)], session=session)
             else:
                 try:
                     add_tasks(category, title, deadline)
                 except ValueError as e:
                     self._show_after_turn(self._append_alert, str(e))
-                    self._record_task_confirmation(failed=[(title, category)])
+                    self._record_task_confirmation(failed=[(title, category)], session=session)
                 except OSError as e:
                     self._show_after_turn(
                         self._append_alert, f"could not save the new task: {e}"
                     )
-                    self._record_task_confirmation(failed=[(title, category)])
+                    self._record_task_confirmation(failed=[(title, category)], session=session)
                 else:
                     self._show_after_turn(
                         self._append_confirmation, f'Added "{title}" to {category}.'
                     )
-                    self._record_task_confirmation(added=[(title, category)])
+                    self._record_task_confirmation(added=[(title, category)], session=session)
 
         self._show_next_proposal()
 
@@ -2814,7 +2984,9 @@ class ChatPanel(QWidget):
             title = str(proposal.get("title") or "").strip()
             category = str(proposal.get("category") or "none")
             if title:
-                self._record_task_confirmation(declined=[(title, category)])
+                self._record_task_confirmation(
+                    declined=[(title, category)], session=proposal.get("_session")
+                )
         self._current_proposal = None
         self._show_next_proposal()
 
@@ -2823,8 +2995,13 @@ class ChatPanel(QWidget):
         added: list[tuple[str, str]] | None = None,
         declined: list[tuple[str, str]] | None = None,
         failed: list[tuple[str, str]] | None = None,
+        session=None,
     ) -> None:
         """Tell the conversation what happened to proposed tasks.
+
+        ``session`` is the conversation that proposed them; it defaults to the
+        open one. Passing it keeps an answer given after a conversation switch
+        or a Stop from being dropped or written into the wrong conversation.
 
         While a reply is streaming, the write waits for the turn to finish: the
         agent is still running on this thread, and writing a checkpoint
@@ -2837,8 +3014,9 @@ class ChatPanel(QWidget):
         if not (added or declined or failed):
             return
 
-        session = self._session
+        session = session if session is not None else self._session
         if session is None:
+            logger.warning("task outcome dropped: no conversation to record it in")
             return
 
         if self.is_busy():
@@ -2878,13 +3056,16 @@ class ChatPanel(QWidget):
         if self._current_proposal is not None:
             queue.append(self._current_proposal)
 
-        declined: list[tuple[str, str]] = []
+        # One note per conversation that proposed something.
+        by_session: dict[int, tuple[object, list[tuple[str, str]]]] = {}
         for proposal in queue:
             title = str(proposal.get("title") or "").strip()
             category = str(proposal.get("category") or "none")
             if title:
-                declined.append((title, category))
-        self._record_task_confirmation(declined=declined)
+                session = proposal.get("_session") or self._session
+                by_session.setdefault(id(session), (session, []))[1].append((title, category))
+        for session, declined in by_session.values():
+            self._record_task_confirmation(declined=declined, session=session)
 
         self._pending_proposals.clear()
         self._current_proposal = None
@@ -2894,10 +3075,9 @@ class ChatPanel(QWidget):
         self,
         tasks: list[dict],
         declined: list[tuple[str, str]] | None = None,
+        session=None,
     ) -> None:
-        """Add multiple tasks from batch proposal and re-prioritize."""
-        from system_sl.core.priority_engine_new import run_prioritization
-
+        """Add the tasks the Player kept in the batch dialog."""
         added_tasks = []  # Track (title, category) for confirmation feedback
         failed_tasks: list[tuple[str, str]] = []
         added = 0
@@ -2919,12 +3099,9 @@ class ChatPanel(QWidget):
                 errors.append(f"{title}: could not save: {e}")
                 failed_tasks.append((title, category))
 
-        if added > 0:
-            # Re-prioritize after adding tasks
-            try:
-                run_prioritization()
-            except Exception as e:
-                errors.append(f"prioritization failed: {e}")
+        # No re-ranking here: it is slow (spaCy, spell checking) and would
+        # freeze the chat. The Tasks window ranks off the GUI thread when it
+        # refreshes, as it does for a single confirmed task.
 
         if added:
             self._show_after_turn(
@@ -2936,6 +3113,7 @@ class ChatPanel(QWidget):
             added=added_tasks,
             declined=list(declined or []),
             failed=failed_tasks,
+            session=session,
         )
         for err in errors:
             self._show_after_turn(self._append_alert, err)
@@ -2959,90 +3137,155 @@ class ChatPanel(QWidget):
 
     # ----- Message Actions -----
 
-    def _regenerate_reply(self, message_id: str) -> None:
-        """Regenerate the last assistant reply by removing it and re-running the turn."""
+    # ----- Regenerate / retry / edit-and-resend -----
+
+    def _preceding_user_message(self, message_id: str):
+        """The Player message a reply (or alert) belongs to."""
+        from system_sl.chatbot.transcript import USER
+
+        index = self._messages.index_of(message_id)
+        for message in reversed(self._messages.messages[: max(index, 0)]):
+            if message.role == USER:
+                return message
+        return None
+
+    def _rewind_to(self, user_message) -> bool:
+        """Rewind the conversation to just before ``user_message``.
+
+        The stored history (what the model remembers) is cut first and the
+        transcript is rebuilt from it, so the screen and the model always agree.
+        Returns False, with an alert, when it could not be done.
+        """
+        from system_sl.chatbot.memory import update_conversation
+        from system_sl.chatbot.transcript import USER
+
         if self.is_busy():
-            self._append_alert("Cannot regenerate while a reply is in progress")
+            self._append_alert("wait for the reply to finish first")
+            return False
+        session = self._get_session()
+        if session is None:
+            return False
+
+        # Proposals belong to the turn being discarded; settle them first so
+        # their notes are written (and then rewound) in order.
+        self._clear_proposals()
+        self._flush_pending_confirmations()
+
+        is_last = self._messages.last(USER) is user_message
+        try:
+            if not user_message.source_id:
+                raise LookupError("message has no stored id")
+            session.rewind_before(user_message.source_id)
+        except LookupError:
+            # Never stored (the turn failed before it reached the
+            # conversation). Only the latest message can be resent safely.
+            if not is_last:
+                self._append_alert("this message is not in the saved conversation")
+                return False
+        except Exception:
+            logger.warning("could not rewind conversation %s", self._thread_id, exc_info=True)
+            self._append_alert("could not rewind the conversation; nothing was changed")
+            return False
+
+        self._render_transcript(self._messages_for_thread(self._thread_id))
+        if self._messages.last(USER) is None:
+            # Back to an empty conversation: let the resent message title it.
+            update_conversation(self._thread_id, title="")
+            self._refresh_history_combo()
+        self._last_failed_user_id = None
+        return True
+
+    def _resend(self, user_message) -> None:
+        """Send a Player message again exactly as it was first sent."""
+        attachments = [p for p in (user_message.attachments or []) if Path(p).exists()]
+        missing = len(user_message.attachments or []) - len(attachments)
+        if missing:
+            self._append_alert(f"{missing} attached file(s) no longer exist and were left out")
+        # ``text`` is what was sent: the quote blocks and the Player's words.
+        self._send_now(user_message.text, attachments)
+
+    def _confirm_discard(self, user_message) -> bool:
+        """Ask before discarding later turns of the conversation."""
+        from system_sl.chatbot.transcript import USER
+
+        later = [
+            m for m in self._messages.after(user_message.id) if m.role == USER
+        ]
+        if not later:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Discard later messages?",
+            f"This also removes the {len(later)} message(s) you sent after it, "
+            "and their replies, from the conversation.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _regenerate_reply(self, message_id: str) -> None:
+        """Ask again for the reply to a Player message, forgetting the old one."""
+        user_message = self._preceding_user_message(message_id)
+        if user_message is None:
+            self._append_alert("no message found to regenerate from")
             return
-
-        message = self._messages.get(message_id)
-        if not message or message.role != "assistant":
+        if not self._confirm_discard(user_message):
             return
-
-        # Find the preceding user message
-        idx = self._messages.index_of(message_id)
-        user_msg = None
-        for i in range(idx - 1, -1, -1):
-            if self._messages.messages[i].role == "user":
-                user_msg = self._messages.messages[i]
-                break
-
-        if not user_msg:
-            self._append_alert("No user message found to regenerate from")
-            return
-
-        # Remove the assistant message and any messages after it
-        self._messages.messages = self._messages.messages[:idx]
-        self._render_transcript(self._messages.messages)
-
-        # Re-send the user message (with its attachments and quotes)
-        attachments = list(user_msg.attachments) if user_msg.attachments else []
-        self._send_now(user_msg.body, attachments)
+        if self._rewind_to(user_message):
+            self._resend(user_message)
 
     def _retry_message(self, message_id: str) -> None:
-        """Retry a failed assistant message."""
-        if self.is_busy():
-            self._append_alert("Cannot retry while a reply is in progress")
+        """Send the Player message whose reply failed again."""
+        user_message = self._messages.get(self._last_failed_user_id or "") or (
+            self._preceding_user_message(message_id)
+        )
+        if user_message is None:
+            self._append_alert("no message found to retry")
             return
-
-        message = self._messages.get(message_id)
-        if not message or message.role != "assistant" or not message.error:
-            return
-
-        # Same as regenerate but for failed messages
-        idx = self._messages.index_of(message_id)
-        user_msg = None
-        for i in range(idx - 1, -1, -1):
-            if self._messages.messages[i].role == "user":
-                user_msg = self._messages.messages[i]
-                break
-
-        if not user_msg:
-            self._append_alert("No user message found to retry from")
-            return
-
-        self._messages.messages = self._messages.messages[:idx]
-        self._render_transcript(self._messages.messages)
-
-        attachments = list(user_msg.attachments) if user_msg.attachments else []
-        self._send_now(user_msg.body, attachments)
+        if self._rewind_to(user_message):
+            self._resend(user_message)
 
     def _edit_and_resend(self, message_id: str) -> None:
-        """Edit a user message and resend from that point (forking the conversation)."""
+        """Load an earlier Player message into the input to edit it.
+
+        Nothing changes until the edit is sent; Esc or Cancel leaves the
+        conversation as it was.
+        """
+        from system_sl.chatbot.transcript import USER
+
         if self.is_busy():
-            self._append_alert("Cannot edit while a reply is in progress")
+            self._append_alert("cannot edit while a reply is in progress")
             return
-
         message = self._messages.get(message_id)
-        if not message or message.role != "user":
+        if not message or message.role != USER:
             return
 
-        # Put the message text in the input box for editing
+        self._editing_message = message
         self.input_box.setPlainText(message.body or message.text)
+        self._quotes = list(message.quotes or [])
+        self._update_quote_chips()
+        self._attachments = [Path(p) for p in (message.attachments or []) if Path(p).exists()]
+        self._update_attach_chips()
+        later = len([m for m in self._messages.after(message.id) if m.role == USER])
+        self.edit_label.setText(
+            "Editing an earlier message — sending replaces it"
+            + (f" and the {later} message(s) after it." if later else ".")
+            + " Esc to cancel."
+        )
+        self.edit_bar.setVisible(True)
         self.input_box.setFocus()
         self.input_box.moveCursor(QTextCursor.MoveOperation.End)
 
-        # Remove this message and all subsequent messages
-        idx = self._messages.index_of(message_id)
-        self._messages.messages = self._messages.messages[:idx]
-        self._render_transcript(self._messages.messages)
-
-        # Clear any queued messages since we're forking
-        if self._message_queue:
-            self._message_queue.clear()
-            self._update_queue_badge()
-
-        # The user can now edit and press Enter to send
+    def _cancel_edit(self, clear_input: bool = True) -> None:
+        """Leave edit mode without changing the conversation."""
+        if self._editing_message is None:
+            return
+        self._editing_message = None
+        self.edit_bar.setVisible(False)
+        if clear_input:
+            self.input_box.clear()
+            self._clear_quotes()
+            self._clear_attachments()
 
     def _show_after_turn(self, append: Callable[[str], None], text: str) -> None:
         """Add a note to the transcript once the running reply has finished.
@@ -3101,6 +3344,16 @@ class ChatPanel(QWidget):
         if not text:
             return
 
+        if self._editing_message is not None:
+            # Edit-and-resend: the conversation is rewound now, on send, so
+            # cancelling an edit never loses anything.
+            if self.is_busy():
+                self._append_alert("wait for the reply to finish before sending the edit")
+                return
+            if not self._rewind_to(self._editing_message):
+                return
+            self._cancel_edit(clear_input=False)
+
         # Capture attachments and quotes before clearing
         attachment_paths = [str(p) for p in self._attachments]
         quotes = list(self._quotes)
@@ -3129,10 +3382,19 @@ class ChatPanel(QWidget):
         attachment budget), so quoting several long messages cannot push the
         real question out of the window. A cut quote says so in the transcript.
         """
-        from system_sl.chatbot.context_window import context_window_for_model
+        from system_sl.chatbot.context_window import (
+            context_window_for_llm,
+            context_window_for_model,
+        )
         from system_sl.chatbot.quotes import fit_quotes, format_quotes, quote_budget_chars
 
-        window = context_window_for_model(self._current_model)
+        # The model's own profile is the best source, as for attachments.
+        llm = getattr(self._session, "llm", None)
+        window = (
+            context_window_for_llm(llm)
+            if llm is not None
+            else context_window_for_model(self._current_model)
+        )
         fitted, notices = fit_quotes(quotes, quote_budget_chars(window))
         for notice in notices:
             self._append_alert(f"quote: {notice}")
@@ -3162,9 +3424,16 @@ class ChatPanel(QWidget):
         # conversation title both read from it.
         from system_sl.chatbot.transcript import USER
 
+        import uuid
+
         player_message = self._messages.append(
-            USER, text, attachments=list(attachment_paths)
+            USER,
+            text,
+            attachments=list(attachment_paths),
+            source_id=f"player-{uuid.uuid4().hex}",
         )
+        self._turn_user_id = player_message.id
+        self._last_failed_user_id = None
 
         # Title the conversation from its first message and remember which
         # model is answering; both are read by the history dropdown. The title
@@ -3190,7 +3459,13 @@ class ChatPanel(QWidget):
         _set_current_llm_clients(sync_client, async_client)
 
         self._thread = QThread(self)
-        self._worker = _ChatWorker(session, text, attachment_paths)
+        self._worker = _ChatWorker(
+            session,
+            text,
+            attachment_paths,
+            typed_text=player_message.body,
+            message_id=player_message.source_id,
+        )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.reasoning.connect(self._on_reasoning)
@@ -3272,66 +3547,18 @@ class ChatPanel(QWidget):
 
     @staticmethod
     def _friendly_error(message: str) -> tuple[str, str | None]:
-        """Map a raw error message to a user-friendly version and optional detail.
+        """Map a worker's raw error ("ExcType: text") to a plain message.
 
-        Returns (friendly_message, raw_detail). If no mapping applies, returns
-        the original message as friendly and None as detail.
+        Returns ``(friendly, detail)``. ``detail`` is the raw error, shown on
+        demand, or None when ``friendly`` already is the whole story. See
+        ``chatbot.errors.classify_error`` for how errors are recognised.
         """
-        lower = message.lower()
+        from system_sl.chatbot.errors import classify_error
 
-        # Authentication / API key errors
-        if any(kw in lower for kw in ("401", "unauthorized", "invalid api key", "authentication failed", "api key")):
-            return (
-                "Authentication failed. Please check your API key in Settings.",
-                message,
-            )
-
-        # Rate limiting
-        if any(kw in lower for kw in ("429", "rate limit", "too many requests", "quota exceeded")):
-            return (
-                "Rate limit exceeded. Please wait a moment and try again.",
-                message,
-            )
-
-        # Network / connection errors
-        if any(kw in lower for kw in ("connection", "connect", "timeout", "network", "dns", "resolve", "unreachable")):
-            return (
-                "Could not connect to the model provider. Check your internet connection and the Base URL in Settings.",
-                message,
-            )
-
-        # Context window / token limit
-        if any(kw in lower for kw in ("context", "token limit", "too long", "maximum context", "context length")):
-            return (
-                "The conversation is too long for this model's context window. Try starting a new chat or switching to a model with a larger context.",
-                message,
-            )
-
-        # Model not found
-        if any(kw in lower for kw in ("404", "not found", "model not found", "unknown model", "does not exist")):
-            return (
-                "The selected model is not available. Please choose a different model in the dropdown or refresh the model list.",
-                message,
-            )
-
-        # Permission / access denied
-        if any(kw in lower for kw in ("403", "forbidden", "permission denied", "access denied")):
-            return (
-                "Access denied. Your API key may not have permission to use this model.",
-                message,
-            )
-
-        # Server errors
-        if any(kw in lower for kw in ("500", "502", "503", "504", "internal server error", "bad gateway", "service unavailable")):
-            return (
-                "The model provider is experiencing issues. Please try again later.",
-                message,
-            )
-
-        # No mapping found - return original with no detail
-        return message, None
+        return classify_error(message)
 
     def _on_failure(self, message: str) -> None:
+        self._last_failed_user_id = self._turn_user_id
         self._md_timer.stop()
         self._stop_dots()
         self._render_answer()  # clears the loading dots if no token ever arrived
@@ -3375,6 +3602,7 @@ class ChatPanel(QWidget):
         finished_session = (
             getattr(self._worker, "session", None) if self._worker is not None else None
         )
+        had_attachments = bool(getattr(self._worker, "attachment_paths", None))
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
@@ -3389,6 +3617,14 @@ class ChatPanel(QWidget):
         # outcome the Player answered while it was streaming.
         if finished_session is not None:
             self._repair_session_after_turn(finished_session)
+            if had_attachments:
+                # The attachment text only mattered for this turn: shrink it
+                # in the stored history so later turns do not pay for it
+                # again. Also after Stop or an error, or it would stay forever.
+                try:
+                    finished_session.compact_attachment_references()
+                except Exception:
+                    logger.warning("could not compact the attachments", exc_info=True)
         notes, self._notes_after_turn = self._notes_after_turn, []
         for append, text in notes:
             append(text)
@@ -3406,18 +3642,42 @@ class ChatPanel(QWidget):
             # while this signal is still being delivered.
             QTimer.singleShot(0, lambda: self._send_now(queued_text, queued_attachments))
 
+    def shutdown(self, wait_ms: int = 3000) -> None:
+        """End a running reply and save its outcome before the app quits.
+
+        Connected to ``QApplication.aboutToQuit`` (the panel is a child
+        widget, so it gets no closeEvent). Task outcomes the Player answered
+        while the reply streamed are written to the conversation only once
+        the worker has stopped: writing the checkpoint underneath a running
+        agent would race with it. If the worker does not stop in time, the
+        conversation is left as is and repaired on the next launch.
+        """
+        if self._shut_down:
+            return
+        self._shut_down = True
+        self._message_queue.clear()
+        self._cancel_edit(clear_input=False)
+
+        thread = self._thread
+        if thread is not None:
+            self._on_stop()
+            # The worker's "done" signals reach thread.quit through the GUI
+            # event loop, which is blocked in wait() below; quit() itself is
+            # thread-safe and takes effect once the worker returns.
+            thread.quit()
+            if not thread.wait(wait_ms):
+                logger.warning(
+                    "the reply did not stop within %d ms; its task outcomes "
+                    "will not be recorded",
+                    wait_ms,
+                )
+                return
+            # thread.finished is queued and will not be delivered after quit,
+            # so finish the turn here: repair, then flush the outcomes.
+            self._cleanup_thread()
+        else:
+            self._flush_pending_confirmations()
+
     def closeEvent(self, event) -> None:
-        """Flush pending notes and confirmations before the panel closes."""
-        # Flush any pending "after turn" notes
-        if self._notes_after_turn:
-            notes, self._notes_after_turn = self._notes_after_turn, []
-            for append, text in notes:
-                append(text)
-        # Flush any pending task confirmations
-        self._flush_pending_confirmations()
-        # Cancel any running worker thread
-        if self._thread is not None:
-            self._thread.requestInterruption()
-            self._thread.quit()
-            self._thread.wait(1000)
+        self.shutdown()
         super().closeEvent(event)

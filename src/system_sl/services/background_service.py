@@ -8,6 +8,7 @@ from system_sl.core.tasks import get_random_task, get_topn_task
 from system_sl.core.priority_engine_new import run_prioritization
 from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.notification_settings import load_notifications_enabled
+from system_sl.utils.worker_threads import new_worker_thread
 
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ class BackgroundServiceController(QObject):
 
         self._worker_thread: QThread | None = None
         self._worker: _NotificationWorker | None = None
+        self._stopped = False
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_and_render_task)
@@ -60,6 +62,8 @@ class BackgroundServiceController(QObject):
 
     def poll_and_render_task(self) -> None:
         """Queries core task modules and passes data changes directly to the UI panel."""
+        if self._stopped:
+            return
         # The preference can change while this process is alive (the GUI
         # writes it), so re-read it on every tick rather than only at startup.
         # Otherwise a notifier started at login would keep interrupting a user
@@ -74,19 +78,22 @@ class BackgroundServiceController(QObject):
         self._start_worker()
 
     def _start_worker(self) -> None:
-        """Run ranking and lookup in a worker so the event loop stays free."""
-        self._worker_thread = QThread(self)
+        """Run ranking and lookup in a worker so the event loop stays free.
+
+        The thread has no Qt parent and is kept alive by ``worker_threads``
+        until the pass ends, so this controller can be stopped and deleted
+        mid-pass without destroying a running QThread.
+        """
         self._worker = _NotificationWorker()
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
+        self._worker_thread = new_worker_thread(self._worker)
         self._worker.finished.connect(self._on_tasks_ready)
         self._worker.failed.connect(self._on_ranking_failed)
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.failed.connect(self._worker_thread.quit)
         self._worker_thread.finished.connect(self._cleanup_worker)
         self._worker_thread.start()
 
     def _on_tasks_ready(self, titles: list) -> None:
+        if self._stopped:
+            return  # stopped mid-pass: the result is no longer wanted
         if len(titles) > 0:
             self.view.display_message(titles)
 
@@ -95,18 +102,29 @@ class BackgroundServiceController(QObject):
         log.warning("Ranking failed: %s", message)
 
     def _cleanup_worker(self) -> None:
-        if self._worker is not None:
-            self._worker.deleteLater()
-            self._worker = None
-        if self._worker_thread is not None:
-            self._worker_thread.deleteLater()
-            self._worker_thread = None
+        # The thread and worker are released by worker_threads once finished.
+        self._worker = None
+        self._worker_thread = None
+
+    def is_running(self) -> bool:
+        """True while a ranking pass started by this controller is running."""
+        return self._worker_thread is not None and self._worker_thread.isRunning()
 
     def stop(self) -> None:
-        """Stop the reminder loop and release the lock for another notifier."""
+        """Stop the reminder loop and release the lock for another notifier.
+
+        Returns immediately. A ranking pass is one blocking call that cannot be
+        interrupted, and waiting for it here froze the GUI until it finished.
+        Instead the pass finishes in the background and its result is
+        discarded; ``worker_threads`` keeps the thread alive until then, and
+        the application's quit path waits for it.
+        """
+        self._stopped = True
         self.timer.stop()
-        if self._worker_thread is not None:
-            self._worker_thread.quit()
-            self._worker_thread.wait()
+        if self._worker is not None:
+            try:
+                self._worker.finished.disconnect(self._on_tasks_ready)
+            except (RuntimeError, TypeError):
+                pass
         if self.lock.isLocked():
             self.lock.unlock()

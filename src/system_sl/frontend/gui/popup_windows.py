@@ -48,8 +48,10 @@ from system_sl.core.priority_engine_new import (
     save_manual_order,
 )  # we are importing run_prioritization from api section(priority_engine_new)
 from system_sl.frontend.gui.theme import get_current_theme_tokens
-from system_sl.utils.data_health import DataIssue, pop_issues, record_issue
+from system_sl.frontend.gui.data_issue_reporter import drain_data_issues
+from system_sl.utils.data_health import DataIssue, record_issue
 from system_sl.utils.paths import get_tasks_file_path
+from system_sl.utils.worker_threads import new_worker_thread
 
 
 # GUI-added tasks no longer carry a user-chosen category — the model assigns one
@@ -127,16 +129,13 @@ class TasksWindow(QWidget):
         self._status_message = ""
         self._priority_note = ""
 
-        # Quarantine notices are shown once per file per session, not on every
-        # refresh.
-        self._reported_corrupt: set[str] = set()
-
         # One ranking worker at a time. A refresh requested while it runs is
         # coalesced: its result is discarded and ranking starts again, so the
         # list never shows a stale order.
         self._ranking_thread: QThread | None = None
         self._ranking_worker: _RankingWorker | None = None
         self._refresh_pending = False
+        self._shut_down = False
 
         root = QVBoxLayout(self)
         root.addWidget(QLabel("Here are your tasks!!"))
@@ -190,6 +189,8 @@ class TasksWindow(QWidget):
         root.addLayout(add_row)
 
         self.status_label = QLabel("")
+        # Several data problems are listed one per line, with full paths.
+        self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
         self._refresh_list()
@@ -219,25 +220,12 @@ class TasksWindow(QWidget):
         drains the queue and explains them once instead of letting a corrupt
         file look like an empty task list.
         """
-        for issue in pop_issues():
-            self._status_message = issue.message()
-            if issue.kind != "corrupt" or issue.corrupt_path is None:
-                continue
-            key = str(issue.corrupt_path)
-            if key in self._reported_corrupt:
-                continue
-            self._reported_corrupt.add(key)
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Icon.Warning)
-            box.setWindowTitle("Task data recovered")
-            box.setText(issue.message())
-            box.setInformativeText(
-                "The original file was kept so you can inspect or recover it. "
-                "Move it back to restore those tasks."
-            )
-            box.setStandardButtons(QMessageBox.StandardButton.Ok)
-            box.setModal(False)
-            box.open()
+        # Every problem found since the last drain is listed, one per line,
+        # instead of each overwriting the previous one. Dialogs are shown once
+        # per event, shared with the main window's monitor.
+        summary = drain_data_issues(self)
+        if summary:
+            self._status_message = summary
         self._apply_status()
 
     def _report_write_failure(self, path: str, error: OSError) -> None:
@@ -252,6 +240,8 @@ class TasksWindow(QWidget):
         the GUI thread froze the window. The last rendered order stays on
         screen until a newer result arrives.
         """
+        if self._shut_down:
+            return
         if self._ranking_thread is not None:
             # A newer refresh supersedes the result still being computed.
             self._refresh_pending = True
@@ -262,25 +252,26 @@ class TasksWindow(QWidget):
         self._start_ranking()
 
     def _start_ranking(self) -> None:
-        """Run one prioritization pass in a worker thread."""
-        self._ranking_thread = QThread(self)
+        """Run one prioritization pass in a worker thread.
+
+        The thread has no Qt parent and is kept alive by ``worker_threads``
+        until the pass ends, so closing or deleting this window mid-pass can
+        never destroy a running QThread; the app's quit path waits for it.
+        """
         self._ranking_worker = _RankingWorker()
-        self._ranking_worker.moveToThread(self._ranking_thread)
-        self._ranking_thread.started.connect(self._ranking_worker.run)
+        self._ranking_thread = new_worker_thread(self._ranking_worker)
         self._ranking_worker.finished.connect(self._on_ranking_done)
         self._ranking_worker.failed.connect(self._on_ranking_failed)
-        self._ranking_worker.finished.connect(self._ranking_thread.quit)
-        self._ranking_worker.failed.connect(self._ranking_thread.quit)
         self._ranking_thread.finished.connect(self._cleanup_ranking)
         self._ranking_thread.start()
 
     def _on_ranking_done(self, result: dict) -> None:
-        if self._refresh_pending:
+        if self._refresh_pending or self._shut_down:
             return  # a newer refresh will render instead
         self._render_ranking(result)
 
     def _on_ranking_failed(self, message: str) -> None:
-        if self._refresh_pending:
+        if self._refresh_pending or self._shut_down:
             return
         self._priority_note = ""
         self._set_status(f"Ranking failed: {message}")
@@ -290,15 +281,36 @@ class TasksWindow(QWidget):
         self._report_data_issues()
 
     def _cleanup_ranking(self) -> None:
-        if self._ranking_worker is not None:
-            self._ranking_worker.deleteLater()
-            self._ranking_worker = None
-        if self._ranking_thread is not None:
-            self._ranking_thread.deleteLater()
-            self._ranking_thread = None
-        if self._refresh_pending:
+        # The thread and worker are released by worker_threads once finished.
+        self._ranking_worker = None
+        self._ranking_thread = None
+        if self._refresh_pending and not self._shut_down:
             self._refresh_pending = False
             self._refresh_list()
+
+    def is_ranking(self) -> bool:
+        """True while a ranking pass is still running."""
+        return self._ranking_thread is not None and self._ranking_thread.isRunning()
+
+    def shutdown(self, timeout_ms: int = 0) -> bool:
+        """Stop reacting to ranking and optionally wait for the running pass.
+
+        The pass is one blocking call and cannot be interrupted, so this drops
+        any queued re-rank, ignores the pending result and waits at most
+        ``timeout_ms``. Returns True when no pass is running any more. The
+        thread stays tracked either way, so it is never destroyed while live.
+        """
+        self._shut_down = True
+        self._refresh_pending = False
+        if self._ranking_thread is None:
+            return True
+        return self._ranking_thread.wait(max(0, timeout_ms))
+
+    def closeEvent(self, event):
+        # Closing only hides the window; a queued re-rank is pointless now,
+        # since showing it again starts a fresh pass anyway.
+        self._refresh_pending = False
+        super().closeEvent(event)
 
     def _render_ranking(self, result: dict) -> None:
         """Apply a ranking result, falling back to the stored order."""
@@ -805,8 +817,10 @@ class BatchProposalDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Confirm Tasks from Document")
         self.setMinimumSize(700, 500)
-        # Non-modal: don't call setModal(True)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        # Non-modal: don't call setModal(True). As a child of the chat panel
+        # it already stays above the app window, without covering others.
+        # Exactly one of confirmed/cancelled is emitted, however it closes.
+        self._decided = False
 
         tokens = get_current_theme_tokens()
         self._duplicate_tint = QColor(tokens.get("sys_color_alert", "#ff6b8a"))
@@ -945,12 +959,26 @@ class BatchProposalDialog(QDialog):
             QMessageBox.warning(self, "Invalid Deadlines", "\n".join(invalid_deadlines))
             return
 
+        self._decided = True
         self.confirmed.emit([task for _row, task in selected_tasks])
         self.close()
 
     def _on_cancel(self) -> None:
-        self.cancelled.emit()
+        if not self._decided:
+            self._decided = True
+            self.cancelled.emit()
         self.close()
+
+    def reject(self) -> None:
+        """Esc counts as Cancel, so the proposal is recorded as declined."""
+        self._on_cancel()
+
+    def closeEvent(self, event) -> None:
+        """Closing with the window's X also counts as Cancel."""
+        if not self._decided:
+            self._decided = True
+            self.cancelled.emit()
+        super().closeEvent(event)
 
     def get_selected_tasks(self) -> list[tuple[int, dict]]:
         """Return list of (row_index, task_dict) for checked rows."""
@@ -973,6 +1001,9 @@ class BatchProposalDialog(QDialog):
                             "title": title,
                             "category": category,
                             "deadline": deadline if deadline else None,
+                            # Which proposed task this row was, so skipped
+                            # rows are known even after a title edit.
+                            "source_index": row,
                         }
                     ))
         return result

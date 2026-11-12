@@ -17,6 +17,7 @@ Nothing here imports Qt: the model is used and tested without a GUI.
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -46,6 +47,34 @@ def strip_date_prefix(text: str) -> str:
     return _DATE_PREFIX_RE.sub("", text, count=1)
 
 
+# Attached documents as stored in a Player message: a <document name="…">
+# block (full or compacted), or a "[uploaded document: …]" line when the file
+# could not be read.
+_DOCUMENT_BLOCK_RE = re.compile(
+    r'<document\s+name="(?P<name>[^"]*)"[^>]*>.*?</document>\s*', re.DOTALL | re.IGNORECASE
+)
+_FAILED_DOCUMENT_RE = re.compile(
+    r"^\[uploaded document: (?P<name>[^\]\n]*?)(?: — [^\]\n]*)?\]\s*$\n?", re.MULTILINE
+)
+
+
+def split_documents(text: str) -> tuple[list[str], str]:
+    """Split a stored Player message into its documents' names and the rest.
+
+    The documents are the model's copy of the attachments; on screen they are
+    shown as attachment names, not as the raw (often compacted) text.
+    """
+    names: list[str] = []
+
+    def _take(match: re.Match) -> str:
+        names.append(html.unescape(match.group("name")).strip())
+        return ""
+
+    rest = _DOCUMENT_BLOCK_RE.sub(_take, text or "")
+    rest = _FAILED_DOCUMENT_RE.sub(_take, rest)
+    return [n for n in names if n], rest.strip()
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -63,11 +92,18 @@ class ChatMessage:
     quotes: list[Quote] = field(default_factory=list)
     # Paths of the files attached to a Player message, for the bubble preview.
     attachments: list[str] = field(default_factory=list)
+    # Names of documents already embedded in ``text`` (a stored message
+    # reopened from history), shown like attachments but not re-read.
+    documents: list[str] = field(default_factory=list)
     # Flags. Display keeps timestamps out of scope for now, but the model
     # carries them so later work does not need another migration.
     stopped: bool = False
     error: str = ""
     streaming: bool = False
+    # Id of the stored LangGraph message this one came from (or will be stored
+    # as). Regenerate / retry / edit-and-resend rewind the conversation to
+    # just before it, so the model's memory matches what is on screen.
+    source_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.timestamp:
@@ -76,7 +112,10 @@ class ChatMessage:
             # A stored Player message carries its quotes as delimited blocks;
             # an in-memory one is built the same way before it is shown, so
             # both paths agree on what the body is.
-            quotes, body = parse_quotes(self.text)
+            documents, rest = split_documents(self.text)
+            if documents:
+                self.documents = documents
+            quotes, body = parse_quotes(rest)
             if quotes:
                 self.quotes = quotes
             self.body = body
@@ -125,15 +164,20 @@ class Transcript:
             if not text.strip():
                 continue
 
+            source_id = str(getattr(message, "id", "") or "")
             if role == "human":
                 text = strip_date_prefix(text)
                 if is_app_note(text):
                     transcript.append_note(note_body(text))
                 else:
-                    transcript.append(USER, text)
+                    transcript.append(USER, text, source_id=source_id)
             elif role == "ai":
-                # Tool-call-only turns have no text worth showing.
-                transcript.append(ASSISTANT, text)
+                # A turn closed after Stop is recorded as the model's output
+                # (see memory.repair_interrupted_turn); show it as a note.
+                if is_app_note(text):
+                    transcript.append_note(note_body(text))
+                else:
+                    transcript.append(ASSISTANT, text, source_id=source_id)
         return transcript
 
     # ----- reading -----
@@ -192,11 +236,9 @@ class Transcript:
         if index < 0:
             return None
         message = replace(self.messages[index], text=text)
-        if message.role == USER:
-            quotes, body = parse_quotes(text)
-            message.quotes = quotes or message.quotes
-            message.body = body
-        else:
+        # ``replace`` re-runs __post_init__, which splits a Player message
+        # into its documents, quotes and body.
+        if message.role != USER:
             message.body = text
         self.messages[index] = message
         return message

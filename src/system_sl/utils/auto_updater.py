@@ -311,19 +311,72 @@ def _safe_extract_zip(archive: zipfile.ZipFile, dest_dir: Path) -> None:
             shutil.copyfileobj(src, dst)
 
 
+def _unsafe_tar_name(name: str) -> bool:
+    """True when a tar member or link name is absolute or climbs with ``..``."""
+    normalized = name.replace("\\", "/")
+    parts = PurePosixPath(normalized)
+    return (
+        parts.is_absolute()
+        or ".." in parts.parts
+        or bool(re.match(r"^[A-Za-z]:", normalized))
+    )
+
+
+def _checked_tar_members(archive: tarfile.TarFile, dest_dir: Path) -> list[tarfile.TarInfo]:
+    """Validate every member of ``archive`` for extraction under ``dest_dir``.
+
+    Mirrors :func:`_safe_extract_zip` for interpreters without tarfile's
+    ``filter="data"``: absolute names, ``..`` components, links whose target
+    is absolute or climbs out, and device or FIFO members are all refused.
+    Setuid, setgid and sticky bits are cleared. Raises ``ValueError``.
+    """
+    root = dest_dir.resolve()
+    members = []
+    for member in archive.getmembers():
+        name = member.name
+        if _unsafe_tar_name(name):
+            raise ValueError(f"Refusing to extract '{name}' outside {root}")
+
+        if member.issym() or member.islnk():
+            # A link target with no ".." and no leading "/" can only point
+            # further down, so it cannot escape even through other links.
+            if _unsafe_tar_name(member.linkname):
+                raise ValueError(
+                    f"Refusing to extract link '{name}' -> '{member.linkname}'"
+                )
+        elif not (member.isreg() or member.isdir()):
+            raise ValueError(f"Refusing to extract non-regular file '{name}'")
+
+        target = root.joinpath(*PurePosixPath(name.replace("\\", "/")).parts)
+        if not target.resolve().is_relative_to(root):
+            raise ValueError(f"Refusing to extract '{name}' outside {root}")
+
+        member.mode &= ~(stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX)
+        members.append(member)
+    return members
+
+
+def _safe_extract_tar(archive: tarfile.TarFile, dest_dir: Path) -> None:
+    """Extract a tar under ``dest_dir``, refusing anything that could escape it.
+
+    Uses tarfile's ``filter="data"`` where available (3.12+, and security
+    backports of 3.11). Older interpreters used to fall back to a plain
+    ``extractall`` with no path-traversal protection at all; they now get
+    the same checks the zip path performs.
+    """
+    if hasattr(tarfile, "data_filter"):
+        archive.extractall(path=dest_dir, filter="data")
+        return
+    archive.extractall(path=dest_dir, members=_checked_tar_members(archive, dest_dir))
+
+
 def extract_binary(archive_path: Path, dest_dir: Path) -> Path:
     """Extract the system-sl binary from a tar.xz or zip archive."""
     binary_name = "system-sl.exe" if os.name == "nt" else "system-sl"
 
     if archive_path.suffix == ".xz" or archive_path.name.endswith(".tar.xz"):
         with tarfile.open(archive_path, "r:xz") as tar:
-            # filter="data" blocks path-traversal (absolute/.. paths) and is
-            # the safe default; older Pythons (<3.12) lack the kwarg so we
-            # fall back to the plain extractall.
-            try:
-                tar.extractall(path=dest_dir, filter="data")
-            except TypeError:
-                tar.extractall(path=dest_dir)
+            _safe_extract_tar(tar, dest_dir)
     elif archive_path.suffix == ".zip":
         with zipfile.ZipFile(archive_path, "r") as zf:
             _safe_extract_zip(zf, dest_dir)

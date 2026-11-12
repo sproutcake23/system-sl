@@ -289,3 +289,342 @@ def test_thread_messages_are_plain_langchain_messages(config_dir):
 
     for message in session.messages():
         assert isinstance(message, (HumanMessage, AIMessage, ToolMessage))
+
+
+# =============================================================================
+# 4. INTERRUPTED TURNS (Stop at every point of the graph)
+# =============================================================================
+
+
+class _ScriptedModel(FakeChatModel):
+    """Raise on the listed call numbers (1-based), otherwise answer from replies."""
+
+    fail_on: list = []
+
+    def _next_reply(self, messages):
+        self.seen.append(list(messages))
+        self.calls += 1
+        if self.calls in self.fail_on:
+            raise RuntimeError("stream cancelled")
+        index = min(self.calls - 1 - len([n for n in self.fail_on if n < self.calls]), len(self.replies) - 1)
+        return self.replies[max(index, 0)]
+
+
+def _call(name: str, call_id: str, **args) -> dict:
+    return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
+
+
+def _scripted_agent(replies, fail_on, tools):
+    model = _ScriptedModel(replies=list(replies), fail_on=list(fail_on))
+    agent = create_agent(
+        model=model,
+        tools=tools,
+        system_prompt="test prompt",
+        checkpointer=memory_mod.get_checkpointer(),
+    )
+    return agent, model
+
+
+def _assert_clean_history(messages):
+    """No dangling tool call and no orphan tool result."""
+    asked = {c["id"] for m in messages for c in (getattr(m, "tool_calls", None) or [])}
+    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+    assert asked == answered, f"unpaired tool traffic: asked={asked} answered={answered}"
+
+
+def _record_tool(calls):
+    @tool
+    def record(title: str) -> str:
+        """Record a title."""
+        calls.append(title)
+        return f"recorded {title}"
+
+    return record
+
+
+def test_stop_before_any_model_output_is_repaired(config_dir):
+    """(a) The model step dies before writing anything."""
+    agent, model = _scripted_agent([AIMessage(content="hello back")], fail_on=[1], tools=[])
+    session = ChatSession(thread_id="conv-stop-a", agent=agent)
+
+    with pytest.raises(RuntimeError):
+        session.run_turn("hello")
+    assert agent.get_state(session.config).next == ("model",)
+
+    assert session.run_turn("hello again") == "hello back"
+    assert agent.get_state(session.config).next == ()
+    assert len(_humans(session.messages())) == 2
+    _assert_clean_history(session.messages())
+
+
+def test_stop_after_tools_ran_keeps_their_results(config_dir):
+    """(c) Stop while the final answer streams, after a tool already ran.
+
+    This used to raise ``KeyError: 'model'`` in the repair and leave the
+    conversation unusable for good.
+    """
+    calls: list[str] = []
+    agent, model = _scripted_agent(
+        [
+            AIMessage(content="Recording.", tool_calls=[_call("record", "c1", title="Relativity")]),
+            AIMessage(content="all good"),
+        ],
+        fail_on=[2],
+        tools=[_record_tool(calls)],
+    )
+    session = ChatSession(thread_id="conv-stop-c", agent=agent)
+
+    with pytest.raises(RuntimeError):
+        session.run_turn("record relativity")
+    assert agent.get_state(session.config).next == ("model",)
+
+    assert session.run_turn("what happened?") == "all good"
+    messages = session.messages()
+
+    assert calls == ["Relativity"], "the tool must not run again"
+    assert agent.get_state(session.config).next == ()
+    _assert_clean_history(messages)
+    # The tool really ran: its call and result stay, and the model is told so.
+    assert any(isinstance(m, ToolMessage) and "Relativity" in str(m.content) for m in messages)
+    stop_notes = [str(m.content) for m in messages if memory_mod.is_app_note(str(m.content))]
+    assert len(stop_notes) == 1
+    assert "record" in stop_notes[0]
+    assert "nothing was changed" not in stop_notes[0]
+    # And the model saw it on the next turn.
+    assert any("record" in str(getattr(m, "content", "")) and memory_mod.STOP_NOTE_PREFIX in str(getattr(m, "content", "")) for m in model.seen[-1])
+
+
+def test_stop_after_parallel_tools_ran(config_dir):
+    """(c) with two tool calls that both finished."""
+    calls: list[str] = []
+    agent, _model = _scripted_agent(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[_call("record", "c1", title="A"), _call("record", "c2", title="B")],
+            ),
+            AIMessage(content="ok"),
+        ],
+        fail_on=[2],
+        tools=[_record_tool(calls)],
+    )
+    session = ChatSession(thread_id="conv-stop-parallel", agent=agent)
+
+    with pytest.raises(RuntimeError):
+        session.run_turn("record both")
+    session.run_turn("continue")
+
+    assert sorted(calls) == ["A", "B"]
+    assert agent.get_state(session.config).next == ()
+    _assert_clean_history(session.messages())
+
+
+def test_repair_is_idempotent_and_reports_nothing_to_do(config_dir):
+    agent, _model = _scripted_agent([AIMessage(content="hi")], fail_on=[1], tools=[])
+    session = ChatSession(thread_id="conv-stop-idem", agent=agent)
+    with pytest.raises(RuntimeError):
+        session.run_turn("hello")
+
+    assert memory_mod.repair_interrupted_turn(agent, session.config) is True
+    assert memory_mod.repair_interrupted_turn(agent, session.config) is False
+    assert agent.get_state(session.config).next == ()
+
+
+def test_stopped_turn_renders_as_a_note(config_dir):
+    """The closing message is shown dimmed, not as something the System said."""
+    from system_sl.chatbot.transcript import ASSISTANT, NOTE, Transcript
+
+    calls: list[str] = []
+    agent, _model = _scripted_agent(
+        [AIMessage(content="", tool_calls=[_call("record", "c1", title="X")]), AIMessage(content="done")],
+        fail_on=[2],
+        tools=[_record_tool(calls)],
+    )
+    session = ChatSession(thread_id="conv-stop-render", agent=agent)
+    with pytest.raises(RuntimeError):
+        session.run_turn("record x")
+    memory_mod.repair_interrupted_turn(agent, session.config)
+
+    transcript = Transcript.from_history(session.messages())
+    roles = [m.role for m in transcript]
+    assert roles[-1] == NOTE
+    assert ASSISTANT not in roles
+    assert not transcript.messages[-1].text.startswith(memory_mod.STOP_NOTE_PREFIX)
+
+
+def test_rollback_keeps_answered_calls_and_drops_the_rest():
+    """A pending tools step with one call answered and one not."""
+    from langchain_core.messages import HumanMessage
+
+    messages = [
+        HumanMessage(content="add two", id="h1"),
+        AIMessage(
+            content="Adding.",
+            tool_calls=[_call("add_task", "c1", title="Real"), _call("add_task", "c2", title="Pending")],
+            id="a1",
+        ),
+        ToolMessage(content="added Real", tool_call_id="c1", name="add_task", id="t1"),
+    ]
+    patched, note = memory_mod._rollback_messages(messages)
+
+    assert patched.id == "a1"
+    assert [c["id"] for c in patched.tool_calls] == ["c1"]
+    assert patched.content == "Adding."
+    assert "nothing was changed" not in note.content
+    assert memory_mod.is_app_note(note.content)
+
+
+# =============================================================================
+# 5. REWIND (regenerate / retry / edit-and-resend)
+# =============================================================================
+
+
+def test_regenerate_rewind_leaves_one_copy_of_the_question(config_dir):
+    agent, model = _agent(
+        AIMessage(content="first try"),
+        AIMessage(content="second try"),
+    )
+    session = ChatSession(thread_id="conv-regen", agent=agent)
+    session.run_turn("what is 2+2?", message_id="q1")
+
+    removed = session.rewind_before("q1")
+    assert removed == 2
+    assert session.messages() == []
+
+    session.run_turn("what is 2+2?", message_id="q1-again")
+    stored = session.messages()
+    assert _humans(stored) == ["what is 2+2?"]
+    assert "first try" not in _texts(stored)
+    assert "second try" in _texts(stored)
+    # The model never saw the discarded answer.
+    assert not any("first try" in text for text in _texts(model.seen[-1]))
+
+
+def test_edit_rewind_drops_the_message_and_everything_after(config_dir):
+    calls: list[str] = []
+    agent, model = _agent(
+        AIMessage(content="ok one"),
+        AIMessage(content="", tool_calls=[_call("record", "c1", title="T")]),
+        AIMessage(content="ok two"),
+        AIMessage(content="edited answer"),
+        tools=[_record_tool(calls)],
+    )
+    session = ChatSession(thread_id="conv-edit", agent=agent)
+    session.run_turn("one", message_id="u1")
+    session.run_turn("two", message_id="u2")
+    assert len(session.messages()) == 6  # h, ai, h, ai(call), tool, ai
+
+    session.rewind_before("u2")
+    assert _humans(session.messages()) == ["one"]
+    _assert_clean_history(session.messages())
+
+    session.run_turn("two, edited", message_id="u2b")
+    assert _humans(session.messages()) == ["one", "two, edited"]
+    assert agent.get_state(session.config).next == ()
+    assert not any("two" == text for text in _texts(model.seen[-1]))
+
+
+def test_rewind_after_an_interrupted_turn(config_dir):
+    """Retry after a failed turn: repair, then rewind past the failed question."""
+    agent, model = _scripted_agent([AIMessage(content="answer")], fail_on=[1], tools=[])
+    session = ChatSession(thread_id="conv-retry", agent=agent)
+    with pytest.raises(RuntimeError):
+        session.run_turn("hello", message_id="h1")
+
+    session.rewind_before("h1")
+    assert session.messages() == []
+    assert session.run_turn("hello", message_id="h2") == "answer"
+    assert _humans(session.messages()) == ["hello"]
+
+
+def test_rewind_unknown_message_raises_lookup_error(config_dir):
+    agent, _model = _agent(AIMessage(content="hi"))
+    session = ChatSession(thread_id="conv-rewind-missing", agent=agent)
+    session.run_turn("hello", message_id="known")
+    with pytest.raises(LookupError):
+        session.rewind_before("never-stored")
+    assert _humans(session.messages()) == ["hello"]
+
+
+def test_transcript_keeps_the_stored_message_ids(config_dir):
+    from system_sl.chatbot.transcript import ASSISTANT, USER, Transcript
+
+    agent, _model = _agent(AIMessage(content="hi"))
+    session = ChatSession(thread_id="conv-ids", agent=agent)
+    session.run_turn("hello", message_id="stored-1")
+
+    transcript = Transcript.from_history(session.messages())
+    user = next(m for m in transcript if m.role == USER)
+    reply = next(m for m in transcript if m.role == ASSISTANT)
+    assert user.source_id == "stored-1"
+    assert reply.source_id
+
+
+def test_confirmation_after_a_stopped_turn_leaves_the_thread_idle(config_dir):
+    agent, _model = _scripted_agent([AIMessage(content="ok")], fail_on=[1], tools=[])
+    session = ChatSession(thread_id="conv-note-after-stop", agent=agent)
+    with pytest.raises(RuntimeError):
+        session.run_turn("hello")
+    memory_mod.repair_interrupted_turn(agent, session.config)
+
+    assert session.record_task_confirmation(declined=[("Gym", "health")])
+    assert agent.get_state(session.config).next == ()
+    # No second stop note appears on the next turn.
+    session.run_turn("next")
+    notes = [t for t in _texts(session.messages()) if t.startswith(memory_mod.STOP_NOTE_PREFIX)]
+    assert len(notes) == 1
+
+
+def test_tool_activity_starts_before_and_ends_after_the_tool(config_dir):
+    events: list[tuple[str, str]] = []
+    calls: list[str] = []
+
+    @tool
+    def record(title: str) -> str:
+        """Record a title."""
+        events.append(("ran", title))
+        calls.append(title)
+        return "ok"
+
+    agent, _model = _agent(
+        AIMessage(content="", tool_calls=[_call("record", "c1", title="T")]),
+        AIMessage(content="done"),
+        tools=[record],
+    )
+    session = ChatSession(thread_id="conv-tool-events", agent=agent)
+    list(session.stream_turn("go", on_tool=lambda name, status, _d: events.append((status, name))))
+
+    assert events == [("start", "record"), ("ran", "T"), ("end", "record")]
+
+
+def test_agent_is_rebuilt_when_the_config_file_changes(config_dir, monkeypatch):
+    """A config edited outside the app is picked up on the next lookup."""
+    import os
+    from dataclasses import dataclass
+
+    from system_sl.chatbot import config as config_mod
+    from system_sl.chatbot import system as system_mod
+
+    config_file = config_dir / config_mod.CONFIG_FILENAME
+    config_file.write_text("{}")
+    monkeypatch.setattr(config_mod, "get_tasks_file_path", lambda name: str(config_dir / name))
+
+    @dataclass
+    class _Config:
+        system_model: str = "m"
+        system_prompt_addendum: str = ""
+
+    monkeypatch.setattr(system_mod, "load_config", lambda: _Config())
+    monkeypatch.setattr(system_mod, "validate_config", lambda _c: [])
+    monkeypatch.setattr(
+        system_mod, "create_llm_from_config", lambda _c: FakeChatModel(replies=[AIMessage(content="x")])
+    )
+    reset_agent_cache()
+
+    first, _ = system_mod.build_agent_for_model("m")
+    assert system_mod.build_agent_for_model("m")[0] is first, "unchanged config: reuse"
+
+    stat = config_file.stat()
+    os.utime(config_file, (stat.st_atime, stat.st_mtime + 5))
+    assert system_mod.build_agent_for_model("m")[0] is not first, "edited config: rebuild"
+    reset_agent_cache()

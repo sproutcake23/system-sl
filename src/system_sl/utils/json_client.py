@@ -67,7 +67,7 @@ def load_data_result(filepath: str) -> LoadResult:
         record_issue(DataIssue("unreadable", path, detail=str(e)))
         return LoadResult(LoadStatus.UNREADABLE, path, error=str(e))
 
-    if status is LoadStatus.CORRUPT:
+    if status is LoadStatus.CORRUPT and backup is not None:
         log.warning("Quarantined corrupt file %s to %s", path, backup)
 
     return LoadResult(status, path, data=data, corrupt_path=backup)
@@ -86,7 +86,7 @@ def load_data(filepath: str) -> dict | list:
     Returns:
         dict | list: The parsed data (dict or list). Returns an empty dict if
             the file is missing, empty, corrupt, or unreadable. Corrupt files
-            are backed up to ``<file>.corrupt`` before this returns.
+            are backed up to ``<file>.corrupt-<timestamp>`` before this returns.
     """
     result = load_data_result(filepath)
     return result.data if result.data is not None else {}

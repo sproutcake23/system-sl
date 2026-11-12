@@ -24,7 +24,13 @@ import threading
 from datetime import datetime, timezone
 from typing import Sequence
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    ToolMessage,
+)
 from langsmith import uuid7
 
 from system_sl.utils.atomic_json import atomic_write_json, load_json_or_default
@@ -148,8 +154,23 @@ def repair_interrupted_turn(agent, config: dict) -> bool:
     wrong, so the interrupted tool call is rolled back (the model's words stay,
     the call is dropped) and a note tells the model nothing was changed.
 
+    Two shapes can be left behind:
+
+    * **Paused before the tools node** (``next == ('tools',)``): the model asked
+      for a tool that never finished. Its call is rolled back (the model's
+      words stay) and a note says so.
+    * **Paused before the model node** (``next == ('model',)``): the model step
+      died — before it wrote anything, or after tools had already run (Stop
+      while the final answer streams). Tool results that are in the history
+      really happened, so they are kept, and the turn is closed by writing a
+      short stop note *as the model's output*. The model node's edge then sees
+      an answer with no tool calls and routes to END. (Writing an empty update
+      as the model instead re-routes to "model", which is not a destination of
+      that edge, and raises ``KeyError: 'model'`` on every later turn.)
+
     Returns True when something was repaired. Raises only if the repair itself
-    cannot be written; callers treat that as a failed turn.
+    cannot be written, or the thread is still paused afterwards; callers treat
+    that as a failed turn.
     """
     state = agent.get_state(config)
     pending = tuple(state.next or ())
@@ -164,31 +185,112 @@ def repair_interrupted_turn(agent, config: dict) -> bool:
                 "conversation %s is paused before the tools node with no tool call",
                 _thread_id(config),
             )
-            return False
-        agent.update_state(config, {"messages": rollback})
+        else:
+            agent.update_state(config, {"messages": rollback})
+            logger.info(
+                "rolled back an interrupted tool call in conversation %s",
+                _thread_id(config),
+            )
+        state = agent.get_state(config)
+        pending = tuple(state.next or ())
+
+    if pending:
+        messages = list(state.values.get("messages") or [])
+        close = AIMessage(content=_model_stop_note(messages))
+        agent.update_state(config, {"messages": [close]}, as_node="model")
         logger.info(
-            "rolled back an interrupted tool call in conversation %s",
+            "closed an interrupted model step in conversation %s",
             _thread_id(config),
         )
-    else:
-        # The model step died before writing anything. Mark it done with no
-        # output so the thread can accept the next message.
-        agent.update_state(config, {}, as_node="model")
-        logger.info(
-            "cleared an interrupted model step in conversation %s",
-            _thread_id(config),
+
+    remaining = tuple(agent.get_state(config).next or ())
+    if remaining:
+        raise RuntimeError(
+            f"conversation is still paused at {remaining} after the repair"
         )
     return True
+
+
+def rewind_before(agent, config: dict, message_id: str) -> int:
+    """Remove the stored message ``message_id`` and everything after it.
+
+    Used by regenerate, retry and edit-and-resend: the conversation goes back
+    to how it was before that Player message, so resending it does not leave
+    the old question, the discarded answer, or their tool traffic in the
+    model's memory. Removal goes through the ``messages`` reducer
+    (``RemoveMessage``), the supported way to delete from LangGraph state; the
+    thread id, and so the conversation index entry, are unchanged.
+
+    Returns how many messages were removed. Raises ``LookupError`` when the
+    message is not in the conversation (it never reached the checkpoint).
+    """
+    state = agent.get_state(config)
+    if state.next:
+        raise RuntimeError("the conversation has an unfinished turn; repair it first")
+    messages = list(state.values.get("messages") or [])
+    index = next(
+        (i for i, message in enumerate(messages) if getattr(message, "id", None) == message_id),
+        None,
+    )
+    if index is None:
+        raise LookupError(f"message {message_id} is not in conversation {_thread_id(config)}")
+
+    removals = [
+        RemoveMessage(id=message.id)
+        for message in messages[index:]
+        if getattr(message, "id", None)
+    ]
+    # Written as the model's step: its edge then sees no pending tool call and
+    # ends the turn. Left to LangGraph to infer, the writer after a repaired
+    # turn is the wrong node and the thread stays paused at "model".
+    agent.update_state(config, {"messages": removals}, as_node="model")
+
+    remaining = tuple(agent.get_state(config).next or ())
+    if remaining:
+        raise RuntimeError(
+            f"conversation is paused at {remaining} after rewinding"
+        )
+    logger.info(
+        "rewound conversation %s by %d message(s)", _thread_id(config), len(removals)
+    )
+    return len(removals)
+
+
+def _completed_tools_in_turn(messages: Sequence[BaseMessage]) -> list[str]:
+    """Names of the tools that returned a result since the Player's last message."""
+    names: list[str] = []
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        if isinstance(message, ToolMessage):
+            names.append(getattr(message, "name", None) or "a tool")
+    names.reverse()
+    return names
+
+
+def _model_stop_note(messages: Sequence[BaseMessage]) -> str:
+    """The text that closes a turn whose model step was interrupted."""
+    completed = _completed_tools_in_turn(messages)
+    if completed:
+        unique = list(dict.fromkeys(completed))
+        return (
+            STOP_NOTE_PREFIX
+            + f" The Player stopped this reply after {', '.join(unique)} had"
+            " already run; those results stand, but the answer was not finished."
+        )
+    return STOP_NOTE_PREFIX + " The Player stopped this reply before it was finished."
 
 
 def _rollback_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage] | None:
     """Describe how to undo an interrupted tool call, or None if there is none.
 
-    Nothing executed yet: the model's text is kept and only the dangling call is
-    dropped (the reducer replaces a message with the same id). If some tool
-    results were already written, the whole tail is removed instead, so no
-    orphan tool message survives. Either way the last message becomes the
-    stop note, which sends the graph to END.
+    Calls that already have a result in the history ran for real: they and
+    their results are kept. Only calls with no result are dropped from the
+    model's message (the reducer replaces a message with the same id), so no
+    call is left without an answer and no result is left without its call. The
+    stop note says which tools were cancelled. Tool calls run in parallel can
+    finish without their result being stored, so with more than one call the
+    note does not promise that nothing changed.
     """
     last_ai = next(
         (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], AIMessage)),
@@ -197,19 +299,30 @@ def _rollback_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage] | N
     if last_ai is None or not messages[last_ai].tool_calls:
         return None
 
-    trailing = list(messages[last_ai + 1 :])
-    if not trailing:
-        patched = messages[last_ai].model_copy(
-            update={"tool_calls": [], "invalid_tool_calls": []}
-        )
-        return [patched, HumanMessage(content=STOP_NOTE)]
+    ai_message = messages[last_ai]
+    answered = {
+        getattr(message, "tool_call_id", None)
+        for message in messages[last_ai + 1 :]
+        if isinstance(message, ToolMessage)
+    }
+    kept = [call for call in ai_message.tool_calls if call.get("id") in answered]
+    dropped = [call for call in ai_message.tool_calls if call.get("id") not in answered]
+    if not dropped:
+        return None
 
-    removals = [
-        RemoveMessage(id=message.id)
-        for message in messages[last_ai:]
-        if getattr(message, "id", None)
-    ]
-    return [*removals, HumanMessage(content=STOP_NOTE)]
+    patched = ai_message.model_copy(
+        update={"tool_calls": kept, "invalid_tool_calls": []}
+    )
+    if len(ai_message.tool_calls) == 1:
+        note = STOP_NOTE
+    else:
+        names = ", ".join(dict.fromkeys(call.get("name") or "a tool" for call in dropped))
+        note = (
+            STOP_NOTE_PREFIX
+            + f" The Player stopped this reply while {names} was running; it may"
+            " not have finished, so check before assuming it changed anything."
+        )
+    return [patched, HumanMessage(content=note)]
 
 
 def _thread_id(config: dict) -> str:
