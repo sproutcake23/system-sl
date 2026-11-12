@@ -228,3 +228,40 @@ def test_attachment_text_is_compacted_even_when_the_reply_fails(panel, tmp_path)
     assert len(humans) == 1
     assert "notes.txt" in humans[0]
     assert len(humans[0]) < 3_000, "the full document stayed in the history"
+
+
+def test_streaming_writes_completed_blocks_once_and_keeps_selection(panel):
+    """A growing answer is appended to, and a selection inside it survives."""
+    widget, app = panel
+    widget._current_model = "fake-model"
+    widget._reset_stream_state()
+    widget._start_answer_line()
+
+    assert widget._stable_answer_boundary("alpha\n\nbeta") == 7
+    assert widget._stable_answer_boundary("```\na\n\nb\n```") == 0
+
+    for chunk in ["alpha\n\n", "beta", " gamma\n\n", "tail"]:
+        widget._on_chunk(chunk)
+        widget._render_answer()
+
+    text = widget.transcript.toPlainText()
+    assert "alpha" in text and "gamma" in text and "tail" in text
+    # The completed part stays in place; only the tail is rewritten.
+    assert widget._answer_committed_chars > 0
+
+    # Put a selection inside the answer and grow the tail: it must survive.
+    doc = widget.transcript.document()
+    from PySide6.QtGui import QTextCursor
+
+    cursor = QTextCursor(doc)
+    cursor.setPosition(widget._answer_start + 1)
+    cursor.setPosition(widget._answer_start + 6, QTextCursor.KeepAnchor)
+    widget.transcript.setTextCursor(cursor)
+    selected = widget.transcript.textCursor().selectedText()
+
+    widget._on_chunk(" more")
+    widget._render_answer()
+
+    after = widget.transcript.textCursor()
+    assert after.hasSelection()
+    assert after.selectedText() == selected
