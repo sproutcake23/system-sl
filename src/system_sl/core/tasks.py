@@ -228,11 +228,18 @@ def get_topn_task():
         active_titles = {t["title"] for t in active_tasks if isinstance(t, dict)}
 
         order_data = load_data(TASK_ORDER_FILE_PATH)
-        if not isinstance(order_data, dict) or "order" not in order_data or len(order_data["order"]) == 0:
-            save_manual_order(active_tasks)
-            order_data = load_data(TASK_ORDER_FILE_PATH)
+        if (
+            not isinstance(order_data, dict)
+            or "order" not in order_data
+            or len(order_data["order"]) == 0
+        ):
+            # Pure fallback: use the stored task order in memory. Writing here
+            # meant a read-only call (the notifier asks for the top tasks)
+            # created and rewrote the user's ordering as a side effect.
+            ntasks = [t["title"] for t in active_tasks if isinstance(t, dict)]
+        else:
+            ntasks = order_data["order"]
 
-    ntasks = order_data.get("order", [])
     ntasks = [t for t in ntasks if t in active_titles and t.strip()]
 
     return ntasks[:3]
