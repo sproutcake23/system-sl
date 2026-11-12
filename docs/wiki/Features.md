@@ -51,6 +51,8 @@ Talk to the SYSTEM, an AI mentor with task-aware tools (via LangChain). It can:
 
 Replies stream in with live markdown, and the **Stop** button interrupts one. Models that expose their reasoning show it as well. If the SYSTEM tries to add a quest you didn't explicitly ask for, a Yes/No bar asks you first.
 
+Every turn carries a short context block with today's date, a summary of your profile and your top quests, so the SYSTEM can answer without reading anything first. It only opens the profile or task list when you ask it to, when the block is not enough, or right after it changed something — a casual question does not cost you extra round trips. Conversations are remembered across turns, model switches and restarts; when a conversation outgrows the model's context window, the oldest turns are dropped and summarized.
+
 ### Providers and models
 
 Choose a provider under **Settings → LLM**:
@@ -78,7 +80,9 @@ Click the paperclip or drag a file onto the chat panel, then ask the SYSTEM to p
 | HTML | `.html`, `.htm` |
 | Text | `.txt`, `.md`, `.csv`, `.log`, `.json`, `.xml`, `.rst`, `.tex` |
 
-Scanned PDFs are read with OCR, in English. Release builds include everything it needs; from source, install `tesseract` and `poppler` on your system. Text from each document is limited to 40,000 characters.
+Scanned PDFs are read with OCR, in English. Release builds include everything it needs; from source, install `tesseract` and `poppler` on your system.
+
+All files of one message share a single budget, derived from the current model's context window. When a document is too long for it, the panel says how many characters were cut. The document text is wrapped in explicit `<document>` tags, and the SYSTEM is told to treat it as untrusted data rather than instructions.
 
 ## Google Tasks Sync
 

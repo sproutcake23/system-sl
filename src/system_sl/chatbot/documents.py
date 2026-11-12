@@ -6,9 +6,10 @@ and plain text formats (txt, md, csv, etc.).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
@@ -49,7 +50,78 @@ class ExtractionError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
-MAX_TEXT_LENGTH = 40_000  # characters
+
+# A hard ceiling on the text extracted from one file. It protects the
+# extractor and the process, not the model's context: what actually fits in
+# the context is the shared attachment budget (see ``apply_attachment_budget``
+# and ``system_sl.chatbot.context_window``).
+MAX_FILE_TEXT_LENGTH = 200_000  # characters
+
+# Kept for backwards compatibility with callers that imported the old name.
+MAX_TEXT_LENGTH = MAX_FILE_TEXT_LENGTH
+
+
+# ---------------------------------------------------------------------------
+# Attachment framing
+# ---------------------------------------------------------------------------
+
+# A document is wrapped in explicit tags so the model can tell data from
+# instructions. Anything inside the body that looks like the closing tag is
+# neutralised first, so a document cannot end its own block early and spill
+# text into the prompt.
+_DOCUMENT_TAG_RE = re.compile(r"<(\s*/?\s*document\b)", re.IGNORECASE)
+
+DOCUMENT_OPEN = '<document name="{name}"{attrs}>'
+DOCUMENT_CLOSE = "</document>"
+
+
+def escape_attribute(value: str) -> str:
+    """Escape a value so it cannot break out of an XML attribute."""
+    return (
+        (value or "")
+        .replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def escape_document_body(text: str) -> str:
+    """Neutralise anything in a document that could close the tag early.
+
+    Only sequences that look like a ``<document>`` tag are touched, so the
+    document text stays readable.
+    """
+    return _DOCUMENT_TAG_RE.sub(r"&lt;\1", text or "")
+
+
+@dataclass
+class Attachment:
+    """One attached document, after the shared budget was applied."""
+
+    name: str
+    text: str
+    original_chars: int = 0
+    truncated_chars: int = 0
+    pages: Optional[int] = None
+    warnings: list[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+    @property
+    def truncated(self) -> bool:
+        """Whether part of the document was cut to fit the budget."""
+        return self.truncated_chars > 0
+
+    def summary(self) -> str:
+        """Return the one-line description shown in the UI."""
+        if self.error:
+            return f"{self.name}: {self.error}"
+        if self.truncated:
+            return (
+                f"{self.name}: {self.truncated_chars:,} of "
+                f"{self.original_chars:,} characters were cut to fit the context"
+            )
+        return f"{self.name}: {self.original_chars:,} characters"
 
 
 # ---------------------------------------------------------------------------
@@ -357,17 +429,18 @@ def extract_document(path: str | Path) -> DocumentText:
 
 
 def _finalize(text: str, pages: Optional[int], warnings: list[str]) -> DocumentText:
-    """Apply truncation limit and return DocumentText."""
+    """Apply the per-file safety ceiling and return DocumentText."""
     truncated = False
-    if len(text) > MAX_TEXT_LENGTH:
-        text = text[:MAX_TEXT_LENGTH] + "\n…[truncated]…"
+    if len(text) > MAX_FILE_TEXT_LENGTH:
+        text = text[:MAX_FILE_TEXT_LENGTH] + "\n…[truncated]…"
         truncated = True
-        warnings.append(f"Extracted text truncated to {MAX_TEXT_LENGTH} characters")
+        warnings.append(
+            f"Extracted text truncated to {MAX_FILE_TEXT_LENGTH} characters"
+        )
 
     # Strip control characters except newline and tab
     cleaned = "".join(ch for ch in text if ch == "\n" or ch == "\t" or ch >= " ")
     # Collapse excessive blank lines (more than 2 consecutive)
-    import re
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = cleaned.strip()
 
@@ -383,13 +456,212 @@ def _finalize(text: str, pages: Optional[int], warnings: list[str]) -> DocumentT
 # Convenience: format for chat message
 # ---------------------------------------------------------------------------
 
-def format_for_chat(doc: DocumentText, filename: str) -> str:
-    """Format extracted document text for inclusion in a chat message."""
-    lines = [f"[uploaded document: {filename}"]
-    if doc.pages is not None:
-        lines[0] += f" — {doc.pages} page(s)"
-    lines[0] += ", extracted text follows]"
-    if doc.warnings:
-        lines.append(f"[warnings: {'; '.join(doc.warnings)}]")
-    lines.append(doc.text)
+def format_for_chat(doc: DocumentText | Attachment, filename: str = "") -> str:
+    """Format a document for inclusion in a chat message.
+
+    The text is wrapped in explicit ``<document>`` tags so the model can tell
+    data from instructions, and anything in the body that could close the tag
+    early is neutralised. The system prompt states that document content is
+    untrusted data.
+    """
+    if isinstance(doc, Attachment):
+        name = doc.name or filename
+        text = doc.text
+        pages = doc.pages
+        warnings = list(doc.warnings)
+        truncated_chars = doc.truncated_chars
+        original_chars = doc.original_chars or len(text)
+    else:
+        name = filename
+        text = doc.text
+        pages = doc.pages
+        warnings = list(doc.warnings)
+        truncated_chars = 0
+        original_chars = len(text)
+
+    attrs = ""
+    if pages is not None:
+        attrs += f' pages="{int(pages)}"'
+    if truncated_chars:
+        attrs += ' truncated="true"'
+
+    lines = [DOCUMENT_OPEN.format(name=escape_attribute(name), attrs=attrs)]
+    if truncated_chars:
+        lines.append(
+            f"[truncated: {truncated_chars:,} of {original_chars:,} characters "
+            "were cut to fit the context window]"
+        )
+    if warnings:
+        lines.append(f"[warnings: {'; '.join(warnings)}]")
+    lines.append(escape_document_body(text))
+    lines.append(DOCUMENT_CLOSE)
     return "\n".join(lines)
+
+
+def format_attachments(attachments: list[Attachment]) -> str:
+    """Format every attachment of a message into one block of text."""
+    return "\n\n".join(format_for_chat(item) for item in attachments)
+
+
+def compact_document_blocks(text: str, keep_chars: int = 400) -> str:
+    """Replace document bodies with a short reference.
+
+    The full text of an attachment only matters for the turn that used it.
+    Leaving it in the history would bloat the checkpoint for every later
+    turn, so the body is replaced by a reference: the name, the first lines
+    and how much was there.
+    """
+    if not text or "<document" not in text:
+        return text
+
+    def replace(match: "re.Match[str]") -> str:
+        opening = match.group(1)
+        body = match.group(2)
+        name_match = re.search(r'name="([^"]*)"', opening)
+        name = name_match.group(1) if name_match else "document"
+        flat = " ".join(body.split())
+        head = flat[:keep_chars]
+        if len(head) < len(flat):
+            head += "…"
+        return (
+            f"{opening}\n"
+            f"[full text removed after the turn that used it: {len(body):,} characters]\n"
+            f"{head}\n"
+            f"{DOCUMENT_CLOSE}"
+        )
+
+    return re.sub(
+        r"(<document\b[^>]*>)(.*?)(</document>)",
+        replace,
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The shared attachment budget
+# ---------------------------------------------------------------------------
+
+def allocate_budget(lengths: list[int], budget: int) -> list[int]:
+    """Split ``budget`` characters across the files.
+
+    The budget is split evenly between the files. A file that is shorter
+    than its share keeps all of its text and hands the rest back, which then
+    goes to the files that were cut. A short file is therefore never
+    truncated to make room for a long one.
+    """
+    count = len(lengths)
+    if not count:
+        return []
+
+    allocation = [0] * count
+    pending = {index for index, length in enumerate(lengths) if length > 0}
+    left = max(0, int(budget))
+
+    while pending and left > 0:
+        share = left // len(pending)
+        if share <= 0:
+            break
+        given = 0
+        still_pending = set()
+        for index in sorted(pending):
+            take = min(share, lengths[index] - allocation[index])
+            allocation[index] += take
+            given += take
+            if allocation[index] < lengths[index]:
+                still_pending.add(index)
+        left -= given
+        pending = still_pending
+
+    if left > 0 and pending:
+        # The remainder that did not divide evenly goes to the largest file
+        # that still has room for it.
+        index = max(pending, key=lambda i: lengths[i] - allocation[i])
+        take = min(left, lengths[index] - allocation[index])
+        allocation[index] += take
+
+    return allocation
+
+
+def apply_attachment_budget(
+    attachments: list[Attachment],
+    budget_chars: int,
+) -> list[Attachment]:
+    """Cut the attachments down to a shared budget.
+
+    Every file of a message shares one budget, so two large documents cannot
+    each claim a full budget. The cut is proportional to the file size, and
+    each file records how much of it was lost.
+    """
+    if not attachments:
+        return attachments
+
+    lengths = [len(item.text) for item in attachments]
+    allocation = allocate_budget(lengths, budget_chars)
+
+    for item, allowed in zip(attachments, allocation):
+        if len(item.text) <= allowed:
+            item.truncated_chars = 0
+            continue
+        item.truncated_chars = len(item.text) - allowed
+        item.text = item.text[:allowed]
+    return attachments
+
+
+def build_attachments(
+    paths: list[str | Path],
+    budget_chars: int,
+) -> list[Attachment]:
+    """Extract every file and fit them into the shared budget.
+
+    A file that cannot be read becomes an attachment that only carries the
+    error, so the model still sees what the Player tried to attach.
+    """
+    attachments: list[Attachment] = []
+
+    for raw_path in paths:
+        path = Path(raw_path)
+        try:
+            doc = extract_document(path)
+        except UnsupportedFileError as exc:
+            attachments.append(
+                Attachment(
+                    name=path.name,
+                    text="",
+                    original_chars=0,
+                    error=f"unsupported file type: {exc}",
+                )
+            )
+            continue
+        except ExtractionError as exc:
+            attachments.append(
+                Attachment(
+                    name=path.name,
+                    text="",
+                    original_chars=0,
+                    error=f"extraction failed: {exc}",
+                )
+            )
+            continue
+        except Exception as exc:  # pragma: no cover - defensive
+            attachments.append(
+                Attachment(
+                    name=path.name,
+                    text="",
+                    original_chars=0,
+                    error=f"could not read the file: {type(exc).__name__}: {exc}",
+                )
+            )
+            continue
+
+        attachments.append(
+            Attachment(
+                name=path.name,
+                text=doc.text,
+                original_chars=len(doc.text),
+                pages=doc.pages,
+                warnings=list(doc.warnings),
+            )
+        )
+
+    return apply_attachment_budget(attachments, budget_chars)

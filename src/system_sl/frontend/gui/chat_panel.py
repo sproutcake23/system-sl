@@ -58,6 +58,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Older turns were stored with a "[Today's date: …]" prefix. The date now
+# comes from the CONTEXT block, but old conversations still carry the prefix
+# and the transcript should not show it.
+_DATE_PREFIX_RE = re.compile(r"^\s*\[Today's date:[^\]]*\]\s*")
+
+
 def _colorize_markdown_html(body: str, color: str) -> str:
     """Give every markdown element an explicit theme colour.
 
@@ -733,6 +739,7 @@ class _ChatWorker(QObject):
     failed = Signal(str)
     cancelled = Signal()
     proposal = Signal(dict)
+    attachment_notice = Signal(str)
 
     def __init__(self, session: "ChatSession", user_msg: str, attachment_paths: list[str] | None = None):
         super().__init__()
@@ -741,25 +748,34 @@ class _ChatWorker(QObject):
         self.attachment_paths = attachment_paths or []
 
     def run(self):
-        from system_sl.chatbot.documents import extract_document, format_for_chat, DocumentText, UnsupportedFileError, ExtractionError
+        from system_sl.chatbot.context_window import (
+            attachment_budget_chars,
+            context_window_for_llm,
+        )
+        from system_sl.chatbot.documents import build_attachments, format_attachments
+
         thread = QThread.currentThread()
         collected: list[str] = []
 
-        # Extract text from attachments first
+        # Extract text from attachments first. Every file of this message
+        # shares one budget, derived from the model's context window.
         augmented_msg = self.user_msg
         if self.attachment_paths:
+            window = context_window_for_llm(getattr(self.session, "llm", None))
+            budget = attachment_budget_chars(window)
+            attachments = build_attachments(self.attachment_paths, budget)
+
             doc_parts = []
-            for path_str in self.attachment_paths:
-                try:
-                    path = Path(path_str)
-                    doc: DocumentText = extract_document(path)
-                    doc_parts.append(format_for_chat(doc, path.name))
-                except UnsupportedFileError as e:
-                    doc_parts.append(f"[uploaded document: {Path(path_str).name} — unsupported file type: {e}]")
-                except ExtractionError as e:
-                    doc_parts.append(f"[uploaded document: {Path(path_str).name} — extraction failed: {e}]")
-                except Exception as e:
-                    doc_parts.append(f"[uploaded document: {Path(path_str).name} — error: {type(e).__name__}: {e}]")
+            for item in attachments:
+                if item.error:
+                    doc_parts.append(
+                        f"[uploaded document: {item.name} — {item.error}]"
+                    )
+                    self.attachment_notice.emit(f"{item.name}: {item.error}")
+                else:
+                    doc_parts.append(format_for_chat(item))
+                    if item.truncated:
+                        self.attachment_notice.emit(item.summary())
 
             if doc_parts:
                 augmented_msg = "\n\n".join(doc_parts) + "\n\n" + self.user_msg
@@ -794,6 +810,14 @@ class _ChatWorker(QObject):
         if thread.isInterruptionRequested():
             self.cancelled.emit()
             return
+
+        # The attachment text only mattered for this turn: shrink it in the
+        # stored history so later turns do not pay for it again.
+        if self.attachment_paths:
+            try:
+                self.session.compact_attachment_references()
+            except Exception:
+                logger.warning("could not compact the attachments", exc_info=True)
 
         self.finished.emit("".join(collected))
 
@@ -1381,12 +1405,15 @@ class ChatPanel(QWidget):
 
     @staticmethod
     def _strip_date_prefix(text: str) -> str:
-        """Drop the "[Today's date: …]" line the client adds to each turn."""
-        if text.startswith("[Today's date:"):
-            newline = text.find("\n")
-            if newline != -1:
-                return text[newline + 1 :]
-        return text
+        """Drop the "[Today's date: …]" line older turns were stored with.
+
+        The client used to prefix every message with the date. That prefix is
+        gone now (the date lives in the CONTEXT block instead), but old
+        conversations still carry it, and the transcript should not show it.
+        """
+        if not text:
+            return text
+        return _DATE_PREFIX_RE.sub("", text, count=1)
 
     def _append_system_note(self, text: str) -> None:
         """Append a dim, italic, centred note (not a chat bubble)."""
@@ -2022,6 +2049,12 @@ class ChatPanel(QWidget):
         self._pending_proposals.append(dict(proposal))
         self._show_next_proposal()
 
+    def _on_attachment_notice(self, notice: str) -> None:
+        """Tell the Player that an attachment was cut or could not be read."""
+        if not notice:
+            return
+        self._append_alert(f"attachment: {notice}")
+
     def _show_batch_proposal_dialog(self, proposal: dict) -> None:
         """Show the batch task proposal dialog."""
         from system_sl.frontend.gui.popup_windows import BatchProposalDialog
@@ -2372,6 +2405,7 @@ class ChatPanel(QWidget):
         self._worker.failed.connect(self._on_failure)
         self._worker.cancelled.connect(self._on_cancelled)
         self._worker.proposal.connect(self._on_proposal)
+        self._worker.attachment_notice.connect(self._on_attachment_notice)
         self._worker.finished.connect(self._thread.quit)
         self._worker.failed.connect(self._thread.quit)
         self._worker.cancelled.connect(self._thread.quit)

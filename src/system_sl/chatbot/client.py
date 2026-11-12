@@ -2,7 +2,6 @@
 
 import json
 import logging
-from datetime import datetime
 from typing import Callable, Iterable, Iterator, List, Optional, Union
 
 from langchain_core.messages import AIMessageChunk, HumanMessage
@@ -85,16 +84,6 @@ def _user_text(user_msg: Union[str, List[str]]) -> str:
     return "\n".join(str(part) for part in user_msg)
 
 
-def _augment_with_date(user_msg: Union[str, List[str]]) -> str:
-    """Prefix the user message with today's date for the model."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    prefix = f"[Today's date: {today}]\n"
-    if isinstance(user_msg, str):
-        return prefix + user_msg
-    # For list input, join with newlines
-    return prefix + "\n".join(str(part) for part in user_msg)
-
-
 class ChatSession:
     """Manages an active multi-turn conversation session with the System agent.
 
@@ -163,6 +152,46 @@ class ChatSession:
         """Return this conversation's stored messages (oldest first)."""
         return load_thread_messages(self.thread_id)
 
+    def compact_attachment_references(self, keep_chars: int = 400) -> int:
+        """Replace the full text of attachments in the stored history.
+
+        An attachment's text is only useful for the turn that used it. Left
+        in the history, it is paid for again in every later turn (and it
+        grows the checkpoint on disk), so the body is replaced by a short
+        reference: the file name, the first lines and how much was there.
+
+        The message is replaced in place — same id, same position — so the
+        conversation keeps its order.
+
+        Returns the number of messages that were compacted.
+        """
+        from system_sl.chatbot.documents import compact_document_blocks
+
+        updates = []
+        for message in self.messages():
+            if getattr(message, "type", "") != "human":
+                continue
+            content = getattr(message, "content", None)
+            if not isinstance(content, str) or "<document" not in content:
+                continue
+            compacted = compact_document_blocks(content, keep_chars=keep_chars)
+            if compacted != content:
+                updates.append(message.model_copy(update={"content": compacted}))
+
+        if not updates:
+            return 0
+
+        try:
+            self.agent.update_state(self.config, {"messages": updates})
+        except Exception:
+            logger.warning(
+                "could not compact the attachments of conversation %s",
+                self.thread_id,
+                exc_info=True,
+            )
+            return 0
+        return len(updates)
+
     def _prepare_turn(self) -> None:
         """Make the checkpoint safe to continue from before a new turn.
 
@@ -217,11 +246,11 @@ class ChatSession:
         Returns:
             str: The extracted plain text content of the agent's reply.
         """
-        augmented = _augment_with_date(user_msg)
+        augmented = _user_text(user_msg)
         formatted_messages = self.wrap_message(augmented)
 
         self._prepare_turn()
-        set_turn_context(_user_text(augmented), on_proposal)
+        set_turn_context(augmented, on_proposal)
         try:
             response = self.agent.invoke(
                 {"messages": formatted_messages},
@@ -273,11 +302,11 @@ class ChatSession:
         ``on_proposal`` receives any task the agent tried to add without the
         Player explicitly asking for it, so the UI can confirm it.
         """
-        augmented = _augment_with_date(user_msg)
+        augmented = _user_text(user_msg)
         formatted_messages = self.wrap_message(augmented)
 
         self._prepare_turn()
-        set_turn_context(_user_text(augmented), on_proposal)
+        set_turn_context(augmented, on_proposal)
         try:
             for chunk, metadata in self.agent.stream(
                 {"messages": formatted_messages},
