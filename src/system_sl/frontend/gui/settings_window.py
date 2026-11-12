@@ -58,7 +58,11 @@ class AppSettingsDialog(QDialog):
             self.LLM_TAB, "" if available else "Available once the reply finishes"
         )
 
-    def closeEvent(self, event) -> None:
-        """Ensure LLM page threads are cleaned up on dialog close."""
-        self.llm_page.closeEvent(event)
-        super().closeEvent(event)
+    def done(self, result: int) -> None:
+        """Abandon the LLM page's background work however the dialog closes.
+
+        Close, Esc, accept, reject and the window's X all end here; a dialog
+        closed that way does not get a closeEvent.
+        """
+        self.llm_page.shutdown_threads()
+        super().done(result)

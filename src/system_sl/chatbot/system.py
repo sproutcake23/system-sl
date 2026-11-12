@@ -305,7 +305,6 @@ def _get_cached_llm():
     Construction is deferred until first use so that config is loaded
     and any required API keys are available.
     """
-    _maybe_reset_on_config_change()
     config = load_config()
     errors = validate_config(config)
     if errors:
@@ -313,8 +312,21 @@ def _get_cached_llm():
     return create_llm_from_config(config)
 
 
-@lru_cache(maxsize=8)
 def build_agent_for_model(model_name: str):
+    """Return the agent for ``model_name`` and its LLM, as ``(agent, llm)``.
+
+    Built once per model and cached. The config file is checked first on
+    every call: if it was changed outside the app (another window, an
+    editor), the cache is dropped so the new settings take effect. The check
+    has to sit in front of the cache — inside a cached builder it would only
+    ever run on the first build.
+    """
+    _maybe_reset_on_config_change()
+    return _build_agent_for_model(model_name)
+
+
+@lru_cache(maxsize=8)
+def _build_agent_for_model(model_name: str):
     """Build (once per model) an agent and return ``(agent, llm)``.
 
     Every agent shares the one process-wide checkpointer, so switching models
@@ -323,7 +335,6 @@ def build_agent_for_model(model_name: str):
     HTTP clients belong to the model that is about to answer, to cancel a
     stream on Stop.
     """
-    _maybe_reset_on_config_change()
     config = load_config()
 
     # LLMFactoryError is raised unchanged so callers can tell "no API key
@@ -356,11 +367,11 @@ def build_agent_for_model(model_name: str):
     return agent, llm
 
 
-@lru_cache(maxsize=1)
 def get_system_agent():
-    """Build (once) and return the SYSTEM mentor agent for the saved default.
+    """Return the SYSTEM mentor agent for the saved default model.
 
-    The cache is invalidated by ``reset_agent_cache()`` when config changes.
+    Cached per model by ``build_agent_for_model``, which also notices config
+    changes made outside the app; ``reset_agent_cache()`` drops it explicitly.
     """
     return build_agent_for_model(load_config().system_model)[0]
 
@@ -384,6 +395,5 @@ def reset_agent_cache() -> None:
     """
     from system_sl.chatbot.llm_factory import clear_cached_llm
     _get_cached_llm.cache_clear()
-    get_system_agent.cache_clear()
-    build_agent_for_model.cache_clear()
+    _build_agent_for_model.cache_clear()
     clear_cached_llm()

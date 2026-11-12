@@ -274,7 +274,7 @@ def create_llm(
     model: str,
     base_url: str | None = None,
     api_key: str | None = None,
-    temperature: float = 0.0,
+    temperature: float | None = 0.0,
     max_tokens: int | None = None,
     **kwargs,
 ) -> BaseChatModel:
@@ -285,7 +285,8 @@ def create_llm(
         model: Model name (e.g., "gemini-3.5-flash-lite", "llama3.1")
         base_url: Base URL for OpenAI-compatible APIs (required for "openai" provider)
         api_key: API key (required for "google", optional for "openai" if server doesn't need it)
-        temperature: Sampling temperature (default 0.0 for deterministic output)
+        temperature: Sampling temperature (default 0.0 for deterministic output).
+            None omits it from the request, for models that reject it.
         max_tokens: Maximum output tokens (optional, model default if not set)
         **kwargs: Additional arguments passed to the model constructor
 
@@ -303,11 +304,17 @@ def create_llm(
             )
         if not api_key:
             raise LLMFactoryError("Google provider requires an API key (GOOGLE_API_KEY)")
+        # Unset options are left out entirely, not sent as null/0: some models
+        # refuse a request that names a temperature at all.
+        options = {}
+        if temperature is not None:
+            options["temperature"] = temperature
+        if max_tokens:
+            options["max_output_tokens"] = max_tokens
         return ChatGoogleGenerativeAI(
             model=model,
-            temperature=temperature,
-            max_output_tokens=max_tokens,
             google_api_key=api_key,
+            **options,
             **kwargs,
         )
 
@@ -324,10 +331,14 @@ def create_llm(
         http_async_client = httpx.AsyncClient()
         _set_current_llm_clients(sync_client=http_client, async_client=http_async_client)
 
+        options = {}
+        if temperature is not None:
+            options["temperature"] = temperature
+        if max_tokens:
+            options["max_tokens"] = max_tokens
         return ReasoningChatOpenAI(
             model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            **options,
             base_url=base_url,
             api_key=api_key or "dummy",
             http_client=http_client,

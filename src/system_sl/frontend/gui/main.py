@@ -202,9 +202,12 @@ class MainWindow(QMainWindow):
         left_layout.addStretch(1)
         left_layout.addWidget(self.settings_button)
 
-        # right box — chatbot panel (system / friend modes)
+        # right box — chatbot panel
         from system_sl.frontend.gui.chat_panel import ChatPanel
         self.chat_panel = ChatPanel(self)
+        # A child widget gets no closeEvent when the app quits, so the panel
+        # is told explicitly: it ends a running reply and saves its outcome.
+        QApplication.instance().aboutToQuit.connect(self.chat_panel.shutdown)
         self.chat_panel.settings_requested.connect(
             lambda: self.open_settings(AppSettingsDialog.LLM_TAB)
         )

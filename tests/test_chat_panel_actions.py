@@ -182,3 +182,34 @@ def test_retry_after_a_failed_reply(panel):
     assert [t for k, t in _stored(widget) if k == "human"] == ["hello"]
     assert ("ai", "reply 2") in _stored(widget)
     assert ("assistant", "reply 2") in _shown(widget)
+
+
+def test_quitting_mid_reply_records_the_task_outcome(panel):
+    """A Yes/No answered while the reply streams is saved when the app quits."""
+    widget, app = panel
+
+    class _Slow(_Model):
+        def _next_reply(self, messages):
+            time.sleep(0.3)
+            self.seen.append(list(messages))
+            self.calls += 1
+            return AIMessage(content="word " * 200)
+
+    widget._model.__class__ = _Slow
+    widget.input_box.setPlainText("hello")
+    widget._on_send()
+    deadline = time.monotonic() + 5
+    while not widget._streamed_any and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    assert widget.is_busy()
+
+    # The Player answers a proposal while the reply is still streaming.
+    widget._record_task_confirmation(declined=[("Gym", "health")])
+    assert widget._pending_confirmations, "the write must wait for the turn"
+
+    widget.shutdown()
+
+    assert widget._thread is None
+    texts = [t for _k, t in _stored(widget)]
+    assert any("Gym" in t for t in texts), "the outcome was lost on quit"

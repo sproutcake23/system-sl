@@ -6,6 +6,7 @@ it records the messages it was given so a test can assert what the model
 actually saw.
 """
 
+import json
 from typing import Any, Iterator, List, Optional
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -70,3 +71,19 @@ class FakeChatModel(BaseChatModel):
             if run_manager:
                 run_manager.on_llm_new_token(token + " ")
             yield chunk
+        # Tool calls stream as chunks too, like a real provider's.
+        if reply.tool_calls:
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": call["name"],
+                            "args": json.dumps(call.get("args") or {}),
+                            "id": call.get("id"),
+                            "index": index,
+                        }
+                        for index, call in enumerate(reply.tool_calls)
+                    ],
+                )
+            )

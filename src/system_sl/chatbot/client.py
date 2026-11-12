@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Callable, Iterable, Iterator, List, Optional, Union
 
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 
 from system_sl.chatbot.system import (
     get_system_agent,
@@ -351,14 +351,13 @@ class ChatSession:
                     continue
                 node = metadata.get("langgraph_node", "")
                 
-                # Tool calls - emit start/end events
-                if node == "tools" and on_tool:
-                    if hasattr(chunk, "name") and chunk.name:
-                        # Tool call start
-                        on_tool(chunk.name, "start", "")
-                    elif hasattr(chunk, "tool_call_id") and chunk.tool_call_id:
-                        # Tool result end
-                        on_tool(getattr(chunk, "name", "tool"), "end", "")
+                # Tool activity. In "messages" mode the tools node only
+                # streams its results (ToolMessage), i.e. after the tool has
+                # run, so "start" comes from the model's tool-call chunks and
+                # "end" from the result.
+                if node == "tools":
+                    if on_tool and isinstance(chunk, ToolMessage):
+                        on_tool(chunk.name or "tool", "end", "")
                     continue
                 
                 # Model output
@@ -366,6 +365,12 @@ class ChatSession:
                     continue
                 if not isinstance(chunk, AIMessageChunk):
                     continue
+
+                if on_tool:
+                    for call in chunk.tool_call_chunks or []:
+                        # The name arrives once, on the call's first chunk.
+                        if call.get("name"):
+                            on_tool(call["name"], "start", "")
 
                 reasoning = _reasoning_text(chunk)
                 if reasoning:

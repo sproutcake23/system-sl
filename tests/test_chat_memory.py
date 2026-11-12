@@ -573,3 +573,58 @@ def test_confirmation_after_a_stopped_turn_leaves_the_thread_idle(config_dir):
     session.run_turn("next")
     notes = [t for t in _texts(session.messages()) if t.startswith(memory_mod.STOP_NOTE_PREFIX)]
     assert len(notes) == 1
+
+
+def test_tool_activity_starts_before_and_ends_after_the_tool(config_dir):
+    events: list[tuple[str, str]] = []
+    calls: list[str] = []
+
+    @tool
+    def record(title: str) -> str:
+        """Record a title."""
+        events.append(("ran", title))
+        calls.append(title)
+        return "ok"
+
+    agent, _model = _agent(
+        AIMessage(content="", tool_calls=[_call("record", "c1", title="T")]),
+        AIMessage(content="done"),
+        tools=[record],
+    )
+    session = ChatSession(thread_id="conv-tool-events", agent=agent)
+    list(session.stream_turn("go", on_tool=lambda name, status, _d: events.append((status, name))))
+
+    assert events == [("start", "record"), ("ran", "T"), ("end", "record")]
+
+
+def test_agent_is_rebuilt_when_the_config_file_changes(config_dir, monkeypatch):
+    """A config edited outside the app is picked up on the next lookup."""
+    import os
+    from dataclasses import dataclass
+
+    from system_sl.chatbot import config as config_mod
+    from system_sl.chatbot import system as system_mod
+
+    config_file = config_dir / config_mod.CONFIG_FILENAME
+    config_file.write_text("{}")
+    monkeypatch.setattr(config_mod, "get_tasks_file_path", lambda name: str(config_dir / name))
+
+    @dataclass
+    class _Config:
+        system_model: str = "m"
+        system_prompt_addendum: str = ""
+
+    monkeypatch.setattr(system_mod, "load_config", lambda: _Config())
+    monkeypatch.setattr(system_mod, "validate_config", lambda _c: [])
+    monkeypatch.setattr(
+        system_mod, "create_llm_from_config", lambda _c: FakeChatModel(replies=[AIMessage(content="x")])
+    )
+    reset_agent_cache()
+
+    first, _ = system_mod.build_agent_for_model("m")
+    assert system_mod.build_agent_for_model("m")[0] is first, "unchanged config: reuse"
+
+    stat = config_file.stat()
+    os.utime(config_file, (stat.st_atime, stat.st_mtime + 5))
+    assert system_mod.build_agent_for_model("m")[0] is not first, "edited config: rebuild"
+    reset_agent_cache()

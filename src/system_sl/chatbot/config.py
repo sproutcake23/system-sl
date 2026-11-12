@@ -62,7 +62,8 @@ class ChatConfig:
         base_url: Base URL for OpenAI-compatible APIs (required for "openai" provider)
         api_key: API key (required for "google", optional for local "openai" servers)
         system_model: Model name for the system persona
-        temperature: Sampling temperature (0.0-2.0, default 0.0)
+        temperature: Sampling temperature (0.0-2.0, default 0.0). None leaves
+            it to the model: some (mostly reasoning) models reject any value.
         max_tokens: Maximum output tokens (optional, model default if not set)
         system_prompt_addendum: Additional instructions appended to the system prompt
     """
@@ -70,7 +71,7 @@ class ChatConfig:
     base_url: Optional[str] = None
     api_key: str = ""
     system_model: str = "gemini-3.5-flash-lite"
-    temperature: float = 0.0
+    temperature: Optional[float] = 0.0
     max_tokens: Optional[int] = None
     system_prompt_addendum: str = ""
 
@@ -176,12 +177,15 @@ def load_config() -> ChatConfig:
     )
 
     # Temperature
+    # A saved null means "model default": the request omits temperature.
     temperature = data.get("temperature", 0.0)
     if isinstance(temperature, str):
         try:
             temperature = float(temperature)
         except ValueError:
             temperature = 0.0
+    elif temperature is not None and not isinstance(temperature, (int, float)):
+        temperature = 0.0
 
     # Max tokens
     max_tokens = data.get("max_tokens")

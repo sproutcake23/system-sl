@@ -805,8 +805,10 @@ class BatchProposalDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Confirm Tasks from Document")
         self.setMinimumSize(700, 500)
-        # Non-modal: don't call setModal(True)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        # Non-modal: don't call setModal(True). As a child of the chat panel
+        # it already stays above the app window, without covering others.
+        # Exactly one of confirmed/cancelled is emitted, however it closes.
+        self._decided = False
 
         tokens = get_current_theme_tokens()
         self._duplicate_tint = QColor(tokens.get("sys_color_alert", "#ff6b8a"))
@@ -945,12 +947,26 @@ class BatchProposalDialog(QDialog):
             QMessageBox.warning(self, "Invalid Deadlines", "\n".join(invalid_deadlines))
             return
 
+        self._decided = True
         self.confirmed.emit([task for _row, task in selected_tasks])
         self.close()
 
     def _on_cancel(self) -> None:
-        self.cancelled.emit()
+        if not self._decided:
+            self._decided = True
+            self.cancelled.emit()
         self.close()
+
+    def reject(self) -> None:
+        """Esc counts as Cancel, so the proposal is recorded as declined."""
+        self._on_cancel()
+
+    def closeEvent(self, event) -> None:
+        """Closing with the window's X also counts as Cancel."""
+        if not self._decided:
+            self._decided = True
+            self.cancelled.emit()
+        super().closeEvent(event)
 
     def get_selected_tasks(self) -> list[tuple[int, dict]]:
         """Return list of (row_index, task_dict) for checked rows."""
@@ -973,6 +989,9 @@ class BatchProposalDialog(QDialog):
                             "title": title,
                             "category": category,
                             "deadline": deadline if deadline else None,
+                            # Which proposed task this row was, so skipped
+                            # rows are known even after a title edit.
+                            "source_index": row,
                         }
                     ))
         return result
