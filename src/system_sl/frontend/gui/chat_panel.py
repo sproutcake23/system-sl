@@ -8,10 +8,12 @@ from typing import Callable, Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QTextEdit,
     QTextBrowser,
@@ -35,6 +37,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QTextBlockFormat,
+    QTextBlockUserData,
     QTextCharFormat,
     QTextCursor,
     QTextDocumentFragment,
@@ -54,14 +57,9 @@ from system_sl.frontend.gui.icons import get_icon
 if TYPE_CHECKING:
     from system_sl.chatbot import ChatConfig, ChatSession, ModelInfo
     from system_sl.chatbot.llm_factory import ProviderPreset
+    from system_sl.chatbot.transcript import ChatMessage
 
 logger = logging.getLogger(__name__)
-
-
-# Older turns were stored with a "[Today's date: …]" prefix. The date now
-# comes from the CONTEXT block, but old conversations still carry the prefix
-# and the transcript should not show it.
-_DATE_PREFIX_RE = re.compile(r"^\s*\[Today's date:[^\]]*\]\s*")
 
 
 def _colorize_markdown_html(body: str, color: str) -> str:
@@ -165,6 +163,28 @@ class _ClickableLabel(QLabel):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+
+class _MessageBlockData(QTextBlockUserData):
+    """Tag on a transcript block: which message this text belongs to.
+
+    The browser is a view of the transcript model, so a click, a selection or
+    a context menu has to be mapped back to a message. Every block of a
+    message carries its id, which survives markdown rendering (one message can
+    become many blocks: paragraphs, list items, headings).
+    """
+
+    def __init__(self, message_id: str):
+        super().__init__()
+        self.message_id = message_id
+
+
+def _truncate_preview(text: str, limit: int = 60) -> str:
+    """Shorten text for a chip, keeping it on one line."""
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:-") + "…"
 
 
 class _ModelDiscoveryWorker(QObject):
@@ -752,7 +772,7 @@ class _ChatWorker(QObject):
             attachment_budget_chars,
             context_window_for_llm,
         )
-        from system_sl.chatbot.documents import build_attachments, format_attachments
+        from system_sl.chatbot.documents import build_attachments, format_for_chat
 
         thread = QThread.currentThread()
         collected: list[str] = []
@@ -852,6 +872,20 @@ class ChatPanel(QWidget):
 
         # Attachment state
         self._attachments: list[Path] = []
+
+        # The transcript model is the source of truth for what is on screen;
+        # the QTextBrowser is only a view of it. Built from the checkpoint
+        # history when a conversation is opened, then appended to as the turn
+        # runs. Each message's blocks are tagged with its id, so a click or a
+        # selection can be mapped back to the message it came from.
+        from system_sl.chatbot.transcript import Transcript
+
+        self._messages = Transcript()
+        self._stream_message_id: str | None = None
+
+        # Quotes waiting to go into the next message. Each chip above the
+        # input can be removed before sending.
+        self._quotes: list = []
 
         # Messages composed while the assistant is busy. They are sent
         # automatically, in order, once the running turn finishes.
@@ -959,6 +993,11 @@ class ChatPanel(QWidget):
         self.transcript.setPlaceholderText("[ awaiting Player input — channel: SYSTEM ]")
         # Enable drag & drop on transcript
         self.transcript.setAcceptDrops(True)
+        # Right-click a message to copy or quote it.
+        self.transcript.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.transcript.customContextMenuRequested.connect(
+            self._on_transcript_context_menu
+        )
         root.addWidget(self.transcript, stretch=1)
 
         # --- Live reasoning ("thinking") view ---
@@ -991,6 +1030,17 @@ class ChatPanel(QWidget):
         root.addWidget(self.confirm_bar)
         # addWidget() re-parents and hides, so visibility is set afterwards.
         self.confirm_bar.setVisible(False)
+
+        # --- Quote chips row (hidden when nothing is quoted) ---
+        # Sits directly above the input: these are the quotes that will be
+        # sent with the next message, unlike the attachments row below.
+        self.quote_chips_container = QWidget()
+        self.quote_chips_layout = QHBoxLayout(self.quote_chips_container)
+        self.quote_chips_layout.setContentsMargins(4, 2, 4, 2)
+        self.quote_chips_layout.setSpacing(4)
+        self.quote_chips_layout.addStretch(1)
+        root.addWidget(self.quote_chips_container)
+        self.quote_chips_container.setVisible(False)
 
         # --- Attachment chips row (hidden when empty) ---
         self.attach_chips_container = QWidget()
@@ -1212,7 +1262,7 @@ class ChatPanel(QWidget):
         update_conversation(self._thread_id, last_model=model_id)
         self._refresh_history_combo()
         self._update_default_button()
-        self._append_system_note(f"Switched to {model_id} — the conversation continues")
+        self._append_note(f"Switched to {model_id} — the conversation continues")
 
     def _update_default_button(self) -> None:
         """Offer to save the current model only when it is not the default."""
@@ -1326,6 +1376,8 @@ class ChatPanel(QWidget):
         self._thread_id = thread_id
         self._session = None
         self._reset_stream_state()
+        # Quotes composed for the previous conversation make no sense here.
+        self._clear_quotes()
 
         entry = get_conversation(thread_id) or {}
         last_model = entry.get("last_model")
@@ -1360,48 +1412,67 @@ class ChatPanel(QWidget):
             return []
 
     def _render_transcript(self, messages: list) -> None:
-        """Rebuild the transcript from a conversation's stored messages.
+        """Rebuild the transcript model and the view from stored messages.
 
         Only the Player's messages and the System's answers are bubbles; tool
         traffic is internal, and app-injected notes are shown dimmed so they
-        are not mistaken for something the Player typed.
+        are not mistaken for something the Player typed. The model is kept so
+        per-message actions (copy, quote) know what they are acting on.
         """
-        from system_sl.chatbot.memory import is_app_note, note_body
+        from system_sl.chatbot.transcript import Transcript
 
+        self._messages = Transcript.from_history(messages)
+        self._stream_message_id = None
         self.transcript.clear()
-        if not messages:
-            return
-
-        for message in messages:
-            role = getattr(message, "type", "")
-            content = getattr(message, "content", "")
-            text = content if isinstance(content, str) else self._flatten_content(content)
-            if not text.strip():
-                continue
-
-            if role == "human":
-                text = self._strip_date_prefix(text)
-                if is_app_note(text):
-                    self._append_system_note(note_body(text))
-                else:
-                    self._append_player(text)
-            elif role == "ai":
-                # Tool-call-only turns have no text worth showing.
-                self._append_bot(text)
+        for message in self._messages:
+            self._render_message(message)
         self._scroll_to_bottom()
 
-    @staticmethod
-    def _flatten_content(content) -> str:
-        """Join a rich content payload into plain text."""
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict) and isinstance(block.get("text"), str):
-                    parts.append(block["text"])
-            return "".join(parts)
-        return str(content or "")
+    def _render_message(self, message: "ChatMessage") -> None:
+        """Draw one message into the transcript view."""
+        from system_sl.chatbot.transcript import (
+            ALERT,
+            ASSISTANT,
+            CONFIRMATION,
+            NOTE,
+            USER,
+        )
+
+        if message.role == USER:
+            self._append_player(message)
+        elif message.role == ASSISTANT:
+            self._append_bot(message)
+        elif message.role == NOTE:
+            self._append_system_note(message.text, message_id=message.id)
+        elif message.role == ALERT:
+            self._append_alert_bubble(message.text, message_id=message.id)
+        elif message.role == CONFIRMATION:
+            self._append_confirmation_bubble(message.text, message_id=message.id)
+
+    def _message_id_at(self, position: int) -> str | None:
+        """Return the id of the message whose text covers ``position``.
+
+        A blank block (the trailing paragraph of a bubble) has no tag of its
+        own; the search walks back to the message it belongs to.
+        """
+        block = self.transcript.document().findBlock(position)
+        while block.isValid():
+            data = block.userData()
+            if isinstance(data, _MessageBlockData) and data.message_id:
+                return data.message_id
+            block = block.previous()
+        return None
+
+    def _tag_blocks(self, start: int, message_id: str | None, end: int | None = None) -> None:
+        """Tag every block from ``start`` to ``end`` with ``message_id``."""
+        if not message_id:
+            return
+        doc = self.transcript.document()
+        last = doc.characterCount() - 1 if end is None else end
+        block = doc.findBlock(start)
+        while block.isValid() and block.position() <= last:
+            block.setUserData(_MessageBlockData(message_id))
+            block = block.next()
 
     @staticmethod
     def _strip_date_prefix(text: str) -> str:
@@ -1411,11 +1482,18 @@ class ChatPanel(QWidget):
         gone now (the date lives in the CONTEXT block instead), but old
         conversations still carry it, and the transcript should not show it.
         """
-        if not text:
-            return text
-        return _DATE_PREFIX_RE.sub("", text, count=1)
+        from system_sl.chatbot.transcript import strip_date_prefix
 
-    def _append_system_note(self, text: str) -> None:
+        return strip_date_prefix(text)
+
+    def _append_note(self, text: str) -> None:
+        """Append an app-generated note, keeping the model in step."""
+        from system_sl.chatbot.transcript import NOTE
+
+        message = self._messages.append(NOTE, text)
+        self._append_system_note(text, message_id=message.id)
+
+    def _append_system_note(self, text: str, message_id: str | None = None) -> None:
         """Append a dim, italic, centred note (not a chat bubble)."""
         tokens = self._get_live_tokens()
         dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
@@ -1429,6 +1507,7 @@ class ChatPanel(QWidget):
         block_fmt.setTopMargin(6)
         block_fmt.setBottomMargin(6)
         cursor.insertBlock(block_fmt)
+        start = cursor.block().position()
 
         char_fmt = QTextCharFormat()
         char_fmt.setForeground(QColor(dim))
@@ -1436,6 +1515,8 @@ class ChatPanel(QWidget):
         char_fmt.setFontItalic(True)
         cursor.setCharFormat(char_fmt)
         cursor.insertText(text)
+
+        self._tag_blocks(start, message_id)
 
         if follow_tail:
             self.transcript.moveCursor(QTextCursor.MoveOperation.End)
@@ -1591,6 +1672,180 @@ class ChatPanel(QWidget):
         self._attachments.clear()
         self._update_attach_chips()
 
+    # ----- Copy & Quote -----
+
+    def _on_transcript_context_menu(self, position) -> None:
+        """Offer copy/quote for the message (or selection) under the pointer."""
+        cursor = self.transcript.cursorForPosition(position)
+        message_id = self._message_id_at(cursor.position())
+        selected = self.transcript.textCursor()
+        selection = selected.selection().toPlainText() if selected.hasSelection() else ""
+
+        menu, entries = self._build_transcript_menu(
+            message_id, selection, selected.selectionStart()
+        )
+        if menu is None:
+            return
+
+        chosen = menu.exec(self.transcript.mapToGlobal(position))
+        if chosen is None:
+            return
+        for action, handler in entries:
+            if chosen is action:
+                handler()
+                return
+
+    def _build_transcript_menu(
+        self, message_id: str | None, selection: str, selection_start: int = 0
+    ):
+        """Build the right-click menu for a message, or None when it has none.
+
+        Returns the menu and a list of ``(action, handler)`` pairs; executing
+        the menu is the caller's job, which keeps the menu testable without a
+        running event loop.
+        """
+        from system_sl.chatbot.transcript import ASSISTANT, USER
+
+        message = self._messages.get(message_id) if message_id else None
+        has_selection = bool((selection or "").strip())
+
+        # Notes and alerts are the app talking to itself; only what a
+        # participant said can be quoted back to the model.
+        quoteable = message is not None and message.role in (USER, ASSISTANT)
+        if not has_selection and not quoteable:
+            return None, []
+
+        menu = QMenu(self.transcript)
+        entries: list[tuple[object, Callable[[], None]]] = []
+
+        if has_selection:
+            copy_action = menu.addAction("Copy")
+            quote_action = menu.addAction("Quote selection")
+            entries.append((copy_action, lambda: self._copy_to_clipboard(selection)))
+
+            def quote_selection() -> None:
+                # The speaker is the message the selection started in, which
+                # may not be the one under the pointer.
+                start_id = self._message_id_at(selection_start)
+                start_message = self._messages.get(start_id) if start_id else None
+                role = (
+                    start_message.role
+                    if start_message
+                    else (message.role if message else USER)
+                )
+                self._quote_text(selection, role)
+
+            entries.append((quote_action, quote_selection))
+
+        if quoteable:
+            if has_selection:
+                menu.addSeparator()
+            copy_message_action = menu.addAction("Copy message")
+            quote_message_action = menu.addAction("Quote in reply")
+            entries.append(
+                (copy_message_action, lambda: self._copy_to_clipboard(message.plain_text()))
+            )
+            entries.append(
+                (quote_message_action, lambda: self._quote_text(message.plain_text(), message.role))
+            )
+
+        return menu, entries
+
+    @staticmethod
+    def _copy_to_clipboard(text: str) -> None:
+        """Put plain text on the clipboard (never the rendered HTML)."""
+        QApplication.clipboard().setText(text or "")
+
+    def _quote_text(self, text: str, role: str) -> None:
+        """Add an excerpt to the next message's quotes."""
+        from system_sl.chatbot.quotes import Quote, speaker_for_role
+
+        text = (text or "").strip()
+        if not text:
+            return
+        self._quotes.append(Quote(speaker=speaker_for_role(role), text=text))
+        self._update_quote_chips()
+        self.input_box.setFocus()
+
+    def _remove_quote(self, quote) -> None:
+        """Drop one quote chip."""
+        try:
+            self._quotes.remove(quote)
+        except ValueError:
+            return
+        self._update_quote_chips()
+
+    def _clear_quotes(self) -> None:
+        """Drop every quote waiting to be sent."""
+        self._quotes.clear()
+        self._update_quote_chips()
+
+    def _update_quote_chips(self) -> None:
+        """Rebuild the quote chips row above the input."""
+        while self.quote_chips_layout.count() > 1:  # keep the trailing stretch
+            item = self.quote_chips_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for quote in self._quotes:
+            chip = self._create_quote_chip(quote)
+            self.quote_chips_layout.insertWidget(
+                self.quote_chips_layout.count() - 1, chip
+            )
+
+        self.quote_chips_container.setVisible(bool(self._quotes))
+
+    def _create_quote_chip(self, quote) -> QWidget:
+        """Create a preview chip for one quoted excerpt."""
+        tokens = get_current_theme_tokens()
+        chip_background = tokens.get("sys_color_surface_raised", "#0e1626")
+        chip_hover = tokens.get("sys_color_primary_dim", "rgba(0, 217, 255, 0.08)")
+        chip_text = tokens.get("sys_color_text_main", "#d6e7ff")
+        alert = tokens.get("sys_color_alert", "#ff6b8a")
+
+        chip = QFrame()
+        chip.setObjectName("quoteChip")
+        chip.setFrameShape(QFrame.StyledPanel)
+        chip.setStyleSheet(f"""
+            QFrame#quoteChip {{
+                background-color: {chip_background};
+                border-radius: 12px;
+                border-left: 3px solid {tokens.get("sys_color_primary", "#00d9ff")};
+                padding: 2px 8px;
+            }}
+            QFrame#quoteChip:hover {{
+                background-color: {chip_hover};
+            }}
+        """)
+        layout = QHBoxLayout(chip)
+        layout.setContentsMargins(8, 2, 4, 2)
+        layout.setSpacing(4)
+
+        preview = f'↩ {quote.label}: “{_truncate_preview(quote.text)}”'
+        label = QLabel(preview)
+        label.setStyleSheet(f"color: {chip_text}; font-size: 11px;")
+        label.setToolTip(quote.text)
+        layout.addWidget(label)
+
+        remove_btn = QPushButton()
+        remove_btn.setIcon(get_icon("remove", role="sys_color_text_secondary", size=14))
+        remove_btn.setFixedSize(18, 18)
+        remove_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                border-radius: 9px;
+            }}
+            QPushButton:hover {{
+                background: {alert};
+            }}
+        """)
+        remove_btn.setToolTip("Remove this quote")
+        remove_btn.clicked.connect(lambda: self._remove_quote(quote))
+        layout.addWidget(remove_btn)
+
+        return chip
+
     # ----- Session Management -----
 
     def _get_session(self) -> "ChatSession | None":
@@ -1690,42 +1945,96 @@ class ChatPanel(QWidget):
         self.transcript.moveCursor(QTextCursor.MoveOperation.End)
         self.transcript.ensureCursorVisible()
 
-    def _append_player(self, text: str) -> None:
+    def _append_player(self, message: "ChatMessage") -> None:
         """Append a user (PLAYER) message as a right-aligned bubble, no label."""
         tokens = self._get_live_tokens()
         bg = tokens.get("sys_color_primary", "#00d9ff")
         fg = tokens.get("sys_color_on_primary", "#04121a")
-        self._append_bubble(text, align_right=True, bg_color=bg, text_color=fg, escape=True)
+        self._insert_bubble_html(
+            self._player_html(message),
+            align_right=True,
+            bg_color=bg,
+            text_color=fg,
+            message_id=message.id,
+        )
 
-    def _append_player_with_attachments(self, text: str, attachment_paths: list[str]) -> None:
-        """Append a user message with attachment info as a right-aligned bubble."""
-        tokens = self._get_live_tokens()
-        bg = tokens.get("sys_color_primary", "#00d9ff")
-        fg = tokens.get("sys_color_on_primary", "#04121a")
+    def _player_html(self, message: "ChatMessage") -> str:
+        """Bubble contents for a Player message: attachments, quotes, text."""
+        parts: list[str] = []
+        if message.attachments:
+            parts.append(self._attachment_summary_html(message.attachments))
+        for quote in message.quotes:
+            parts.append(self._quote_block_html(quote))
+        parts.append(html.escape(message.body or "").replace("\n", "<br>"))
+        return "".join(parts)
 
-        # Build attachment summary
+    @staticmethod
+    def _attachment_summary_html(paths: list[str]) -> str:
+        """The "📎 Attached:" preview shown inside a Player message."""
         attach_lines = ["📎 Attached:"]
-        for path_str in attachment_paths:
+        for path_str in paths:
             path = Path(path_str)
-            size_kb = path.stat().st_size / 1024
-            size_str = f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.0f} KB"
+            try:
+                size_kb = path.stat().st_size / 1024
+                size_str = (
+                    f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.0f} KB"
+                )
+            except OSError:
+                # The file is only decoration here; the text was already read.
+                size_str = "not found"
             attach_lines.append(f"  • {path.name} ({size_str})")
-        attach_summary = "\n".join(attach_lines)
+        return html.escape("\n".join(attach_lines)).replace("\n", "<br>") + "<br><br>"
 
-        combined = f"{attach_summary}\n\n{text}" if text else attach_summary
-        self._append_bubble(combined, align_right=True, bg_color=bg, text_color=fg, escape=True)
+    @staticmethod
+    def _quote_block_html(quote) -> str:
+        """One quoted excerpt, styled as a block-quote inside the bubble.
 
-    def _append_bot(self, text: str) -> None:
+        Qt's rich text support for borders on block elements is unreliable, so
+        the quote gets a vertical rule per line instead — the same look, and it
+        survives every theme.
+        """
+        safe = html.escape(quote.text).replace("\n", "<br>│ ")
+        label = html.escape(quote.label)
+        return (
+            '<div style="margin-bottom:4px; font-style:italic;">'
+            f"│ <b>{label}:</b> {safe}</div>"
+        )
+
+    def _append_bot(self, message: "ChatMessage") -> None:
         """Append a complete SYSTEM message as a left-aligned bubble, no label."""
         tokens = self._get_live_tokens() or self._stream_tokens
         body_color = tokens.get("sys_color_text_main", "#d6e7ff")
         bg = tokens.get("sys_color_surface", "#2a2a40")
-        self._append_markdown_bubble(text, align_right=False, bg_color=bg, text_color=body_color)
+        self._append_markdown_bubble(
+            message.text,
+            align_right=False,
+            bg_color=bg,
+            text_color=body_color,
+            message_id=message.id,
+        )
 
-    def _append_bubble(self, text: str, align_right: bool, bg_color: str, text_color: str, escape: bool = True) -> None:
-        """Insert a chat bubble using QTextCursor + QTextBlockFormat for proper alignment."""
+    def _append_bubble(
+        self,
+        text: str,
+        align_right: bool,
+        bg_color: str,
+        text_color: str,
+        escape: bool = True,
+        message_id: str | None = None,
+    ) -> None:
+        """Insert an escaped chat bubble (one line per newline)."""
         safe = html.escape(text).replace("\n", "<br>") if escape else text.replace("\n", "<br>")
+        self._insert_bubble_html(safe, align_right, bg_color, text_color, message_id)
 
+    def _insert_bubble_html(
+        self,
+        body_html: str,
+        align_right: bool,
+        bg_color: str,
+        text_color: str,
+        message_id: str | None = None,
+    ) -> None:
+        """Insert an already-rendered bubble, tagged with its message id."""
         # Respect the user's scroll position: only follow the tail if they
         # were already there. A bubble appended while they read history must
         # not yank the viewport back down.
@@ -1733,33 +2042,46 @@ class ChatPanel(QWidget):
 
         cursor = QTextCursor(self.transcript.document())
         cursor.movePosition(QTextCursor.MoveOperation.End)
-        
+
         # Block format for alignment (right for user, left for system)
         block_fmt = QTextBlockFormat()
         block_fmt.setAlignment(Qt.AlignmentFlag.AlignRight if align_right else Qt.AlignmentFlag.AlignLeft)
         block_fmt.setTopMargin(4)
         block_fmt.setBottomMargin(4)
         cursor.insertBlock(block_fmt)
-        
+        start = cursor.block().position()
+
         # Char format for bubble background + text color
         char_fmt = QTextCharFormat()
         char_fmt.setBackground(QColor(bg_color))
         char_fmt.setForeground(QColor(text_color))
         char_fmt.setFontFamily("Segoe UI, Helvetica Neue, DejaVu Sans, sans-serif")
         char_fmt.setFontPointSize(13)
-        
+
         # Set char format on cursor, then insert HTML
         cursor.setCharFormat(char_fmt)
-        cursor.insertHtml(safe)
-        
+        cursor.insertHtml(body_html)
+
+        self._tag_blocks(start, message_id)
+
         if follow_tail:
             self.transcript.moveCursor(QTextCursor.MoveOperation.End)
             self.transcript.ensureCursorVisible()
 
-    def _append_markdown_bubble(self, markdown_text: str, align_right: bool, bg_color: str, text_color: str, escape: bool = False) -> None:
+    def _append_markdown_bubble(
+        self,
+        markdown_text: str,
+        align_right: bool,
+        bg_color: str,
+        text_color: str,
+        escape: bool = False,
+        message_id: str | None = None,
+    ) -> None:
         """Render markdown and insert as a styled bubble block."""
         if not markdown_text.strip():
-            self._append_bubble("", align_right, bg_color, text_color, escape=False)
+            self._append_bubble(
+                "", align_right, bg_color, text_color, escape=False, message_id=message_id
+            )
             return
         
         # Convert markdown to HTML
@@ -1771,7 +2093,9 @@ class ChatPanel(QWidget):
             .strip()
         )
         if not body:
-            self._append_bubble("", align_right, bg_color, text_color, escape=False)
+            self._append_bubble(
+                "", align_right, bg_color, text_color, escape=False, message_id=message_id
+            )
             return
         
         body = _colorize_markdown_html(body, text_color)
@@ -1786,6 +2110,7 @@ class ChatPanel(QWidget):
         block_fmt.setTopMargin(4)
         block_fmt.setBottomMargin(4)
         cursor.insertBlock(block_fmt)
+        start = cursor.block().position()
         
         char_fmt = QTextCharFormat()
         char_fmt.setBackground(QColor(bg_color))
@@ -1795,17 +2120,33 @@ class ChatPanel(QWidget):
         
         cursor.setCharFormat(char_fmt)
         cursor.insertHtml(body)
+
+        self._tag_blocks(start, message_id)
         
         if follow_tail:
             self.transcript.moveCursor(QTextCursor.MoveOperation.End)
             self.transcript.ensureCursorVisible()
 
     def _append_alert(self, text: str) -> None:
+        """Append an alert bubble and keep the transcript model in step."""
+        from system_sl.chatbot.transcript import ALERT
+
+        message = self._messages.append(ALERT, text)
+        self._append_alert_bubble(text, message_id=message.id)
+
+    def _append_alert_bubble(self, text: str, message_id: str | None = None) -> None:
         safe = html.escape(text).replace("\n", "<br>")
         tokens = self._get_live_tokens()
         alert_color = tokens.get("sys_color_alert", "#ff6b8a")
         alert_text = tokens.get("sys_color_on_alert", "#ffffff")
-        self._append_bubble(safe, align_right=False, bg_color=alert_color, text_color=alert_text, escape=False)
+        self._append_bubble(
+            safe,
+            align_right=False,
+            bg_color=alert_color,
+            text_color=alert_text,
+            escape=False,
+            message_id=message_id,
+        )
 
     def _reset_stream_state(self) -> None:
         self._answer_open = False
@@ -1817,6 +2158,7 @@ class ChatPanel(QWidget):
         self._answer_start = None
         self._last_rendered_html = ""
         self._stream_tokens = {}
+        self._stream_message_id = None
         self._dots_frame = 0
         self._md_timer.stop()
         self._stop_dots()
@@ -1832,6 +2174,15 @@ class ChatPanel(QWidget):
         # the whole answer block, so the scrollbar range changes underneath
         # the user; only follow the tail if they were already reading it.
         follow_tail = self._is_at_bottom()
+
+        # Anything appended while the answer streamed (an alert, a note) sits
+        # below the answer block and would be erased by the rewrite. The model
+        # still has it, so it is redrawn afterwards.
+        trailing = (
+            self._messages.after(self._stream_message_id)
+            if self._stream_message_id
+            else []
+        )
 
         doc = self.transcript.document()
         end = doc.characterCount() - 1
@@ -1853,6 +2204,12 @@ class ChatPanel(QWidget):
         cursor.setPosition(self._answer_start)
         cursor.setBlockFormat(QTextBlockFormat())
         cursor.insertHtml(rendered_html)
+
+        # Deleting the region dropped its tags; reattach the message id, then
+        # redraw the messages that followed the answer.
+        self._tag_blocks(self._answer_start, self._stream_message_id)
+        for message in trailing:
+            self._render_message(message)
 
         if follow_tail:
             self.transcript.moveCursor(QTextCursor.MoveOperation.End)
@@ -1931,6 +2288,12 @@ class ChatPanel(QWidget):
         self._last_rendered_html = ""
         self._answer_open = True
 
+        from system_sl.chatbot.transcript import ASSISTANT
+
+        self._stream_message_id = self._messages.append(
+            ASSISTANT, "", streaming=True
+        ).id
+
         self._dots_bright = tokens.get("sys_color_primary", "#00d9ff")
         self._dots_dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
 
@@ -1938,6 +2301,8 @@ class ChatPanel(QWidget):
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(self._dots_dim))
         cursor.insertText(" " + _DOT_CHAR * _DOT_COUNT, fmt)
+
+        self._tag_blocks(self._answer_start, self._stream_message_id)
 
         self._dots_start = self._answer_start + 1  # after block position
         self._dots_frame = 0
@@ -2012,6 +2377,8 @@ class ChatPanel(QWidget):
         first = not self._answer_text
         self._answer_text += delta
         self._streamed_any = True
+        if self._stream_message_id:
+            self._messages.set_text(self._stream_message_id, self._answer_text)
 
         if first:
             # The answer has started: drop the loading dots and the reasoning
@@ -2029,8 +2396,12 @@ class ChatPanel(QWidget):
             return
         # Keep the reply text clean. Anything that later stores or quotes it
         # must not inherit a "[stopped]" suffix, so the marker is rendered as
-        # part of the bubble instead.
+        # part of the bubble instead and only recorded as a flag on the model.
         self._answer_stopped = True
+        if self._stream_message_id:
+            self._messages.set_flag(
+                self._stream_message_id, stopped=True, streaming=False
+            )
         self._render_answer()
         self._answer_open = False
 
@@ -2270,12 +2641,19 @@ class ChatPanel(QWidget):
             self._show_after_turn(self._append_alert, err)
 
     def _append_confirmation(self, text: str) -> None:
+        from system_sl.chatbot.transcript import CONFIRMATION
+
+        message = self._messages.append(CONFIRMATION, text)
+        self._append_confirmation_bubble(text, message_id=message.id)
+
+    def _append_confirmation_bubble(self, text: str, message_id: str | None = None) -> None:
         tokens = self._get_live_tokens()
         self._append_bubble(
             text,
             align_right=False,
             bg_color=tokens.get("sys_color_surface", "#2a2a40"),
             text_color=tokens.get("sys_color_primary", "#00d9ff"),
+            message_id=message_id,
         )
 
     def _show_after_turn(self, append: Callable[[str], None], text: str) -> None:
@@ -2335,10 +2713,17 @@ class ChatPanel(QWidget):
         if not text:
             return
 
-        # Capture attachments before clearing
+        # Capture attachments and quotes before clearing
         attachment_paths = [str(p) for p in self._attachments]
+        quotes = list(self._quotes)
         self.input_box.clear()
         self._clear_attachments()
+        self._clear_quotes()
+
+        if quotes:
+            # The quotes become delimited blocks above the Player's own text,
+            # within this message's share of the context budget.
+            text = self._compose_turn(text, quotes)
 
         if self.is_busy():
             # A turn is already running: queue this one instead of dropping it.
@@ -2348,6 +2733,22 @@ class ChatPanel(QWidget):
             return
 
         self._send_now(text, attachment_paths)
+
+    def _compose_turn(self, body: str, quotes: list) -> str:
+        """Fit the quotes into the budget and put them above ``body``.
+
+        The budget is derived from the model's context window (session 2's
+        attachment budget), so quoting several long messages cannot push the
+        real question out of the window. A cut quote says so in the transcript.
+        """
+        from system_sl.chatbot.context_window import context_window_for_model
+        from system_sl.chatbot.quotes import fit_quotes, format_quotes, quote_budget_chars
+
+        window = context_window_for_model(self._current_model)
+        fitted, notices = fit_quotes(quotes, quote_budget_chars(window))
+        for notice in notices:
+            self._append_alert(f"quote: {notice}")
+        return format_quotes(fitted, body)
 
     def _send_now(self, text: str, attachment_paths: list[str]) -> None:
         """Run a turn immediately with the given message and attachments."""
@@ -2369,20 +2770,25 @@ class ChatPanel(QWidget):
             self.input_box.setFocus()
             return
 
+        # The Player's turn joins the transcript model first; the view and the
+        # conversation title both read from it.
+        from system_sl.chatbot.transcript import USER
+
+        player_message = self._messages.append(
+            USER, text, attachments=list(attachment_paths)
+        )
+
         # Title the conversation from its first message and remember which
-        # model is answering; both are read by the history dropdown.
+        # model is answering; both are read by the history dropdown. The title
+        # comes from what the Player typed, not from the quotes above it.
         update_conversation(
             self._thread_id,
-            title_if_empty=title_from_message(text),
+            title_if_empty=title_from_message(player_message.body or text),
             last_model=model,
         )
         self._refresh_history_combo()
 
-        # Show attachments in the player message if any
-        if attachment_paths:
-            self._append_player_with_attachments(text, attachment_paths)
-        else:
-            self._append_player(text)
+        self._render_message(player_message)
         # Sending is a deliberate action: bring the new message into view.
         self._scroll_to_bottom()
         self._reset_stream_state()
@@ -2464,6 +2870,9 @@ class ChatPanel(QWidget):
         if not self._answer_text:
             self._answer_text = "[empty reply]"
             self._last_rendered_html = ""
+        if self._stream_message_id:
+            self._messages.set_text(self._stream_message_id, self._answer_text)
+            self._messages.set_flag(self._stream_message_id, streaming=False)
 
         self._render_answer()
         self._answer_open = False
@@ -2476,6 +2885,10 @@ class ChatPanel(QWidget):
         self._md_timer.stop()
         self._stop_dots()
         self._render_answer()  # clears the loading dots if no token ever arrived
+        if self._stream_message_id:
+            self._messages.set_flag(
+                self._stream_message_id, error=message, streaming=False
+            )
         self.reasoning_view.clear()
         self.reasoning_view.setVisible(False)
         self._reasoning_shown = False
