@@ -13,6 +13,15 @@ If no secret-service backend is available (headless, CI, containers), secrets
 fall back to a per-machine encrypted file using Fernet symmetric encryption
 with a key derived from the host machine-id. This keeps secrets off the
 filesystem in plaintext while remaining functional everywhere.
+
+.. warning::
+   The fallback encryption key is derived from ``/etc/machine-id`` (or
+   ``/var/lib/dbus/machine-id``), which is **world-readable on Linux**.
+   Any local process can derive the same key and decrypt stored secrets.
+   The fallback protects against *casual* filesystem reading, NOT against
+   local attackers. For real security, ensure a secret service is running
+   (gnome-keyring, kwallet, etc.) or set ``SYSTEM_SL_REQUIRE_KEYRING=1``
+   to make the absence of a keyring a hard error.
 """
 
 from __future__ import annotations
@@ -20,9 +29,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import keyring
 from cryptography.fernet import Fernet
@@ -42,13 +52,57 @@ SECRET_SETTINGS = "settings"
 # Fallback encrypted store (used only when keyring has no usable backend).
 _FALLBACK_FILE = Path(get_tasks_file_path(".secrets.enc"))
 
+# Callback for GUI notification when fallback is activated (set by main.py).
+_fallback_warning_callback: Optional[Callable[[], None]] = None
+_fallback_warned = False
+
+
+def register_fallback_warning_callback(callback: Callable[[], None]) -> None:
+    """Register a callback to be invoked when the fallback store is used.
+
+    The GUI (main.py) should call this at startup to show a user-visible
+    warning (e.g., system tray toast).
+    """
+    global _fallback_warning_callback
+    _fallback_warning_callback = callback
+
+
+def _notify_fallback_used() -> None:
+    """Log warning and invoke GUI callback (once per process)."""
+    global _fallback_warned
+    if _fallback_warned:
+        return
+    _fallback_warned = True
+
+    msg = (
+        "SECURITY WARNING: Storing secrets in encrypted-file fallback. "
+        "The encryption key is derived from /etc/machine-id, which is "
+        "readable by any local user. For real security, install a secret "
+        "service (gnome-keyring, kwallet) or set SYSTEM_SL_REQUIRE_KEYRING=1."
+    )
+    logging.warning(msg)
+
+    if _fallback_warning_callback:
+        try:
+            _fallback_warning_callback()
+        except Exception:
+            # Callback must not crash the storage layer.
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Fallback encrypted store
 # ---------------------------------------------------------------------------
 
+
 def _fernet_key() -> bytes:
-    """Derive a stable per-machine Fernet key from the host machine-id."""
+    """Derive a stable per-machine Fernet key from the host machine-id.
+
+    .. warning::
+       The machine-id is world-readable on Linux. This provides only
+       obfuscation against casual inspection, not cryptographic security
+       against local attackers.
+    """
     machine_id: Optional[str] = None
     for candidate in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
         try:
@@ -81,12 +135,15 @@ def _fallback_get(name: str) -> Optional[str]:
 
 
 def _fallback_set(name: str, value: str) -> None:
+    _notify_fallback_used()
     try:
         fernet = _fallback_fernet()
         data: dict = {}
         if _FALLBACK_FILE.is_file():
             try:
-                data = json.loads(_fallback_fernet().decrypt(_FALLBACK_FILE.read_bytes()).decode("utf-8"))
+                data = json.loads(
+                    _fallback_fernet().decrypt(_FALLBACK_FILE.read_bytes()).decode("utf-8")
+                )
             except Exception:
                 data = {}
         data[name] = value
@@ -98,6 +155,7 @@ def _fallback_set(name: str, value: str) -> None:
 
 
 def _fallback_delete(name: str) -> None:
+    _notify_fallback_used()
     try:
         if not _FALLBACK_FILE.is_file():
             return
@@ -110,26 +168,62 @@ def _fallback_delete(name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Keyring availability check
+# ---------------------------------------------------------------------------
+
+
+def _keyring_available() -> bool:
+    """Return True if a keyring backend is actually usable.
+
+    Unlike the naive check, this attempts a dummy write/read cycle to
+    verify the backend works (some backends exist but fail at runtime,
+    e.g., headless DBus without a session bus).
+    """
+    try:
+        kr = keyring.get_keyring()
+        if kr is None:
+            return False
+        # Test with a throwaway entry.
+        test_service = f"{SERVICE_NAME}.probe"
+        test_key = ".probe"
+        test_value = "ok"
+        kr.set_password(test_service, test_key, test_value)
+        got = kr.get_password(test_service, test_key)
+        try:
+            kr.delete_password(test_service, test_key)
+        except Exception:
+            pass
+        return got == test_value
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def _keyring_available() -> bool:
-    """Return True if a keyring backend is actually usable."""
-    try:
-        return keyring.get_keyring() is not None
-    except Exception:
-        return False
+
+def _require_keyring_or_fail() -> None:
+    """Raise if SYSTEM_SL_REQUIRE_KEYRING=1 and no keyring backend works."""
+    if os.environ.get("SYSTEM_SL_REQUIRE_KEYRING") == "1":
+        if not _keyring_available():
+            raise RuntimeError(
+                "SYSTEM_SL_REQUIRE_KEYRING=1 but no usable keyring backend found. "
+                "Install gnome-keyring / kwallet / secret-service, or run with a "
+                "D-Bus session bus. Secrets will not be stored in the weak fallback."
+            )
 
 
 def set_secret(name: str, value: str) -> None:
     """Store ``value`` under the secret ``name``.
 
     Uses the system keyring when available, otherwise the encrypted-file
-    fallback.
+    fallback (with a warning).
     """
     if value is None:
         delete_secret(name)
         return
+    _require_keyring_or_fail()
     try:
         if _keyring_available():
             keyring.set_password(SERVICE_NAME, name, value)

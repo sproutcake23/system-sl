@@ -34,6 +34,7 @@ from system_sl.utils import (
     SystemNotification,
     get_tasks_file_path,
     GoogleSyncError,
+    secure_storage,
 )
 from system_sl.core import GoogleSyncEngine, TasksProvider
 from system_sl.core.onboarding import PersonaStorageHandler
@@ -121,6 +122,8 @@ class MainWindow(QMainWindow):
         )
         self.tray_icon = None
         self._setup_tray_icon()
+        # Register callback for secure-storage fallback warning (shows tray toast).
+        secure_storage.register_fallback_warning_callback(self._show_fallback_warning)
         self.theme_manager.themeChanged.connect(self._on_theme_changed)
         self.theme_manager.statusChanged.connect(self._on_theme_status)
 
@@ -499,6 +502,17 @@ class MainWindow(QMainWindow):
             QSystemTrayIcon.ActivationReason.DoubleClick,
         ):
             self._restore_from_tray()
+
+    def _show_fallback_warning(self) -> None:
+        """Show a tray notification when secure-storage fallback is activated."""
+        if self.tray_icon is not None:
+            self.tray_icon.showMessage(
+                "THE SYSTEM — Security Notice",
+                "Secrets stored in fallback encryption (machine-id based). "
+                "Install gnome-keyring/kwallet for real security.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                10000,  # 10 seconds
+            )
 
     def closeEvent(self, event):
         if (
