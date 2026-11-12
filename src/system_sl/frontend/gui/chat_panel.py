@@ -900,6 +900,7 @@ class SettingsDialog(QDialog):
 class _ChatWorker(QObject):
     reasoning = Signal(str)
     chunk = Signal(str)
+    usage = Signal(dict)
     finished = Signal(str)
     failed = Signal(str)
     cancelled = Signal()
@@ -977,6 +978,9 @@ class _ChatWorker(QObject):
                     return
                 if kind == "reasoning":
                     self.reasoning.emit(delta)
+                elif kind == "usage":
+                    if isinstance(delta, dict):
+                        self.usage.emit(delta)
                 else:
                     collected.append(delta)
                     self.chunk.emit(delta)
@@ -1001,6 +1005,10 @@ class _ChatWorker(QObject):
         if thread.isInterruptionRequested():
             self.cancelled.emit()
             return
+
+        # The provider's counts are authoritative; emit them once more here so
+        # the blocking fallback path is covered too.
+        self.usage.emit(self.session.last_usage.as_dict())
 
         # Attachment text is compacted by the panel once the turn is over,
         # whatever the outcome (see ChatPanel._cleanup_thread).
@@ -1183,6 +1191,16 @@ class ChatPanel(QWidget):
             self._on_transcript_context_menu
         )
         root.addWidget(self.transcript, stretch=1)
+
+        # Token/cost line for the last reply. It stays out of the transcript
+        # itself so quoting or copying a message never includes it.
+        self.usage_label = QLabel("")
+        self.usage_label.setObjectName("usageLabel")
+        self.usage_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.usage_label.setVisible(False)
+        self.usage_label.setAccessibleName("Token usage")
+        self.usage_label.setToolTip("Tokens and estimated cost of the last reply")
+        root.addWidget(self.usage_label)
 
         # Store raw error details for alert detail links
 
@@ -3446,6 +3464,9 @@ class ChatPanel(QWidget):
         self._refresh_history_combo()
 
         self._render_message(player_message)
+        # The previous reply's usage no longer describes this turn.
+        self.usage_label.clear()
+        self.usage_label.setVisible(False)
         # Sending is a deliberate action: bring the new message into view.
         self._scroll_to_bottom()
         self._reset_stream_state()
@@ -3470,6 +3491,7 @@ class ChatPanel(QWidget):
         self._thread.started.connect(self._worker.run)
         self._worker.reasoning.connect(self._on_reasoning)
         self._worker.chunk.connect(self._on_chunk)
+        self._worker.usage.connect(self._on_usage)
         self._worker.finished.connect(self._on_reply)
         self._worker.failed.connect(self._on_failure)
         self._worker.cancelled.connect(self._on_cancelled)
@@ -3544,6 +3566,28 @@ class ChatPanel(QWidget):
         self.reasoning_view.setVisible(False)
         self._reasoning_shown = False
         self._stop_dots()
+
+    def _on_usage(self, usage: dict) -> None:
+        """Show the token count and estimated cost of the reply that ended."""
+        from system_sl.chatbot.usage import TokenUsage, format_usage
+
+        if not isinstance(usage, dict) or not usage:
+            return
+        tokens = self._stream_tokens or self._get_live_tokens()
+        colour = tokens.get("sys_color_text_secondary", "#9ab8e5")
+        line = format_usage(
+            TokenUsage(
+                input_tokens=int(usage.get("input_tokens") or 0),
+                output_tokens=int(usage.get("output_tokens") or 0),
+                total_tokens=int(usage.get("total_tokens") or 0),
+            ),
+            self._current_model,
+        )
+        if not line:
+            return
+        self.usage_label.setStyleSheet(f"color: {colour}; font-size: 11px;")
+        self.usage_label.setText(line)
+        self.usage_label.setVisible(True)
 
     @staticmethod
     def _friendly_error(message: str) -> tuple[str, str | None]:

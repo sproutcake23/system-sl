@@ -22,6 +22,7 @@ from system_sl.chatbot.memory import (
     rewind_before,
 )
 from system_sl.chatbot.config import ChatConfig, load_config, save_config
+from system_sl.chatbot.usage import TokenUsage, usage_from_message, merge_usage
 
 from langsmith import uuid7
 
@@ -155,6 +156,9 @@ class ChatSession:
         self.agent = agent or get_system_agent()
         self.llm = llm
         self.model_name = model_name or "system"
+        # Token usage of the most recent turn. Providers report it on the
+        # final AI message (or the last streamed chunk), not on the request.
+        self.last_usage = TokenUsage()
 
     def switch_model(self, model_name: str, agent=None, llm=None) -> None:
         """Continue this conversation with a different model.
@@ -276,6 +280,7 @@ class ChatSession:
         """
         augmented = _user_text(user_msg)
         formatted_messages = self.wrap_message(augmented, message_id)
+        self.last_usage = TokenUsage()
 
         self._prepare_turn()
         set_turn_context(_gate_text(augmented, typed_text), on_proposal)
@@ -289,6 +294,9 @@ class ChatSession:
 
         if response is not None and "messages" in response:
             last_message = response["messages"][-1]
+            reported = usage_from_message(last_message)
+            if reported is not None:
+                self.last_usage = reported
 
             # Extract content property from the base message class instance
             if hasattr(last_message, 'content'):
@@ -322,13 +330,14 @@ class ChatSession:
         on_tool: Optional[Callable[[str, str, bool], None]] = None,
         typed_text: Optional[str] = None,
         message_id: Optional[str] = None,
-    ) -> Iterator[tuple[str, str]]:
+    ) -> Iterator[tuple[str, object]]:
         """Executes a single turn, yielding text as it is produced.
 
         Yields:
-            ``("reasoning", delta)`` for reasoning/thinking text and
-            ``("content", delta)`` for answer text. Models that do not expose
-            reasoning simply never yield the former.
+            ``("reasoning", delta)`` for reasoning/thinking text,
+            ``("content", delta)`` for answer text, and ``("usage", dict)``
+            once at the end when the provider reported token counts. Models
+            that do not expose reasoning simply never yield the former.
 
         ``on_proposal`` receives any task the agent tried to add without the
         Player explicitly asking for it, so the UI can confirm it.
@@ -338,9 +347,11 @@ class ChatSession:
         """
         augmented = _user_text(user_msg)
         formatted_messages = self.wrap_message(augmented, message_id)
+        self.last_usage = TokenUsage()
 
         self._prepare_turn()
         set_turn_context(_gate_text(augmented, typed_text), on_proposal)
+        reported: Optional[TokenUsage] = None
         try:
             for chunk, metadata in self.agent.stream(
                 {"messages": formatted_messages},
@@ -366,6 +377,8 @@ class ChatSession:
                 if not isinstance(chunk, AIMessageChunk):
                     continue
 
+                reported = merge_usage(reported, usage_from_message(chunk))
+
                 if on_tool:
                     for call in chunk.tool_call_chunks or []:
                         # The name arrives once, on the call's first chunk.
@@ -381,6 +394,10 @@ class ChatSession:
                 text = _content_text(chunk.content)
                 if text:
                     yield "content", text
+
+            if reported is not None:
+                self.last_usage = reported
+                yield "usage", reported.as_dict()
         finally:
             clear_turn_context()
 
