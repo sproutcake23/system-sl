@@ -2397,20 +2397,34 @@ class ChatPanel(QWidget):
         # Set char format on cursor, then insert HTML
         cursor.setCharFormat(char_fmt)
         
-        # Prepend timestamp if available
+        cursor.insertHtml(body_html)
+
+        # Qt's rich text ignores float/float-based corner tricks and the
+        # ``title`` attribute on a span, so the timestamp gets its own small,
+        # dim block. A char-format tooltip is the one hover hint Qt honours.
         if timestamp:
             short_time, full_time = self._format_timestamp(timestamp)
             if short_time:
-                # Timestamp shown as a small, dim element at the corner of the bubble
-                ts_color = tokens.get("sys_color_text_secondary", "#9ab8e5") if (tokens := self._get_live_tokens()) else "#9ab8e5"
-                timestamp_html = (
-                    f'<span style="font-size:10px; color:{ts_color}; float:{"right" if align_right else "left"}; '
-                    f'margin-{"left" if align_right else "right"}:8px;" '
-                    f'title="{html.escape(full_time)}">{html.escape(short_time)}</span>'
+                ts_color = self._get_live_tokens().get(
+                    "sys_color_text_secondary", "#9ab8e5"
                 )
-                body_html = timestamp_html + body_html
-        
-        cursor.insertHtml(body_html)
+                cursor.insertBlock()
+                ts_block = QTextBlockFormat()
+                ts_block.setAlignment(
+                    Qt.AlignmentFlag.AlignRight
+                    if align_right
+                    else Qt.AlignmentFlag.AlignLeft
+                )
+                ts_block.setTopMargin(0)
+                ts_block.setBottomMargin(4)
+                cursor.setBlockFormat(ts_block)
+                ts_fmt = QTextCharFormat()
+                ts_fmt.setForeground(QColor(ts_color))
+                ts_fmt.setFontPointSize(10)
+                if full_time:
+                    ts_fmt.setToolTip(full_time)
+                cursor.setCharFormat(ts_fmt)
+                cursor.insertText(short_time)
 
         self._tag_blocks(start, message_id)
 
@@ -2464,7 +2478,7 @@ class ChatPanel(QWidget):
             code_content = match.group(1)
             return (
                 f'<pre style="background:#1e1e2e; color:#d6e7ff; padding:8px 12px; '
-                f'border-radius:6px; overflow-x:auto; font-family:\'JetBrains Mono\',\'Fira Code\',\'Consolas\',monospace; '
+                f'overflow-x:auto; font-family:\'JetBrains Mono\',\'Fira Code\',\'Consolas\',monospace; '
                 f'font-size:12px; line-height:1.5; margin:4px 0;">{code_content}</pre>'
             )
         
@@ -2476,7 +2490,7 @@ class ChatPanel(QWidget):
         # Enhance inline code: <code>...</code>
         inline_code_style = (
             f'background:rgba(128,128,128,0.2); color:{text_color}; '
-            f'padding:1px 4px; border-radius:3px; font-family:monospace; font-size:12px;'
+            f'padding:1px 4px; font-family:monospace; font-size:12px;'
         )
         html = re.sub(
             r'<code>(.*?)</code>',
