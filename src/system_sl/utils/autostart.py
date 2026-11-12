@@ -50,46 +50,44 @@ class CrossPlatformAutostart:
             return os.path.exists(os.path.join(autostart_dir, f"{self.app_name.lower()}.desktop"))
 
         elif self.os_type == "Darwin":  # macOS
-            plist_path = os.path.expanduser(f"~/Library/LaunchAgents/com.{self.app_name.lower()}.plist")
-            return os.path.exists(plist_path)
-            
+            label = f"com.{self.app_name.lower()}"
+            plist_path = os.path.expanduser(
+                f"~/Library/LaunchAgents/{label}.plist"
+            )
+            # A real argument list, not a hand-built XML string: paths with
+            # spaces or quotes survive intact.
+            arguments = shlex.split(exec_cmd, posix=True)
+            plist = {
+                "Label": label,
+                "ProgramArguments": arguments,
+                "RunAtLoad": True,
+            }
+            try:
+                os.makedirs(os.path.dirname(plist_path), exist_ok=True)
+                # Boot out an already-loaded agent before replacing it;
+                # bootstrap fails if the label is still registered.
+                subprocess.run(
+                    ["launchctl", "bootout", f"gui/{os.getuid()}", plist_path],
+                    capture_output=True,
+                )
+                with open(plist_path, "wb") as f:
+                    plistlib.dump(plist, f)
+                loaded = subprocess.run(
+                    ["launchctl", "bootstrap", f"gui/{os.getuid()}", plist_path],
+                    capture_output=True,
+                )
+                if loaded.returncode != 0:
+                    print(
+                        "macOS launchctl bootstrap failed: "
+                        + loaded.stderr.decode(errors="replace")
+                    )
+                    return False
+                return True
+            except Exception as e:
+                print(f"macOS LaunchAgent Error: {e}")
+                return False
+
         return False
-
-    def recorded_command(self) -> str | None:
-        """Return the command the existing autostart entry launches, if any."""
-        try:
-            if self.os_type == "Windows":
-                import winreg
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
-                value, _ = winreg.QueryValueEx(key, self.app_name)
-                return value
-
-            elif self.os_type == "Linux":
-                desktop_path = os.path.expanduser(f"~/.config/autostart/{self.app_name.lower()}.desktop")
-                with open(desktop_path) as f:
-                    for line in f:
-                        if line.startswith("Exec="):
-                            return line[len("Exec="):].strip()
-
-            elif self.os_type == "Darwin":  # macOS
-                plist_path = os.path.expanduser(f"~/Library/LaunchAgents/com.{self.app_name.lower()}.plist")
-                with open(plist_path, "rb") as f:
-                    return " ".join(plistlib.load(f).get("ProgramArguments", []))
-        except (OSError, plistlib.InvalidFileException):
-            pass
-        return None
-
-    def recorded_executable(self) -> Path | None:
-        """Return the program the existing autostart entry launches, if any."""
-        command = self.recorded_command()
-        if not command:
-            return None
-        # Windows paths use backslashes, which POSIX splitting would eat.
-        try:
-            parts = shlex.split(command, posix=self.os_type != "Windows")
-        except ValueError:
-            return None
-        return Path(parts[0].strip('"')) if parts else None
 
     def enable(self) -> bool:
         exec_cmd = self._get_exec_cmd()
@@ -97,8 +95,12 @@ class CrossPlatformAutostart:
         if self.os_type == "Windows":
             import winreg
             try:
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-                # For Windows, we wrap the command in quotes if it contains spaces
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    0,
+                    winreg.KEY_SET_VALUE,
+                )
                 winreg.SetValueEx(key, self.app_name, 0, winreg.REG_SZ, exec_cmd)
                 return True
             except Exception as e:
@@ -108,7 +110,9 @@ class CrossPlatformAutostart:
         elif self.os_type == "Linux":
             autostart_dir = os.path.expanduser("~/.config/autostart")
             os.makedirs(autostart_dir, exist_ok=True)
-            desktop_path = os.path.join(autostart_dir, f"{self.app_name.lower()}.desktop")
+            desktop_path = os.path.join(
+                autostart_dir, f"{self.app_name.lower()}.desktop"
+            )
 
             # 1. Working directory. For a frozen build the "project root" is
             # the AppImage itself (or a /tmp mount that no longer exists), so
@@ -116,17 +120,22 @@ class CrossPlatformAutostart:
             base_dir = ""
             if not getattr(sys, "frozen", False):
                 base_dir = os.path.abspath(os.path.dirname(sys.argv[0]))
-                while base_dir != "/" and not os.path.exists(os.path.join(base_dir, ".venv")):
+                while base_dir != "/" and not os.path.exists(
+                    os.path.join(base_dir, ".venv")
+                ):
                     base_dir = os.path.dirname(base_dir)
                 if base_dir == "/":
                     base_dir = os.path.abspath(os.path.dirname(sys.argv[0]))
 
             # 2. Exec is written verbatim. An autostart entry already runs
             # inside the session, so DISPLAY and the D-Bus address are
-            # inherited and do not need to be baked in. Baking them in via
-            # /bin/sh -c "VAR=... \"<path>\"" also produced a value with
-            # nested double quotes, which the desktop entry spec does not
-            # allow and which desktop environments reject or mis-parse.
+            # inherited and do not need to be baked in.
+            path_line = ""
+            if base_dir:
+                path_value = (
+                    f'"{base_dir}"' if " " in base_dir else base_dir
+                )
+                path_line = f"Path={path_value}\n"
             try:
                 with open(desktop_path, "w") as f:
                     f.write(
@@ -134,7 +143,7 @@ class CrossPlatformAutostart:
                         "Type=Application\n"
                         f"Name={self.app_name}\n"
                         f"Exec={exec_cmd}\n"
-                        + (f"Path={base_dir}\n" if base_dir else "")
+                        + path_line
                         + "Hidden=false\n"
                         "NoDisplay=false\n"
                         "X-GNOME-Autostart-enabled=true\n"
@@ -145,31 +154,34 @@ class CrossPlatformAutostart:
                 return False
 
         elif self.os_type == "Darwin":  # macOS
-            plist_path = os.path.expanduser(f"~/Library/LaunchAgents/com.{self.app_name.lower()}.plist")
-            # Break command into components for the plist array
-            cmd_args = exec_cmd.split() 
-            args_xml = "".join(f"<string>{arg}</string>" for arg in cmd_args)
-            
-            plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.{self.app_name.lower()}</string>
-    <key>ProgramArguments</key>
-    <array>
-        {args_xml}
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-</dict>
-</plist>"""
+            label = f"com.{self.app_name.lower()}"
+            plist_path = os.path.expanduser(
+                f"~/Library/LaunchAgents/{label}.plist"
+            )
+            arguments = shlex.split(exec_cmd, posix=True)
+            plist = {
+                "Label": label,
+                "ProgramArguments": arguments,
+                "RunAtLoad": True,
+            }
             try:
                 os.makedirs(os.path.dirname(plist_path), exist_ok=True)
-                with open(plist_path, "w") as f:
-                    f.write(plist_content)
-                # Load the agent immediately
-                subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", plist_path], capture_output=True)
+                subprocess.run(
+                    ["launchctl", "bootout", f"gui/{os.getuid()}", plist_path],
+                    capture_output=True,
+                )
+                with open(plist_path, "wb") as f:
+                    plistlib.dump(plist, f)
+                loaded = subprocess.run(
+                    ["launchctl", "bootstrap", f"gui/{os.getuid()}", plist_path],
+                    capture_output=True,
+                )
+                if loaded.returncode != 0:
+                    print(
+                        "macOS launchctl bootstrap failed: "
+                        + loaded.stderr.decode(errors="replace")
+                    )
+                    return False
                 return True
             except Exception as e:
                 print(f"macOS LaunchAgent Error: {e}")
@@ -207,8 +219,8 @@ class CrossPlatformAutostart:
         return False
 
     def toggle(self) -> bool:
+        """Enable or disable autostart; return whether it ended up enabled."""
         if self.is_enabled():
-            self.disable()
-            return False
-        else:
-            return self.enable()
+            # A failed disable must not be reported as "off".
+            return not self.disable()
+        return self.enable()
