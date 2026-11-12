@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 import logging
+import threading
 import numpy as np
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,45 @@ from system_sl.utils.file_lock import file_lock
 
 logging.basicConfig(level=logging.INFO, format="[priority_engine] %(message)s")
 log = logging.getLogger(__name__)
+
+
+# ── Shared SpellChecker ─────────────────────────────────────────────────
+# Building the dictionary is expensive, and PriorityPipeline is constructed
+# on every ranking run, so the checker is process-wide like Setup._nlp.
+# pyspellchecker only reads its word frequencies after construction, which
+# makes one shared instance safe for the GUI and the ranking worker.
+_CUSTOM_WORDS = [
+    "api",
+    "json",
+    "frontend",
+    "backend",
+    "refactor",
+    "repo",
+    "github",
+    "spacy",
+    "ui",
+    "ux",
+    "sql",
+    "css",
+    "html",
+]
+
+_spellchecker = None
+_spellchecker_lock = threading.Lock()
+
+
+def get_spellchecker():
+    """Return the shared SpellChecker, loading it on first use."""
+    global _spellchecker
+    if _spellchecker is None:
+        with _spellchecker_lock:
+            if _spellchecker is None:
+                from spellchecker import SpellChecker
+
+                checker = SpellChecker()
+                checker.word_frequency.load_words(_CUSTOM_WORDS)
+                _spellchecker = checker
+    return _spellchecker
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -98,33 +138,11 @@ class TaskAnalyzer:
 
     def __init__(self):
         self.setup = Setup()
-        self._spell = None  # Lazy-loaded SpellChecker
         self._nlp = self.setup._get_model()
-   
-   
+
     def _get_spell(self):
-        """Lazy-load SpellChecker with custom word list."""
-        if self._spell is None:
-            from spellchecker import SpellChecker
-            self._spell = SpellChecker()
-            self._spell.word_frequency.load_words(
-                [
-                    "api",
-                    "json",
-                    "frontend",
-                    "backend",
-                    "refactor",
-                    "repo",
-                    "github",
-                    "spacy",
-                    "ui",
-                    "ux",
-                    "sql",
-                    "css",
-                    "html",
-                ]
-            )
-        return self._spell
+        """Return the process-wide SpellChecker (loaded once per process)."""
+        return get_spellchecker()
    
     def correct_typos(self, text: str) -> str:
         """Fixes spelling mistakes in a string before NLP processing."""
