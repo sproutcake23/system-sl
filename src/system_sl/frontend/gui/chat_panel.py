@@ -940,7 +940,10 @@ class _ChatWorker(QObject):
         augmented_msg = self.user_msg
         if self.attachment_paths:
             window = context_window_for_llm(getattr(self.session, "llm", None))
-            budget = attachment_budget_chars(window)
+            # One budget per message: quotes already in it are paid for out
+            # of the same allowance, not on top of it.
+            quoted = max(0, len(self.user_msg) - len(self.typed_text or self.user_msg))
+            budget = max(2_000, attachment_budget_chars(window) - quoted)
             attachments = build_attachments(self.attachment_paths, budget)
 
             doc_parts = []
@@ -999,14 +1002,8 @@ class _ChatWorker(QObject):
             self.cancelled.emit()
             return
 
-        # The attachment text only mattered for this turn: shrink it in the
-        # stored history so later turns do not pay for it again.
-        if self.attachment_paths:
-            try:
-                self.session.compact_attachment_references()
-            except Exception:
-                logger.warning("could not compact the attachments", exc_info=True)
-
+        # Attachment text is compacted by the panel once the turn is over,
+        # whatever the outcome (see ChatPanel._cleanup_thread).
         self.finished.emit("".join(collected))
 
 
@@ -2256,28 +2253,36 @@ class ChatPanel(QWidget):
     def _player_html(self, message: "ChatMessage") -> str:
         """Bubble contents for a Player message: attachments, quotes, text."""
         parts: list[str] = []
-        if message.attachments:
-            parts.append(self._attachment_summary_html(message.attachments))
+        if message.attachments or message.documents:
+            parts.append(
+                self._attachment_summary_html(message.attachments, message.documents)
+            )
         for quote in message.quotes:
             parts.append(self._quote_block_html(quote))
         parts.append(html.escape(message.body or "").replace("\n", "<br>"))
         return "".join(parts)
 
     @staticmethod
-    def _attachment_summary_html(paths: list[str]) -> str:
-        """The "📎 Attached:" preview shown inside a Player message."""
+    def _attachment_summary_html(paths: list[str], documents: list[str] = ()) -> str:
+        """The "📎 Attached:" preview shown inside a Player message.
+
+        ``documents`` are names only (a message reopened from history: the
+        text was read when it was sent).
+        """
         attach_lines = ["📎 Attached:"]
         for path_str in paths:
             path = Path(path_str)
             try:
                 size_kb = path.stat().st_size / 1024
                 size_str = (
-                    f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.0f} KB"
+                    f" ({size_kb / 1024:.1f} MB)" if size_kb >= 1024 else f" ({size_kb:.0f} KB)"
                 )
             except OSError:
                 # The file is only decoration here; the text was already read.
-                size_str = "not found"
-            attach_lines.append(f"  • {path.name} ({size_str})")
+                size_str = ""
+            attach_lines.append(f"  • {path.name}{size_str}")
+        for name in documents:
+            attach_lines.append(f"  • {name}")
         return html.escape("\n".join(attach_lines)).replace("\n", "<br>") + "<br><br>"
 
     @staticmethod
@@ -3377,10 +3382,19 @@ class ChatPanel(QWidget):
         attachment budget), so quoting several long messages cannot push the
         real question out of the window. A cut quote says so in the transcript.
         """
-        from system_sl.chatbot.context_window import context_window_for_model
+        from system_sl.chatbot.context_window import (
+            context_window_for_llm,
+            context_window_for_model,
+        )
         from system_sl.chatbot.quotes import fit_quotes, format_quotes, quote_budget_chars
 
-        window = context_window_for_model(self._current_model)
+        # The model's own profile is the best source, as for attachments.
+        llm = getattr(self._session, "llm", None)
+        window = (
+            context_window_for_llm(llm)
+            if llm is not None
+            else context_window_for_model(self._current_model)
+        )
         fitted, notices = fit_quotes(quotes, quote_budget_chars(window))
         for notice in notices:
             self._append_alert(f"quote: {notice}")
@@ -3588,6 +3602,7 @@ class ChatPanel(QWidget):
         finished_session = (
             getattr(self._worker, "session", None) if self._worker is not None else None
         )
+        had_attachments = bool(getattr(self._worker, "attachment_paths", None))
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
@@ -3602,6 +3617,14 @@ class ChatPanel(QWidget):
         # outcome the Player answered while it was streaming.
         if finished_session is not None:
             self._repair_session_after_turn(finished_session)
+            if had_attachments:
+                # The attachment text only mattered for this turn: shrink it
+                # in the stored history so later turns do not pay for it
+                # again. Also after Stop or an error, or it would stay forever.
+                try:
+                    finished_session.compact_attachment_references()
+                except Exception:
+                    logger.warning("could not compact the attachments", exc_info=True)
         notes, self._notes_after_turn = self._notes_after_turn, []
         for append, text in notes:
             append(text)

@@ -82,6 +82,29 @@ def _shorten(text: str, limit: int = SUMMARY_CHARS) -> str:
     return flat[: limit - 1].rstrip() + "…"
 
 
+def _player_summary(text: str) -> str:
+    """The Player's own words from a dropped turn, without documents or quotes.
+
+    The summary is part of the system message. Attached documents and quoted
+    text are untrusted (a document can carry instructions), so only their
+    count is mentioned, never their content.
+    """
+    from system_sl.chatbot.quotes import parse_quotes
+    from system_sl.chatbot.transcript import split_documents, strip_date_prefix
+
+    documents, rest = split_documents(strip_date_prefix(text))
+    quotes, body = parse_quotes(rest)
+    extras = []
+    if documents:
+        extras.append(f"{len(documents)} attached document(s)")
+    if quotes:
+        extras.append(f"{len(quotes)} quote(s)")
+    summary = _shorten(body) if body else ""
+    if extras:
+        summary = f"{summary} [with {', '.join(extras)}]".strip()
+    return summary
+
+
 def summarize_blocks(blocks: Sequence[Sequence[BaseMessage]]) -> str:
     """Summarize the dropped turns into a few lines.
 
@@ -100,7 +123,7 @@ def summarize_blocks(blocks: Sequence[Sequence[BaseMessage]]) -> str:
         )
         parts = []
         if player is not None:
-            parts.append(f"Player: {_shorten(_message_text(player))}")
+            parts.append(f"Player: {_player_summary(_message_text(player))}")
         if system is not None:
             parts.append(f"System: {_shorten(_message_text(system))}")
         if parts:

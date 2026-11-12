@@ -213,3 +213,18 @@ def test_quitting_mid_reply_records_the_task_outcome(panel):
     assert widget._thread is None
     texts = [t for _k, t in _stored(widget)]
     assert any("Gym" in t for t in texts), "the outcome was lost on quit"
+
+
+def test_attachment_text_is_compacted_even_when_the_reply_fails(panel, tmp_path):
+    widget, app = panel
+    widget._model.fail_on = [1]
+    doc = tmp_path / "notes.txt"
+    doc.write_text("lorem ipsum dolor sit amet " * 400)
+
+    widget._add_attachments([doc])
+    _send(widget, app, "summarise this")
+
+    humans = [t for k, t in _stored(widget) if k == "human"]
+    assert len(humans) == 1
+    assert "notes.txt" in humans[0]
+    assert len(humans[0]) < 3_000, "the full document stayed in the history"

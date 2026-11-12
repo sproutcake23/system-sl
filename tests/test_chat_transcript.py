@@ -286,3 +286,25 @@ def test_quoted_message_stays_within_the_budget():
     composed = format_quotes(fitted, "and why?")
 
     assert len(composed) <= budget + 500  # delimiters and the marker
+
+
+def test_reopened_message_shows_documents_as_names_not_raw_text():
+    from langchain_core.messages import HumanMessage
+
+    from system_sl.chatbot.documents import compact_document_blocks
+    from system_sl.chatbot.quotes import Quote, format_quotes
+    from system_sl.chatbot.transcript import USER, Transcript
+
+    document = '<document name="Q3 &amp; plan.pdf" pages="2">' + ("text " * 500) + "</document>"
+    failed = "[uploaded document: scan.png — could not read]"
+    body = format_quotes([Quote(speaker="assistant", text="earlier")], "what now?")
+    stored = compact_document_blocks(f"{document}\n\n{failed}\n\n{body}")
+
+    transcript = Transcript.from_history([HumanMessage(content=stored, id="h1")])
+    message = next(m for m in transcript if m.role == USER)
+
+    assert message.documents == ["Q3 & plan.pdf", "scan.png"]
+    assert message.body == "what now?"
+    assert [q.text for q in message.quotes] == ["earlier"]
+    assert "<document" not in message.plain_text()
+    assert "<document" not in message.as_quote().text
