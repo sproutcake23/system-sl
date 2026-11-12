@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,39 @@ def _profile_context_window(llm: Any) -> Optional[int]:
     return value if value > 0 else None
 
 
+# Parsed llm_config.json, keyed by path and file mtime. The model list is
+# read for every model call when a provider reports no profile; re-reading and
+# re-parsing the whole file each time is pure overhead.
+_config_cache: dict[str, tuple[float, Any]] = {}
+
+
+def _load_config_data() -> Any:
+    """Read llm_config.json, reusing the parse while the file is unchanged."""
+    from system_sl.chatbot.config import get_config_path
+
+    path = get_config_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    cached = _config_cache.get(path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        data = None
+    _config_cache[path] = (mtime, data)
+    return data
+
+
+def reset_config_cache() -> None:
+    """Forget the parsed config (used by tests and after an external edit)."""
+    _config_cache.clear()
+
+
 def _cached_context_length(model_name: str) -> Optional[int]:
     """Return the window the settings dialog cached for this model.
 
@@ -147,13 +181,7 @@ def _cached_context_length(model_name: str) -> Optional[int]:
     """
     if not model_name:
         return None
-    try:
-        from system_sl.chatbot.config import get_config_path
-
-        with open(get_config_path(), "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception:
-        return None
+    data = _load_config_data()
     if not isinstance(data, dict):
         return None
     cache = data.get("model_cache") or {}
@@ -211,6 +239,40 @@ def context_window_for_llm(llm: Any) -> int:
         if isinstance(name, str) and name:
             return context_window_for_model(name)
     return DEFAULT_CONTEXT_WINDOW
+
+
+# =============================================================================
+# TOOL SCHEMAS
+# =============================================================================
+
+def count_tool_schema_tokens(tools: Iterable[Any]) -> int:
+    """Approximate the tokens the bound tool schemas cost.
+
+    Providers send the whole schema with every request, so it competes with the
+    history for the same window. The schema is JSON; counting its text is a
+    close enough estimate.
+    """
+    parts: list[str] = []
+    for tool in tools or []:
+        if isinstance(tool, dict):
+            parts.append(json.dumps(tool, default=str, sort_keys=True))
+            continue
+        name = getattr(tool, "name", "") or ""
+        description = getattr(tool, "description", "") or ""
+        schema = getattr(tool, "args_schema", None)
+        if schema is not None and hasattr(schema, "model_json_schema"):
+            try:
+                schema_text = json.dumps(schema.model_json_schema(), sort_keys=True)
+            except Exception:
+                schema_text = str(schema)
+        elif isinstance(schema, dict):
+            schema_text = json.dumps(schema, sort_keys=True)
+        else:
+            schema_text = str(schema or "")
+        parts.append(name + description + schema_text)
+    if not parts:
+        return 0
+    return count_text_tokens("\n".join(parts))
 
 
 # =============================================================================

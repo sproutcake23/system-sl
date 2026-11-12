@@ -539,3 +539,46 @@ def test_trimming_summary_never_copies_document_or_quote_text():
     assert "secret quoted" not in summary
     assert "summarise" in summary
     assert "1 attached document(s)" in summary and "1 quote(s)" in summary
+
+
+def test_tool_schemas_are_counted():
+    """Tool schemas are sent with every request and use the same window."""
+    from system_sl.chatbot.context_window import count_tool_schema_tokens
+
+    class _Schema:
+        @staticmethod
+        def model_json_schema():
+            return {"type": "object", "properties": {"x": {"type": "string"}}}
+
+    class _Tool:
+        name = "do_thing"
+        description = "does a thing"
+        args_schema = _Schema
+
+    assert count_tool_schema_tokens([]) == 0
+    assert count_tool_schema_tokens([_Tool()]) > 0
+    assert count_tool_schema_tokens([{"name": "x", "parameters": {}}]) > 0
+
+
+def test_config_parse_is_reused_until_the_file_changes(tmp_path, monkeypatch):
+    import json as json_mod
+
+    from system_sl.chatbot import config as config_mod
+    from system_sl.chatbot import context_window as cw
+
+    path = tmp_path / "llm_config.json"
+    path.write_text(json_mod.dumps({"model_cache": {}}), encoding="utf-8")
+    monkeypatch.setattr(config_mod, "get_config_path", lambda: str(path))
+    cw.reset_config_cache()
+
+    calls = []
+    real_load = json_mod.loads
+
+    def counting_loads(text, **kwargs):
+        calls.append(text)
+        return real_load(text, **kwargs)
+
+    monkeypatch.setattr(cw.json, "loads", counting_loads)
+    assert cw._load_config_data() == {"model_cache": {}}
+    assert cw._load_config_data() == {"model_cache": {}}
+    assert len(calls) == 1
