@@ -48,7 +48,8 @@ from system_sl.core.priority_engine_new import (
     save_manual_order,
 )  # we are importing run_prioritization from api section(priority_engine_new)
 from system_sl.frontend.gui.theme import get_current_theme_tokens
-from system_sl.utils.data_health import DataIssue, pop_issues, record_issue
+from system_sl.frontend.gui.data_issue_reporter import drain_data_issues
+from system_sl.utils.data_health import DataIssue, record_issue
 from system_sl.utils.paths import get_tasks_file_path
 
 
@@ -127,10 +128,6 @@ class TasksWindow(QWidget):
         self._status_message = ""
         self._priority_note = ""
 
-        # Quarantine notices are shown once per file per session, not on every
-        # refresh.
-        self._reported_corrupt: set[str] = set()
-
         # One ranking worker at a time. A refresh requested while it runs is
         # coalesced: its result is discarded and ranking starts again, so the
         # list never shows a stale order.
@@ -190,6 +187,8 @@ class TasksWindow(QWidget):
         root.addLayout(add_row)
 
         self.status_label = QLabel("")
+        # Several data problems are listed one per line, with full paths.
+        self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
         self._refresh_list()
@@ -219,25 +218,12 @@ class TasksWindow(QWidget):
         drains the queue and explains them once instead of letting a corrupt
         file look like an empty task list.
         """
-        for issue in pop_issues():
-            self._status_message = issue.message()
-            if issue.kind != "corrupt" or issue.corrupt_path is None:
-                continue
-            key = str(issue.corrupt_path)
-            if key in self._reported_corrupt:
-                continue
-            self._reported_corrupt.add(key)
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Icon.Warning)
-            box.setWindowTitle("Task data recovered")
-            box.setText(issue.message())
-            box.setInformativeText(
-                "The original file was kept so you can inspect or recover it. "
-                "Move it back to restore those tasks."
-            )
-            box.setStandardButtons(QMessageBox.StandardButton.Ok)
-            box.setModal(False)
-            box.open()
+        # Every problem found since the last drain is listed, one per line,
+        # instead of each overwriting the previous one. Dialogs are shown once
+        # per event, shared with the main window's monitor.
+        summary = drain_data_issues(self)
+        if summary:
+            self._status_message = summary
         self._apply_status()
 
     def _report_write_failure(self, path: str, error: OSError) -> None:

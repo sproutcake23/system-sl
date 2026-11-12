@@ -5,14 +5,19 @@ that returns None on corruption instead of silently returning {}.
 """
 
 import json
+import logging
 import os
 import tempfile
 import shutil
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from system_sl.utils.data_health import DataIssue, record_issue
+
+
+log = logging.getLogger(__name__)
 
 
 class LoadStatus(str, Enum):
@@ -52,6 +57,22 @@ def atomic_write_json(filepath: str | Path, data: dict | list) -> None:
     os.replace(temp_name, path)
 
 
+def corrupt_backup_path(path: Path, now: datetime | None = None) -> Path:
+    """Return an unused ``<file>.corrupt-YYYYmmdd-HHMMSS[-n]`` path for ``path``.
+
+    A fixed ``<file>.corrupt`` name meant a second corruption overwrote the
+    first backup, so every quarantine gets its own timestamped name.
+    """
+    stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    base = path.with_name(f"{path.name}.corrupt-{stamp}")
+    candidate = base
+    n = 1
+    while candidate.exists():
+        candidate = base.with_name(f"{base.name}-{n}")
+        n += 1
+    return candidate
+
+
 def load_json_with_status(
     filepath: str | Path,
 ) -> tuple[LoadStatus, Any, Path | None]:
@@ -60,13 +81,15 @@ def load_json_with_status(
     Does NOT catch OSError (permission denied, etc.) — those propagate so the
     caller can report an unreadable file.
 
-    On JSONDecodeError, backs up the corrupt file to <filepath>.corrupt before
-    returning ``LoadStatus.CORRUPT``, so the user can recover manually.
+    On JSONDecodeError, moves the corrupt file to a unique
+    ``<filepath>.corrupt-<timestamp>`` before returning ``LoadStatus.CORRUPT``,
+    so the user can recover manually.
 
     Returns:
         ``(status, data, corrupt_backup)``. ``data`` is the parsed value for
         ``OK`` and None otherwise; ``corrupt_backup`` is the quarantine path
-        only for ``CORRUPT``.
+        only for ``CORRUPT`` and only when the backup really exists (None when
+        the move failed and the original was left in place).
     """
     path = Path(filepath)
 
@@ -83,12 +106,19 @@ def load_json_with_status(
         return LoadStatus.OK, json.loads(content), None
     except json.JSONDecodeError:
         # Back up corrupt file for recovery
-        corrupt_backup = path.with_suffix(path.suffix + ".corrupt")
+        corrupt_backup: Path | None = corrupt_backup_path(path)
+        detail = ""
         try:
             shutil.move(str(path), str(corrupt_backup))
-        except OSError:
-            pass  # Best effort; original stays in place
-        record_issue(DataIssue("corrupt", path, corrupt_backup))
+        except OSError as e:
+            # The original stays in place. Never claim a copy that does not
+            # exist: report the file as left where it was instead.
+            log.warning("Could not quarantine corrupt file %s: %s", path, e)
+            corrupt_backup = None
+            detail = str(e)
+        if corrupt_backup is not None and not corrupt_backup.exists():
+            corrupt_backup = None
+        record_issue(DataIssue("corrupt", path, corrupt_backup, detail=detail))
         return LoadStatus.CORRUPT, None, corrupt_backup
 
 
@@ -98,8 +128,8 @@ def safe_load_json(filepath: str | Path) -> dict | list | None:
     Does NOT catch OSError (permission denied, etc.) — those propagate.
     Only catches JSONDecodeError and empty-file cases.
 
-    On JSONDecodeError, backs up the corrupt file to <filepath>.corrupt
-    before returning None, so user can recover manually.
+    On JSONDecodeError, backs up the corrupt file to
+    ``<filepath>.corrupt-<timestamp>`` before returning None, so user can recover manually.
 
     Args:
         filepath: Source file path.

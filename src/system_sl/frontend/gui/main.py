@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
+from system_sl.frontend.gui.data_issue_reporter import DataIssueMonitor
 from system_sl.frontend.gui.settings_window import AppSettingsDialog
 from system_sl.frontend.gui.theme import THEME_MODE_LABELS, THEME_MODES
 from system_sl.frontend.gui.theme_manager import get_theme_manager
@@ -225,6 +226,12 @@ class MainWindow(QMainWindow):
         # to deliver the login reminder.)
         if self.notifications_check.isChecked():
             self._start_notifier(notify_now=False)
+
+        # Data-file problems (a damaged config or chat history, say) are
+        # queued wherever they are found. Only the Tasks window used to drain
+        # that queue, after a ranking pass, so most went unmentioned. Check it
+        # here too, on the GUI thread, and explain each one non-modally.
+        self._data_issue_monitor = DataIssueMonitor(self)
 
     def _build_general_settings_page(self) -> QWidget:
         """Build the Settings window's General tab."""
