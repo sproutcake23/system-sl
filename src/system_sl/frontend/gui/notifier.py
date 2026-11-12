@@ -26,6 +26,7 @@ from system_sl.utils.notification_settings import load_notifications_enabled
 from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.autostart_migration import initialize_application_autostart
 from system_sl.utils.auto_updater import apply_pending_update
+from system_sl.utils.worker_threads import shutdown_workers
 
 
 def main():
@@ -57,6 +58,9 @@ def main():
 
     view = SystemNotification()
     controller = BackgroundServiceController(view)
+    # Let a ranking pass in flight finish before teardown destroys its thread.
+    app.aboutToQuit.connect(controller.stop)
+    app.aboutToQuit.connect(shutdown_workers)
     controller.poll_and_render_task()
 
     return app.exec()

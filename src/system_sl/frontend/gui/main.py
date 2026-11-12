@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 from system_sl.frontend.gui.popup_windows import TasksWindow, OnboardingWindow
+from system_sl.frontend.gui.data_issue_reporter import DataIssueMonitor
 from system_sl.frontend.gui.settings_window import AppSettingsDialog
 from system_sl.frontend.gui.theme import THEME_MODE_LABELS, THEME_MODES
 from system_sl.frontend.gui.theme_manager import get_theme_manager
@@ -45,6 +46,7 @@ from system_sl.utils.audio_manager import (
     DEFAULT_SOUNDS_DIR,
 )
 from system_sl.utils.autostart_migration import initialize_application_autostart
+from system_sl.utils.worker_threads import shutdown_workers
 from system_sl.utils.notification_settings import (
     load_notifications_enabled,
     save_notifications_enabled,
@@ -228,6 +230,17 @@ class MainWindow(QMainWindow):
         # to deliver the login reminder.)
         if self.notifications_check.isChecked():
             self._start_notifier(notify_now=False)
+
+        # Data-file problems (a damaged config or chat history, say) are
+        # queued wherever they are found. Only the Tasks window used to drain
+        # that queue, after a ranking pass, so most went unmentioned. Check it
+        # here too, on the GUI thread, and explain each one non-modally.
+        self._data_issue_monitor = DataIssueMonitor(self)
+
+        # Worker threads (ranking, reminders) must be finished before Python
+        # tears the windows down, or a live QThread is destroyed and the
+        # process aborts.
+        QApplication.instance().aboutToQuit.connect(self._shutdown_for_quit)
 
     def _build_general_settings_page(self) -> QWidget:
         """Build the Settings window's General tab."""
@@ -531,6 +544,18 @@ class MainWindow(QMainWindow):
             # The app disables Qt's last-window auto-quit to support tray mode,
             # so explicitly quit when the user has opted out of tray behavior.
             QTimer.singleShot(0, QApplication.instance().quit)
+
+    def _shutdown_for_quit(self) -> None:
+        """Stop background work so nothing outlives the application."""
+        self._data_issue_monitor.stop()
+        # Hide first: any remaining wait for a ranking pass then happens with
+        # no window on screen instead of as a frozen one.
+        if self.tasks_window is not None:
+            self.tasks_window.shutdown()
+            self.tasks_window.hide()
+        self.hide()
+        self._stop_notifier()
+        shutdown_workers()
 
     def open_tasks_window(self):
         if self.tasks_window is None:
