@@ -833,6 +833,7 @@ class ChatPanel(QWidget):
         self._halted: bool = False            # user pressed Stop
 
         self._answer_text: str = ""           # raw markdown accumulated this turn
+        self._answer_stopped: bool = False    # Stop was pressed; UI-only marker
         self._answer_start: int | None = None # doc position of the [SYSTEM] line
         self._last_rendered_html: str = ""
         self._stream_tokens: dict = {}        # theme captured once per turn
@@ -1568,6 +1569,7 @@ class ChatPanel(QWidget):
         self._reasoning_shown = False
         self._halted = False
         self._answer_text = ""
+        self._answer_stopped = False
         self._answer_start = None
         self._last_rendered_html = ""
         self._stream_tokens = {}
@@ -1633,7 +1635,18 @@ class ChatPanel(QWidget):
             else:
                 body = _colorize_markdown_html(body, body_color)
                 rendered = self._wrap_answer_html(body, bg, body_color)
-        
+
+        if self._answer_stopped:
+            # UI-only badge after the message; the reply text stays clean.
+            alert = tokens.get("sys_color_alert", "#ff6b8a")
+            on_alert = tokens.get("sys_color_on_alert", "#ffffff")
+            rendered += (
+                '<div style="margin-top:4px;">'
+                f'<span style="background:{alert}; color:{on_alert};'
+                ' border-radius:8px; padding:1px 8px; font-size:11px;">'
+                "stopped</span></div>"
+            )
+
         if rendered == self._last_rendered_html:
             return
         self._last_rendered_html = rendered
@@ -1770,7 +1783,10 @@ class ChatPanel(QWidget):
     def _mark_stopped(self) -> None:
         if not self._answer_open:
             return
-        self._answer_text += " [stopped]"
+        # Keep the reply text clean. Anything that later stores or quotes it
+        # must not inherit a "[stopped]" suffix, so the marker is rendered as
+        # part of the bubble instead.
+        self._answer_stopped = True
         self._render_answer()
         self._answer_open = False
 
