@@ -14,6 +14,12 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
 
+# A test whose script keeps asking for tools would loop until LangGraph's
+# recursion limit (or forever, if a subclass resets it) and grow the
+# checkpoint database without bound. Fail fast instead.
+MAX_CALLS = 50
+
+
 class FakeChatModel(BaseChatModel):
     """Return ``replies`` in order (the last one repeats)."""
 
@@ -35,6 +41,10 @@ class FakeChatModel(BaseChatModel):
         self.calls += 1
         return self.replies[index]
 
+    def _guard(self) -> None:
+        if len(self.seen) > MAX_CALLS:
+            raise RuntimeError(f"FakeChatModel called more than {MAX_CALLS} times; the test is looping")
+
     def _generate(
         self,
         messages: List[BaseMessage],
@@ -42,7 +52,9 @@ class FakeChatModel(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        return ChatResult(generations=[ChatGeneration(message=self._next_reply(messages))])
+        reply = self._next_reply(messages)
+        self._guard()
+        return ChatResult(generations=[ChatGeneration(message=reply)])
 
     def _stream(
         self,
@@ -52,6 +64,7 @@ class FakeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
         reply = self._next_reply(messages)
+        self._guard()
         for token in str(reply.content).split(" "):
             chunk = ChatGenerationChunk(message=AIMessageChunk(content=token + " "))
             if run_manager:

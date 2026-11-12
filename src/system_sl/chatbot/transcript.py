@@ -68,6 +68,10 @@ class ChatMessage:
     stopped: bool = False
     error: str = ""
     streaming: bool = False
+    # Id of the stored LangGraph message this one came from (or will be stored
+    # as). Regenerate / retry / edit-and-resend rewind the conversation to
+    # just before it, so the model's memory matches what is on screen.
+    source_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.timestamp:
@@ -125,15 +129,20 @@ class Transcript:
             if not text.strip():
                 continue
 
+            source_id = str(getattr(message, "id", "") or "")
             if role == "human":
                 text = strip_date_prefix(text)
                 if is_app_note(text):
                     transcript.append_note(note_body(text))
                 else:
-                    transcript.append(USER, text)
+                    transcript.append(USER, text, source_id=source_id)
             elif role == "ai":
-                # Tool-call-only turns have no text worth showing.
-                transcript.append(ASSISTANT, text)
+                # A turn closed after Stop is recorded as the model's output
+                # (see memory.repair_interrupted_turn); show it as a note.
+                if is_app_note(text):
+                    transcript.append_note(note_body(text))
+                else:
+                    transcript.append(ASSISTANT, text, source_id=source_id)
         return transcript
 
     # ----- reading -----

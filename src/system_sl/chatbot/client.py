@@ -9,6 +9,8 @@ from langchain_core.messages import AIMessageChunk, HumanMessage
 from system_sl.chatbot.system import (
     get_system_agent,
     get_system_agent_for_model,
+    message_has_documents,
+    player_typed_text,
     reset_agent_cache,
     set_turn_context,
     clear_turn_context,
@@ -17,6 +19,7 @@ from system_sl.chatbot.memory import (
     APP_NOTE_PREFIX,
     load_thread_messages,
     repair_interrupted_turn,
+    rewind_before,
 )
 from system_sl.chatbot.config import ChatConfig, load_config, save_config
 
@@ -75,6 +78,23 @@ def _reasoning_text(chunk: AIMessageChunk) -> str:
         return "".join(parts)
 
     return ""
+
+
+def _gate_text(message: str, typed_text: Optional[str]) -> str:
+    """The text the add_task gate may treat as the Player's own request.
+
+    Only what the Player typed counts. Quoted messages and attached documents
+    are someone else's words: a document saying "create a task to ..." must
+    not add a task without asking. With a document attached nothing counts as
+    an explicit request (see ``message_has_documents``). Callers that know the
+    typed text pass it; otherwise it is recovered from the composed message,
+    failing closed.
+    """
+    if message_has_documents(message):
+        return ""
+    if typed_text is not None:
+        return typed_text
+    return player_typed_text(message)
 
 
 def _user_text(user_msg: Union[str, List[str]]) -> str:
@@ -215,26 +235,34 @@ class ChatSession:
         if repaired:
             logger.info("conversation %s repaired before the next turn", self.thread_id)
 
-    def wrap_message(self, user_msg: Union[str, List[str]]) -> List[dict]:
-        """Formats a raw string or list of strings into the standard message format.
+    def wrap_message(
+        self, user_msg: Union[str, List[str]], message_id: Optional[str] = None
+    ) -> List[HumanMessage]:
+        """Turn the Player's text into the messages LangGraph receives.
 
-        Args:
-            user_msg (Union[str, List[str]]): A single text message string or a list
-                of text message strings sent by the user.
-
-        Returns:
-            List[dict]: A list of formatted message dictionaries containing the 'role'
-                and 'content' keys ready for LangGraph input.
+        ``message_id`` becomes the stored message's id, so the chat panel can
+        later rewind the conversation to just before it (see
+        ``rewind_before``). Without one, LangGraph assigns an id itself.
         """
         if isinstance(user_msg, str):
-            return [{"role": "user", "content": user_msg}]
-        else:
-            return [{"role": "user", "content": msg} for msg in user_msg]
+            return [HumanMessage(content=user_msg, id=message_id)]
+        return [HumanMessage(content=msg) for msg in user_msg]
+
+    def rewind_before(self, message_id: str) -> int:
+        """Remove a stored Player message and everything after it.
+
+        Finishes an interrupted turn first, so the rewind starts from a valid
+        checkpoint. Raises ``LookupError`` when the message was never stored.
+        """
+        self._prepare_turn()
+        return rewind_before(self.agent, self.config, message_id)
 
     def run_turn(
         self,
         user_msg: Union[str, List[str]],
         on_proposal: Optional[Callable[[dict], None]] = None,
+        typed_text: Optional[str] = None,
+        message_id: Optional[str] = None,
     ) -> str:
         """Executes a single conversational turn with the agent.
 
@@ -247,10 +275,10 @@ class ChatSession:
             str: The extracted plain text content of the agent's reply.
         """
         augmented = _user_text(user_msg)
-        formatted_messages = self.wrap_message(augmented)
+        formatted_messages = self.wrap_message(augmented, message_id)
 
         self._prepare_turn()
-        set_turn_context(augmented, on_proposal)
+        set_turn_context(_gate_text(augmented, typed_text), on_proposal)
         try:
             response = self.agent.invoke(
                 {"messages": formatted_messages},
@@ -292,6 +320,8 @@ class ChatSession:
         user_msg: Union[str, List[str]],
         on_proposal: Optional[Callable[[dict], None]] = None,
         on_tool: Optional[Callable[[str, str, bool], None]] = None,
+        typed_text: Optional[str] = None,
+        message_id: Optional[str] = None,
     ) -> Iterator[tuple[str, str]]:
         """Executes a single turn, yielding text as it is produced.
 
@@ -307,10 +337,10 @@ class ChatSession:
         "start" or "end", for tool activity display.
         """
         augmented = _user_text(user_msg)
-        formatted_messages = self.wrap_message(augmented)
+        formatted_messages = self.wrap_message(augmented, message_id)
 
         self._prepare_turn()
-        set_turn_context(augmented, on_proposal)
+        set_turn_context(_gate_text(augmented, typed_text), on_proposal)
         try:
             for chunk, metadata in self.agent.stream(
                 {"messages": formatted_messages},
@@ -406,7 +436,10 @@ class ChatSession:
 
         note = HumanMessage(content=text)
         try:
-            self.agent.update_state(self.config, {"messages": [note]})
+            # Written as the model's step so the thread is not left paused:
+            # with the writer inferred, a note recorded after a repaired
+            # (stopped) turn leaves the graph waiting at "model".
+            self.agent.update_state(self.config, {"messages": [note]}, as_node="model")
         except Exception:
             logger.warning(
                 "could not record a task confirmation in conversation %s",

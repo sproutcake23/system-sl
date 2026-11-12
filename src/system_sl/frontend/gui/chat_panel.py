@@ -826,11 +826,23 @@ class _ChatWorker(QObject):
     attachment_notice = Signal(str)
     tool_activity = Signal(str, str, str)  # tool_name, status, detail
 
-    def __init__(self, session: "ChatSession", user_msg: str, attachment_paths: list[str] | None = None):
+    def __init__(
+        self,
+        session: "ChatSession",
+        user_msg: str,
+        attachment_paths: list[str] | None = None,
+        typed_text: str | None = None,
+        message_id: str | None = None,
+    ):
         super().__init__()
         self.session = session
         self.user_msg = user_msg
         self.attachment_paths = attachment_paths or []
+        # What the Player typed themselves, without quotes or documents. The
+        # task gate only trusts this text (see system.add_task).
+        self.typed_text = typed_text
+        # Id the Player's message is stored under, so it can be rewound to.
+        self.message_id = message_id
 
     def run(self):
         from system_sl.chatbot.context_window import (
@@ -870,7 +882,11 @@ class _ChatWorker(QObject):
 
         try:
             for kind, delta in self.session.stream_turn(
-                augmented_msg, on_proposal=self.proposal.emit, on_tool=on_tool
+                augmented_msg,
+                on_proposal=self.proposal.emit,
+                on_tool=on_tool,
+                typed_text=self.typed_text,
+                message_id=self.message_id,
             ):
                 if thread.isInterruptionRequested():
                     self.cancelled.emit()
@@ -884,7 +900,10 @@ class _ChatWorker(QObject):
             # Provider or model cannot stream; fall back to a blocking turn.
             try:
                 reply = self.session.run_turn(
-                    augmented_msg, on_proposal=self.proposal.emit
+                    augmented_msg,
+                    on_proposal=self.proposal.emit,
+                    typed_text=self.typed_text,
+                    message_id=self.message_id,
                 )
             except Exception as e:
                 self.failed.emit(f"{type(e).__name__}: {e}")
@@ -997,6 +1016,12 @@ class ChatPanel(QWidget):
         # so they are flushed from _cleanup_thread().
         self._pending_confirmations: list[tuple] = []
         self._notes_after_turn: list[tuple[Callable[[str], None], str]] = []
+        # Transcript id of the Player message whose reply is running, and of
+        # the one whose reply failed last (offered as "Retry").
+        self._turn_user_id: str | None = None
+        self._last_failed_user_id: str | None = None
+        # The earlier Player message being edited (edit-and-resend), if any.
+        self._editing_message = None
 
         root = QVBoxLayout(self)
 
@@ -1113,6 +1138,23 @@ class ChatPanel(QWidget):
         root.addWidget(self.confirm_bar)
         # addWidget() re-parents and hides, so visibility is set afterwards.
         self.confirm_bar.setVisible(False)
+
+        # --- Edit banner (shown while an earlier message is being edited) ---
+        self.edit_bar = QFrame()
+        edit_layout = QHBoxLayout(self.edit_bar)
+        edit_layout.setContentsMargins(6, 2, 6, 2)
+        self.edit_label = QLabel(
+            "Editing an earlier message — sending replaces it and everything after it."
+        )
+        self.edit_label.setWordWrap(True)
+        self.edit_cancel = QPushButton("Cancel")
+        self.edit_cancel.setToolTip("Stop editing (Esc)")
+        self.edit_cancel.setAccessibleName("Cancel editing")
+        self.edit_cancel.clicked.connect(self._cancel_edit)
+        edit_layout.addWidget(self.edit_label, 1)
+        edit_layout.addWidget(self.edit_cancel)
+        root.addWidget(self.edit_bar)
+        self.edit_bar.setVisible(False)
 
         # --- Quote chips row (hidden when nothing is quoted) ---
         # Sits directly above the input: these are the quotes that will be
@@ -1485,6 +1527,9 @@ class ChatPanel(QWidget):
         self._thread_id = thread_id
         self._session = None
         self._reset_stream_state()
+        self._cancel_edit(clear_input=False)
+        self._turn_user_id = None
+        self._last_failed_user_id = None
         # Quotes composed for the previous conversation make no sense here.
         self._clear_quotes()
 
@@ -1649,6 +1694,9 @@ class ChatPanel(QWidget):
             from PySide6.QtCore import Qt
             from PySide6.QtGui import QKeyEvent
             key_event: QKeyEvent = event
+            if key_event.key() == Qt.Key.Key_Escape and self._editing_message is not None:
+                self._cancel_edit()
+                return True
             if key_event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 if key_event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                     # Shift+Enter: insert newline (default behavior)
@@ -1815,7 +1863,7 @@ class ChatPanel(QWidget):
         the menu is the caller's job, which keeps the menu testable without a
         running event loop.
         """
-        from system_sl.chatbot.transcript import ASSISTANT, USER
+        from system_sl.chatbot.transcript import ALERT, ASSISTANT, USER
 
         message = self._messages.get(message_id) if message_id else None
         has_selection = bool((selection or "").strip())
@@ -1823,7 +1871,15 @@ class ChatPanel(QWidget):
         # Notes and alerts are the app talking to itself; only what a
         # participant said can be quoted back to the model.
         quoteable = message is not None and message.role in (USER, ASSISTANT)
-        if not has_selection and not quoteable:
+        # A failed reply is shown as an alert; offer Retry there too.
+        retryable = (
+            message is not None
+            and self._last_failed_user_id is not None
+            and (message.role == ALERT or (message.role == ASSISTANT and message.error))
+            and self._messages.index_of(message.id)
+            > self._messages.index_of(self._last_failed_user_id)
+        )
+        if not has_selection and not quoteable and not retryable:
             return None, []
 
         menu = QMenu(self.transcript)
@@ -1865,13 +1921,15 @@ class ChatPanel(QWidget):
                 menu.addSeparator()
                 regenerate_action = menu.addAction("Regenerate reply")
                 entries.append((regenerate_action, lambda: self._regenerate_reply(message_id)))
-                if message.error:
-                    retry_action = menu.addAction("Retry")
-                    entries.append((retry_action, lambda: self._retry_message(message_id)))
             elif message.role == USER:
                 menu.addSeparator()
                 edit_resend_action = menu.addAction("Edit and resend")
                 entries.append((edit_resend_action, lambda: self._edit_and_resend(message_id)))
+
+        if retryable:
+            menu.addSeparator()
+            retry_action = menu.addAction("Retry")
+            entries.append((retry_action, lambda: self._retry_message(message_id)))
 
         return menu, entries
 
@@ -2959,90 +3017,155 @@ class ChatPanel(QWidget):
 
     # ----- Message Actions -----
 
-    def _regenerate_reply(self, message_id: str) -> None:
-        """Regenerate the last assistant reply by removing it and re-running the turn."""
+    # ----- Regenerate / retry / edit-and-resend -----
+
+    def _preceding_user_message(self, message_id: str):
+        """The Player message a reply (or alert) belongs to."""
+        from system_sl.chatbot.transcript import USER
+
+        index = self._messages.index_of(message_id)
+        for message in reversed(self._messages.messages[: max(index, 0)]):
+            if message.role == USER:
+                return message
+        return None
+
+    def _rewind_to(self, user_message) -> bool:
+        """Rewind the conversation to just before ``user_message``.
+
+        The stored history (what the model remembers) is cut first and the
+        transcript is rebuilt from it, so the screen and the model always agree.
+        Returns False, with an alert, when it could not be done.
+        """
+        from system_sl.chatbot.memory import update_conversation
+        from system_sl.chatbot.transcript import USER
+
         if self.is_busy():
-            self._append_alert("Cannot regenerate while a reply is in progress")
+            self._append_alert("wait for the reply to finish first")
+            return False
+        session = self._get_session()
+        if session is None:
+            return False
+
+        # Proposals belong to the turn being discarded; settle them first so
+        # their notes are written (and then rewound) in order.
+        self._clear_proposals()
+        self._flush_pending_confirmations()
+
+        is_last = self._messages.last(USER) is user_message
+        try:
+            if not user_message.source_id:
+                raise LookupError("message has no stored id")
+            session.rewind_before(user_message.source_id)
+        except LookupError:
+            # Never stored (the turn failed before it reached the
+            # conversation). Only the latest message can be resent safely.
+            if not is_last:
+                self._append_alert("this message is not in the saved conversation")
+                return False
+        except Exception:
+            logger.warning("could not rewind conversation %s", self._thread_id, exc_info=True)
+            self._append_alert("could not rewind the conversation; nothing was changed")
+            return False
+
+        self._render_transcript(self._messages_for_thread(self._thread_id))
+        if self._messages.last(USER) is None:
+            # Back to an empty conversation: let the resent message title it.
+            update_conversation(self._thread_id, title="")
+            self._refresh_history_combo()
+        self._last_failed_user_id = None
+        return True
+
+    def _resend(self, user_message) -> None:
+        """Send a Player message again exactly as it was first sent."""
+        attachments = [p for p in (user_message.attachments or []) if Path(p).exists()]
+        missing = len(user_message.attachments or []) - len(attachments)
+        if missing:
+            self._append_alert(f"{missing} attached file(s) no longer exist and were left out")
+        # ``text`` is what was sent: the quote blocks and the Player's words.
+        self._send_now(user_message.text, attachments)
+
+    def _confirm_discard(self, user_message) -> bool:
+        """Ask before discarding later turns of the conversation."""
+        from system_sl.chatbot.transcript import USER
+
+        later = [
+            m for m in self._messages.after(user_message.id) if m.role == USER
+        ]
+        if not later:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Discard later messages?",
+            f"This also removes the {len(later)} message(s) you sent after it, "
+            "and their replies, from the conversation.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _regenerate_reply(self, message_id: str) -> None:
+        """Ask again for the reply to a Player message, forgetting the old one."""
+        user_message = self._preceding_user_message(message_id)
+        if user_message is None:
+            self._append_alert("no message found to regenerate from")
             return
-
-        message = self._messages.get(message_id)
-        if not message or message.role != "assistant":
+        if not self._confirm_discard(user_message):
             return
-
-        # Find the preceding user message
-        idx = self._messages.index_of(message_id)
-        user_msg = None
-        for i in range(idx - 1, -1, -1):
-            if self._messages.messages[i].role == "user":
-                user_msg = self._messages.messages[i]
-                break
-
-        if not user_msg:
-            self._append_alert("No user message found to regenerate from")
-            return
-
-        # Remove the assistant message and any messages after it
-        self._messages.messages = self._messages.messages[:idx]
-        self._render_transcript(self._messages.messages)
-
-        # Re-send the user message (with its attachments and quotes)
-        attachments = list(user_msg.attachments) if user_msg.attachments else []
-        self._send_now(user_msg.body, attachments)
+        if self._rewind_to(user_message):
+            self._resend(user_message)
 
     def _retry_message(self, message_id: str) -> None:
-        """Retry a failed assistant message."""
-        if self.is_busy():
-            self._append_alert("Cannot retry while a reply is in progress")
+        """Send the Player message whose reply failed again."""
+        user_message = self._messages.get(self._last_failed_user_id or "") or (
+            self._preceding_user_message(message_id)
+        )
+        if user_message is None:
+            self._append_alert("no message found to retry")
             return
-
-        message = self._messages.get(message_id)
-        if not message or message.role != "assistant" or not message.error:
-            return
-
-        # Same as regenerate but for failed messages
-        idx = self._messages.index_of(message_id)
-        user_msg = None
-        for i in range(idx - 1, -1, -1):
-            if self._messages.messages[i].role == "user":
-                user_msg = self._messages.messages[i]
-                break
-
-        if not user_msg:
-            self._append_alert("No user message found to retry from")
-            return
-
-        self._messages.messages = self._messages.messages[:idx]
-        self._render_transcript(self._messages.messages)
-
-        attachments = list(user_msg.attachments) if user_msg.attachments else []
-        self._send_now(user_msg.body, attachments)
+        if self._rewind_to(user_message):
+            self._resend(user_message)
 
     def _edit_and_resend(self, message_id: str) -> None:
-        """Edit a user message and resend from that point (forking the conversation)."""
+        """Load an earlier Player message into the input to edit it.
+
+        Nothing changes until the edit is sent; Esc or Cancel leaves the
+        conversation as it was.
+        """
+        from system_sl.chatbot.transcript import USER
+
         if self.is_busy():
-            self._append_alert("Cannot edit while a reply is in progress")
+            self._append_alert("cannot edit while a reply is in progress")
             return
-
         message = self._messages.get(message_id)
-        if not message or message.role != "user":
+        if not message or message.role != USER:
             return
 
-        # Put the message text in the input box for editing
+        self._editing_message = message
         self.input_box.setPlainText(message.body or message.text)
+        self._quotes = list(message.quotes or [])
+        self._update_quote_chips()
+        self._attachments = [Path(p) for p in (message.attachments or []) if Path(p).exists()]
+        self._update_attach_chips()
+        later = len([m for m in self._messages.after(message.id) if m.role == USER])
+        self.edit_label.setText(
+            "Editing an earlier message — sending replaces it"
+            + (f" and the {later} message(s) after it." if later else ".")
+            + " Esc to cancel."
+        )
+        self.edit_bar.setVisible(True)
         self.input_box.setFocus()
         self.input_box.moveCursor(QTextCursor.MoveOperation.End)
 
-        # Remove this message and all subsequent messages
-        idx = self._messages.index_of(message_id)
-        self._messages.messages = self._messages.messages[:idx]
-        self._render_transcript(self._messages.messages)
-
-        # Clear any queued messages since we're forking
-        if self._message_queue:
-            self._message_queue.clear()
-            self._update_queue_badge()
-
-        # The user can now edit and press Enter to send
+    def _cancel_edit(self, clear_input: bool = True) -> None:
+        """Leave edit mode without changing the conversation."""
+        if self._editing_message is None:
+            return
+        self._editing_message = None
+        self.edit_bar.setVisible(False)
+        if clear_input:
+            self.input_box.clear()
+            self._clear_quotes()
+            self._clear_attachments()
 
     def _show_after_turn(self, append: Callable[[str], None], text: str) -> None:
         """Add a note to the transcript once the running reply has finished.
@@ -3100,6 +3223,16 @@ class ChatPanel(QWidget):
         text = self.input_box.toPlainText().strip()
         if not text:
             return
+
+        if self._editing_message is not None:
+            # Edit-and-resend: the conversation is rewound now, on send, so
+            # cancelling an edit never loses anything.
+            if self.is_busy():
+                self._append_alert("wait for the reply to finish before sending the edit")
+                return
+            if not self._rewind_to(self._editing_message):
+                return
+            self._cancel_edit(clear_input=False)
 
         # Capture attachments and quotes before clearing
         attachment_paths = [str(p) for p in self._attachments]
@@ -3162,9 +3295,16 @@ class ChatPanel(QWidget):
         # conversation title both read from it.
         from system_sl.chatbot.transcript import USER
 
+        import uuid
+
         player_message = self._messages.append(
-            USER, text, attachments=list(attachment_paths)
+            USER,
+            text,
+            attachments=list(attachment_paths),
+            source_id=f"player-{uuid.uuid4().hex}",
         )
+        self._turn_user_id = player_message.id
+        self._last_failed_user_id = None
 
         # Title the conversation from its first message and remember which
         # model is answering; both are read by the history dropdown. The title
@@ -3190,7 +3330,13 @@ class ChatPanel(QWidget):
         _set_current_llm_clients(sync_client, async_client)
 
         self._thread = QThread(self)
-        self._worker = _ChatWorker(session, text, attachment_paths)
+        self._worker = _ChatWorker(
+            session,
+            text,
+            attachment_paths,
+            typed_text=player_message.body,
+            message_id=player_message.source_id,
+        )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.reasoning.connect(self._on_reasoning)
@@ -3332,6 +3478,7 @@ class ChatPanel(QWidget):
         return message, None
 
     def _on_failure(self, message: str) -> None:
+        self._last_failed_user_id = self._turn_user_id
         self._md_timer.stop()
         self._stop_dots()
         self._render_answer()  # clears the loading dots if no token ever arrived

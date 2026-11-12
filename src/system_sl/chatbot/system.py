@@ -52,13 +52,42 @@ _EXPLICIT_ADD = re.compile(
     re.IGNORECASE,
 )
 
-# Attachment marker inserted by the chat panel when a document is uploaded.
-_ATTACHMENT_MARKER = "[uploaded document:"
+# Content the chat panel puts around the Player's own words: attached
+# documents (<document …>…</document>, or a "[uploaded document: …]" line when
+# extraction failed) and quoted messages (<quote …>…</quote>).
+_BLOCK_RE = re.compile(
+    r"<\s*(document|quote)\b[^>]*>.*?<\s*/\s*\1\s*>", re.IGNORECASE | re.DOTALL
+)
+_FAILED_ATTACHMENT_RE = re.compile(r"^\[uploaded document:[^\n]*\]\s*$", re.MULTILINE)
+_LEFTOVER_TAG_RE = re.compile(r"<\s*/?\s*(?:document|quote)\b", re.IGNORECASE)
+_DOCUMENT_RE = re.compile(
+    r"<\s*document\b|^\[uploaded document:", re.IGNORECASE | re.MULTILINE
+)
 
 
-def _attached_doc_present(text: str) -> bool:
-    """Return True when the user message contains an uploaded document marker."""
-    return _ATTACHMENT_MARKER in (text or "")
+def message_has_documents(message: str) -> bool:
+    """True when a composed chat message carries an attached document.
+
+    A document can hide instructions ("create a task to ..."). Even when the
+    Player typed an explicit request alongside it, the model could add other
+    tasks the document asked for, so with a document attached every task
+    still needs the Player's Yes.
+    """
+    return bool(_DOCUMENT_RE.search(message or ""))
+
+
+def player_typed_text(message: str) -> str:
+    """Recover the Player's own words from a composed chat message.
+
+    Fallback for callers that did not pass the typed text separately. Fails
+    closed: if a document or quote block cannot be cleanly removed (a tag left
+    over), nothing is treated as typed, so the task gate asks for confirmation.
+    """
+    text = _BLOCK_RE.sub("", message or "")
+    text = _FAILED_ATTACHMENT_RE.sub("", text)
+    if _LEFTOVER_TAG_RE.search(text):
+        return ""
+    return text.strip()
 
 
 def is_explicit_task_request(text: str) -> bool:
@@ -67,6 +96,9 @@ def is_explicit_task_request(text: str) -> bool:
     Deliberately strict: only clause-initial commands count ("add a task X",
     "please create task X", "remind me to X"). Suggestions, questions and
     hypotheticals fall through to the confirmation prompt.
+
+    ``text`` must be only what the Player typed: quoted messages and attached
+    documents are not the Player's instruction (see ``player_typed_text``).
     """
     return bool(text and _EXPLICIT_ADD.search(text))
 
@@ -124,13 +156,13 @@ def add_task(category: str, title: str, deadline: Optional[str] = None) -> Any:
     result is ``pending_confirmation`` — do not claim it was added.
     """
     user_text, on_proposal = _get_turn_context()
-    if not is_explicit_task_request(user_text) or _attached_doc_present(user_text):
+    if not is_explicit_task_request(user_text):
         proposal = {"category": category, "title": title, "deadline": deadline}
         if on_proposal is not None:
             try:
                 on_proposal(proposal)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("on_proposal callback failed: %s", e)
         return {
             "status": "pending_confirmation",
             "message": (
@@ -218,8 +250,8 @@ def propose_tasks_batch(tasks: list[dict]) -> Any:
     if on_proposal is not None:
         try:
             on_proposal(proposal)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("on_proposal callback failed: %s", e)
 
     return {
         "status": "pending_confirmation",

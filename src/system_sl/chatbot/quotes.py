@@ -73,9 +73,13 @@ def speaker_for_role(role: str) -> str:
     return "assistant" if (role or "").lower() in ("assistant", "ai") else "player"
 
 
+_CLOSING_QUOTE_RE = re.compile(r"<(?=\s*/\s*quote)", re.IGNORECASE)
+
+
 def _neutralise_tags(text: str) -> str:
     """Stop quoted text from ending (or nesting) its own quote block."""
-    return (text or "").replace("</quote", f"<{_ZERO_WIDTH}/quote")
+    # Case-insensitive, like the parser: "</QUOTE>" must not close the block.
+    return _CLOSING_QUOTE_RE.sub(f"<{_ZERO_WIDTH}", text or "")
 
 
 def format_quote(quote: Quote) -> str:
