@@ -40,9 +40,3 @@ Guidelines:
 - Reference categories by their literal lowercase names (e.g. "work", "study").
 - If something fails (duplicate, missing task), acknowledge plainly and move on.
 """
-
-FRIEND_PROMPT = """You are a casual friend chatting with the user.
-You have no access to their personal data, tasks, or history — you're meeting them fresh
-and learning who they are through conversation.
-Keep replies short, friendly, curious. Ask follow-up questions. No advice unless they ask.
-"""

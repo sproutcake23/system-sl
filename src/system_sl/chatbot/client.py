@@ -291,6 +291,7 @@ class ChatSession:
         self,
         user_msg: Union[str, List[str]],
         on_proposal: Optional[Callable[[dict], None]] = None,
+        on_tool: Optional[Callable[[str, str, bool], None]] = None,
     ) -> Iterator[tuple[str, str]]:
         """Executes a single turn, yielding text as it is produced.
 
@@ -301,6 +302,9 @@ class ChatSession:
 
         ``on_proposal`` receives any task the agent tried to add without the
         Player explicitly asking for it, so the UI can confirm it.
+
+        ``on_tool`` receives (tool_name, status, detail) where status is
+        "start" or "end", for tool activity display.
         """
         augmented = _user_text(user_msg)
         formatted_messages = self.wrap_message(augmented)
@@ -313,8 +317,22 @@ class ChatSession:
                 config=self.config,
                 stream_mode="messages",
             ):
-                # Tool results and other graph chatter are not model output.
-                if not metadata or metadata.get("langgraph_node") != "model":
+                if not metadata:
+                    continue
+                node = metadata.get("langgraph_node", "")
+                
+                # Tool calls - emit start/end events
+                if node == "tools" and on_tool:
+                    if hasattr(chunk, "name") and chunk.name:
+                        # Tool call start
+                        on_tool(chunk.name, "start", "")
+                    elif hasattr(chunk, "tool_call_id") and chunk.tool_call_id:
+                        # Tool result end
+                        on_tool(getattr(chunk, "name", "tool"), "end", "")
+                    continue
+                
+                # Model output
+                if node != "model":
                     continue
                 if not isinstance(chunk, AIMessageChunk):
                     continue
@@ -397,22 +415,6 @@ class ChatSession:
             )
             return False
         return True
-
-    @classmethod
-    def create_with_model(cls, model_name: str, thread_id: str | None = None) -> "ChatSession":
-        """Create a session that answers with ``model_name`` on ``thread_id``.
-
-        The model choice is per-session; the saved default is untouched.
-        """
-        from system_sl.chatbot.system import build_agent_for_model
-
-        agent, llm = build_agent_for_model(model_name)
-        return cls(
-            thread_id=thread_id,
-            model_name=model_name,
-            agent=agent,
-            llm=llm,
-        )
 
 
 def reload_agent() -> None:

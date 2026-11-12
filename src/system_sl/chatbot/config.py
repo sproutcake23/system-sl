@@ -25,6 +25,33 @@ from system_sl.chatbot.model_fetcher import (
 
 CONFIG_FILENAME = "llm_config.json"
 
+# Track the config file's mtime to detect external changes.
+_config_mtime: float = 0.0
+
+
+def _check_config_mtime() -> bool:
+    """Return True if the config file has been modified since last check."""
+    global _config_mtime
+    path = get_tasks_file_path(CONFIG_FILENAME)
+    try:
+        current_mtime = os.path.getmtime(path)
+    except OSError:
+        return False
+    if current_mtime != _config_mtime:
+        _config_mtime = current_mtime
+        return True
+    return False
+
+
+def reset_config_mtime() -> None:
+    """Reset the tracked config mtime (call after saving config locally)."""
+    global _config_mtime
+    path = get_tasks_file_path(CONFIG_FILENAME)
+    try:
+        _config_mtime = os.path.getmtime(path)
+    except OSError:
+        _config_mtime = 0.0
+
 
 @dataclass
 class ChatConfig:
@@ -35,11 +62,17 @@ class ChatConfig:
         base_url: Base URL for OpenAI-compatible APIs (required for "openai" provider)
         api_key: API key (required for "google", optional for local "openai" servers)
         system_model: Model name for the system persona
+        temperature: Sampling temperature (0.0-2.0, default 0.0)
+        max_tokens: Maximum output tokens (optional, model default if not set)
+        system_prompt_addendum: Additional instructions appended to the system prompt
     """
     provider: Provider = "google"
     base_url: Optional[str] = None
     api_key: str = ""
     system_model: str = "gemini-3.5-flash-lite"
+    temperature: float = 0.0
+    max_tokens: Optional[int] = None
+    system_prompt_addendum: str = ""
 
 
 class ChatConfigError(RuntimeError):
@@ -142,11 +175,35 @@ def load_config() -> ChatConfig:
         or _default_model_for_provider(provider)
     )
 
+    # Temperature
+    temperature = data.get("temperature", 0.0)
+    if isinstance(temperature, str):
+        try:
+            temperature = float(temperature)
+        except ValueError:
+            temperature = 0.0
+
+    # Max tokens
+    max_tokens = data.get("max_tokens")
+    if isinstance(max_tokens, str):
+        try:
+            max_tokens = int(max_tokens)
+        except ValueError:
+            max_tokens = None
+    elif max_tokens is not None and not isinstance(max_tokens, int):
+        max_tokens = None
+
+    # System prompt addendum
+    system_prompt_addendum = data.get("system_prompt_addendum", "")
+
     return ChatConfig(
         provider=provider,  # type: ignore[arg-type]
         base_url=base_url,
         api_key=api_key,
         system_model=system_model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        system_prompt_addendum=system_prompt_addendum,
     )
 
 
@@ -171,6 +228,9 @@ def save_config(config: ChatConfig) -> None:
             "provider": config.provider,
             "base_url": config.base_url,
             "system_model": config.system_model,
+            "temperature": config.temperature,
+            "max_tokens": config.max_tokens,
+            "system_prompt_addendum": config.system_prompt_addendum,
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(non_secret, f, indent=2)
@@ -184,6 +244,10 @@ def save_config(config: ChatConfig) -> None:
         # Clearing the key must actually clear it, otherwise switching to an
         # endpoint that needs no key keeps the previous provider's secret.
         secure_storage.delete_secret(secure_storage.SECRET_LLM_API_KEY)
+
+    # Update the tracked mtime so our own write doesn't trigger a false
+    # "external change" detection.
+    reset_config_mtime()
 
 
 def validate_config(config: ChatConfig) -> list[str]:

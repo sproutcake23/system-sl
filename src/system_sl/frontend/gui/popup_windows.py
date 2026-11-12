@@ -793,13 +793,20 @@ class OnboardingWindow(QWidget):
 
 
 class BatchProposalDialog(QDialog):
-    """Dialog for reviewing and confirming multiple tasks from a document upload."""
+    """Dialog for reviewing and confirming multiple tasks from a document upload.
+
+    Non-modal: use show() and connect to confirmed/cancelled signals.
+    """
+
+    confirmed = Signal(list)  # list of selected task dicts
+    cancelled = Signal()
 
     def __init__(self, tasks: list[dict], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Confirm Tasks from Document")
         self.setMinimumSize(700, 500)
-        self.setModal(True)
+        # Non-modal: don't call setModal(True)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
 
         tokens = get_current_theme_tokens()
         self._duplicate_tint = QColor(tokens.get("sys_color_alert", "#ff6b8a"))
@@ -839,9 +846,6 @@ class BatchProposalDialog(QDialog):
         header_item = QTableWidgetItem()
         header_item.setIcon(get_icon("complete", size=14))
         self.table.setHorizontalHeaderItem(0, header_item)
-
-        # Deadline validator
-        deadline_validator = QRegularExpressionValidator(QRegularExpression(r"^\d{4}-\d{2}-\d{2}$|^$"))
 
         for row, task in enumerate(tasks):
             # Checkbox column
@@ -896,13 +900,18 @@ class BatchProposalDialog(QDialog):
 
         btn_row.addStretch(1)
 
-        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.button_box.accepted.connect(self._on_accept)
-        self.button_box.rejected.connect(self.reject)
-        ok_btn = self.button_box.button(QDialogButtonBox.Ok)
-        ok_btn.setIcon(get_icon("confirm_add"))
-        ok_btn.setText("Add Selected Tasks")
-        btn_row.addWidget(self.button_box)
+        # Custom buttons instead of QDialogButtonBox for non-modal behavior
+        self.ok_btn = QPushButton()
+        self.ok_btn.setIcon(get_icon("confirm_add"))
+        self.ok_btn.setText("Add Selected Tasks")
+        self.ok_btn.clicked.connect(self._on_accept)
+        btn_row.addWidget(self.ok_btn)
+
+        self.cancel_btn = QPushButton()
+        self.cancel_btn.setIcon(get_icon("cancel"))
+        self.cancel_btn.setText("Cancel")
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        btn_row.addWidget(self.cancel_btn)
 
         root.addLayout(btn_row)
 
@@ -919,7 +928,7 @@ class BatchProposalDialog(QDialog):
                 item.setCheckState(Qt.Unchecked)
 
     def _on_accept(self) -> None:
-        """Validate all selected rows before accepting."""
+        """Validate all selected rows before emitting confirmed."""
         selected_tasks = self.get_selected_tasks()
 
         # Validate deadlines for selected tasks
@@ -936,7 +945,12 @@ class BatchProposalDialog(QDialog):
             QMessageBox.warning(self, "Invalid Deadlines", "\n".join(invalid_deadlines))
             return
 
-        self.accept()
+        self.confirmed.emit([task for _row, task in selected_tasks])
+        self.close()
+
+    def _on_cancel(self) -> None:
+        self.cancelled.emit()
+        self.close()
 
     def get_selected_tasks(self) -> list[tuple[int, dict]]:
         """Return list of (row_index, task_dict) for checked rows."""

@@ -275,6 +275,7 @@ def create_llm(
     base_url: str | None = None,
     api_key: str | None = None,
     temperature: float = 0.0,
+    max_tokens: int | None = None,
     **kwargs,
 ) -> BaseChatModel:
     """Create a LangChain chat model for the given provider.
@@ -285,6 +286,7 @@ def create_llm(
         base_url: Base URL for OpenAI-compatible APIs (required for "openai" provider)
         api_key: API key (required for "google", optional for "openai" if server doesn't need it)
         temperature: Sampling temperature (default 0.0 for deterministic output)
+        max_tokens: Maximum output tokens (optional, model default if not set)
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
@@ -304,6 +306,7 @@ def create_llm(
         return ChatGoogleGenerativeAI(
             model=model,
             temperature=temperature,
+            max_output_tokens=max_tokens,
             google_api_key=api_key,
             **kwargs,
         )
@@ -324,6 +327,7 @@ def create_llm(
         return ReasoningChatOpenAI(
             model=model,
             temperature=temperature,
+            max_tokens=max_tokens,
             base_url=base_url,
             api_key=api_key or "dummy",
             http_client=http_client,
@@ -342,6 +346,8 @@ def create_llm_from_config(config: "ChatConfig") -> BaseChatModel:
         model=config.system_model,
         base_url=config.base_url,
         api_key=config.api_key,
+        temperature=config.temperature,
+        max_tokens=config.max_tokens,
     )
     _register_cached_llm(llm)
     return llm

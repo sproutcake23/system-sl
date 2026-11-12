@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QFrame,
     QFileDialog,
     QSizePolicy,
+    QDoubleSpinBox,
+    QSpinBox,
 )
 from PySide6.QtGui import (
     QColor,
@@ -308,6 +310,8 @@ class LLMSettingsPage(QWidget):
         self.fetch_btn.setIcon(get_icon("refresh"))
         self.fetch_btn.setText("Fetch Models")
         self.fetch_btn.setToolTip("Fetch available models from provider API")
+        self.fetch_btn.setAccessibleName("Fetch models")
+        self.fetch_btn.setAccessibleDescription("Retrieve the list of available models from the configured provider API")
         self.fetch_btn.clicked.connect(self._fetch_models)
         key_row.addWidget(self.fetch_btn)
 
@@ -316,12 +320,44 @@ class LLMSettingsPage(QWidget):
         # Model selection (manual entry, used if no model selected from table)
         self.model_edit = QLineEdit()
         self.model_edit.setPlaceholderText("e.g., llama3.1, gemini-3.5-flash-lite (or select from table below)")
+        self.model_edit.setAccessibleName("Model name")
+        self.model_edit.setAccessibleDescription("Enter a model identifier manually, or select from the table below")
         form.addRow("Model:", self.model_edit)
+
+        # Temperature
+        self.temperature_spin = QDoubleSpinBox()
+        self.temperature_spin.setRange(0.0, 2.0)
+        self.temperature_spin.setSingleStep(0.1)
+        self.temperature_spin.setDecimals(2)
+        self.temperature_spin.setToolTip("Sampling temperature (0.0 = deterministic, higher = more creative)")
+        self.temperature_spin.setAccessibleName("Temperature")
+        self.temperature_spin.setAccessibleDescription("Controls randomness in model outputs. 0.0 for consistent answers, higher for more creative responses")
+        form.addRow("Temperature:", self.temperature_spin)
+
+        # Max output tokens
+        self.max_tokens_spin = QSpinBox()
+        self.max_tokens_spin.setRange(0, 1000000)
+        self.max_tokens_spin.setSpecialValueText("Model default")
+        self.max_tokens_spin.setToolTip("Maximum tokens in the model's reply (0 = model default)")
+        self.max_tokens_spin.setAccessibleName("Max output tokens")
+        self.max_tokens_spin.setAccessibleDescription("Limit the length of model responses. 0 means use the model's default limit")
+        form.addRow("Max tokens:", self.max_tokens_spin)
+
+        # Custom system prompt addendum
+        self.system_prompt_addendum_edit = QTextEdit()
+        self.system_prompt_addendum_edit.setPlaceholderText("Additional instructions to append to the system prompt (optional)")
+        self.system_prompt_addendum_edit.setMaximumHeight(80)
+        self.system_prompt_addendum_edit.setToolTip("Extra guidance for the model, appended to the built-in system prompt")
+        self.system_prompt_addendum_edit.setAccessibleName("Custom system prompt addendum")
+        self.system_prompt_addendum_edit.setAccessibleDescription("Additional instructions that will be appended to the system prompt")
+        form.addRow("System prompt addendum:", self.system_prompt_addendum_edit)
 
         # Test Connection Button
         self.test_btn = QPushButton()
         self.test_btn.setIcon(get_icon("info"))
         self.test_btn.setText("Test Connection")
+        self.test_btn.setAccessibleName("Test connection")
+        self.test_btn.setAccessibleDescription("Send a test request to verify the LLM configuration works")
         self.test_btn.clicked.connect(self._test_connection)
         form.addRow("", self.test_btn)
 
@@ -337,12 +373,16 @@ class LLMSettingsPage(QWidget):
         search_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Filter models...")
+        self.search_edit.setAccessibleName("Model search")
+        self.search_edit.setAccessibleDescription("Filter the model table by name or provider")
         self.search_edit.textChanged.connect(self._filter_models)
         search_row.addWidget(self.search_edit, stretch=1)
 
         self.select_free_btn = QPushButton()
         self.select_free_btn.setIcon(get_icon("select_all"))
         self.select_free_btn.setText("Select All Free")
+        self.select_free_btn.setAccessibleName("Select all free models")
+        self.select_free_btn.setAccessibleDescription("Check all free models in the filtered list")
         self.select_free_btn.clicked.connect(self._select_all_free)
         self.select_free_btn.setEnabled(False)
         search_row.addWidget(self.select_free_btn)
@@ -350,6 +390,8 @@ class LLMSettingsPage(QWidget):
         self.refresh_cache_btn = QPushButton()
         self.refresh_cache_btn.setIcon(get_icon("refresh"))
         self.refresh_cache_btn.setText("Refresh Cache")
+        self.refresh_cache_btn.setAccessibleName("Refresh model cache")
+        self.refresh_cache_btn.setAccessibleDescription("Force a fresh fetch of models from the provider, ignoring the local cache")
         self.refresh_cache_btn.clicked.connect(self._refresh_cache)
         self.refresh_cache_btn.setEnabled(False)
         search_row.addWidget(self.refresh_cache_btn)
@@ -421,6 +463,9 @@ class LLMSettingsPage(QWidget):
         self.base_url_edit.setText(self._config.base_url or "")
         self.api_key_edit.setText(self._config.api_key or "")
         self.model_edit.setText(self._config.system_model or "")
+        self.temperature_spin.setValue(self._config.temperature)
+        self.max_tokens_spin.setValue(self._config.max_tokens or 0)
+        self.system_prompt_addendum_edit.setPlainText(self._config.system_prompt_addendum or "")
 
         # Try to load cached models for current provider (detect from base_url if needed)
         fetch_provider = self._get_fetch_provider()
@@ -660,6 +705,9 @@ class LLMSettingsPage(QWidget):
             base_url=self.base_url_edit.text().strip() or None,
             api_key=self.api_key_edit.text().strip(),
             system_model=self.model_edit.text().strip(),
+            temperature=self.temperature_spin.value(),
+            max_tokens=self.max_tokens_spin.value() or None,
+            system_prompt_addendum=self.system_prompt_addendum_edit.toPlainText().strip(),
         )
 
     def _test_connection(self) -> None:
@@ -731,6 +779,22 @@ class LLMSettingsPage(QWidget):
         if self._on_apply():
             self.finished.emit(True)
 
+    def closeEvent(self, event) -> None:
+        """Cancel any running background threads when the page is closed."""
+        # Cancel fetch thread
+        if self._fetch_thread is not None:
+            self._fetch_thread.requestInterruption()
+            self._fetch_thread.quit()
+            self._fetch_thread.wait(1000)
+            self._cleanup_fetch_thread()
+        # Cancel test thread
+        if self._test_thread is not None:
+            self._test_thread.requestInterruption()
+            self._test_thread.quit()
+            self._test_thread.wait(1000)
+            self._cleanup_test_thread()
+        super().closeEvent(event)
+
 
 class SettingsDialog(QDialog):
     """Standalone LLM settings, for first-run setup before the main window exists."""
@@ -760,6 +824,7 @@ class _ChatWorker(QObject):
     cancelled = Signal()
     proposal = Signal(dict)
     attachment_notice = Signal(str)
+    tool_activity = Signal(str, str, str)  # tool_name, status, detail
 
     def __init__(self, session: "ChatSession", user_msg: str, attachment_paths: list[str] | None = None):
         super().__init__()
@@ -800,9 +865,12 @@ class _ChatWorker(QObject):
             if doc_parts:
                 augmented_msg = "\n\n".join(doc_parts) + "\n\n" + self.user_msg
 
+        def on_tool(tool_name: str, status: str, detail: str) -> None:
+            self.tool_activity.emit(tool_name, status, detail)
+
         try:
             for kind, delta in self.session.stream_turn(
-                augmented_msg, on_proposal=self.proposal.emit
+                augmented_msg, on_proposal=self.proposal.emit, on_tool=on_tool
             ):
                 if thread.isInterruptionRequested():
                     self.cancelled.emit()
@@ -946,6 +1014,8 @@ class ChatPanel(QWidget):
         self.refresh_btn.setIcon(get_icon("refresh"))
         self.refresh_btn.setFixedWidth(36)
         self.refresh_btn.setToolTip("Refresh model list")
+        self.refresh_btn.setAccessibleName("Refresh model list")
+        self.refresh_btn.setAccessibleDescription("Fetch the latest available models from the configured provider")
         self.refresh_btn.clicked.connect(self._refresh_models)
         header.addWidget(self.refresh_btn)
 
@@ -954,6 +1024,8 @@ class ChatPanel(QWidget):
         self.settings_btn.setIcon(get_icon("settings"))
         self.settings_btn.setFixedWidth(36)
         self.settings_btn.setToolTip("LLM Settings")
+        self.settings_btn.setAccessibleName("LLM Settings")
+        self.settings_btn.setAccessibleDescription("Open the LLM provider and model configuration dialog")
         self.settings_btn.clicked.connect(self._open_settings)
         header.addWidget(self.settings_btn)
 
@@ -963,6 +1035,8 @@ class ChatPanel(QWidget):
         self.default_model_btn.setToolTip(
             "Use this model for new conversations from now on"
         )
+        self.default_model_btn.setAccessibleName("Set as default model")
+        self.default_model_btn.setAccessibleDescription("Save the currently selected model as the default for new conversations")
         self.default_model_btn.setEnabled(False)
         self.default_model_btn.clicked.connect(self._set_model_as_default)
         header.addWidget(self.default_model_btn)
@@ -975,6 +1049,8 @@ class ChatPanel(QWidget):
         self.history_combo = QComboBox()
         self.history_combo.setMinimumWidth(220)
         self.history_combo.setToolTip("Reopen a past conversation")
+        self.history_combo.setAccessibleName("Conversation history")
+        self.history_combo.setAccessibleDescription("Select a previous conversation to reopen")
         self.history_combo.currentIndexChanged.connect(self._on_history_changed)
         chat_row.addWidget(self.history_combo, stretch=1)
 
@@ -982,6 +1058,8 @@ class ChatPanel(QWidget):
         self.new_chat_btn.setIcon(get_icon("add"))
         self.new_chat_btn.setFixedWidth(36)
         self.new_chat_btn.setToolTip("Start a new conversation")
+        self.new_chat_btn.setAccessibleName("New conversation")
+        self.new_chat_btn.setAccessibleDescription("Start a fresh conversation with a new thread ID")
         self.new_chat_btn.clicked.connect(self._on_new_chat)
         chat_row.addWidget(self.new_chat_btn)
         root.addLayout(chat_row)
@@ -989,8 +1067,10 @@ class ChatPanel(QWidget):
         # --- Transcript ---
         self.transcript = QTextBrowser()
         self.transcript.setReadOnly(True)
-        self.transcript.setOpenExternalLinks(True)
+        self.transcript.setOpenExternalLinks(False)  # We handle links ourselves
         self.transcript.setPlaceholderText("[ awaiting Player input — channel: SYSTEM ]")
+        # Handle anchor clicks for alert details and external links
+        self.transcript.anchorClicked.connect(self._on_anchor_clicked)
         # Enable drag & drop on transcript
         self.transcript.setAcceptDrops(True)
         # Right-click a message to copy or quote it.
@@ -999,6 +1079,9 @@ class ChatPanel(QWidget):
             self._on_transcript_context_menu
         )
         root.addWidget(self.transcript, stretch=1)
+
+        # Store raw error details for alert detail links
+        self._alert_details: dict[str, str] = {}
 
         # --- Live reasoning ("thinking") view ---
         # Only shown while a reasoning model is thinking; cleared as soon as
@@ -1060,18 +1143,24 @@ class ChatPanel(QWidget):
         self.input_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.input_box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.input_box.installEventFilter(self)
+        self.input_box.setAccessibleName("Message input")
+        self.input_box.setAccessibleDescription("Type your message here. Press Enter to send, Shift+Enter for a new line")
         # Paperclip button for attachments
         self.attach_btn = QPushButton()
         self.attach_btn.setIcon(get_icon("attach"))
         self.attach_btn.setFixedWidth(36)
         self.attach_btn.setFixedHeight(36)
         self.attach_btn.setToolTip("Attach document (PDF, DOCX, HTML, TXT, MD, CSV...)")
+        self.attach_btn.setAccessibleName("Attach document")
+        self.attach_btn.setAccessibleDescription("Attach a file to include in your message")
         self.attach_btn.clicked.connect(self._on_attach_clicked)
         self.send_button = QPushButton()
         self.send_button.setIcon(get_icon("send"))
         self.send_button.setFixedWidth(36)
         self.send_button.setFixedHeight(36)
         self.send_button.setToolTip("Send message (Enter)")
+        self.send_button.setAccessibleName("Send message")
+        self.send_button.setAccessibleDescription("Send the typed message to the assistant")
         self.send_button.clicked.connect(self._on_send)
         self.stop_button = QPushButton()
         self.stop_button.setIcon(get_icon("stop"))
@@ -1079,6 +1168,8 @@ class ChatPanel(QWidget):
         self.stop_button.setFixedHeight(36)
         self.stop_button.setEnabled(False)
         self.stop_button.setToolTip("Interrupt the reply")
+        self.stop_button.setAccessibleName("Stop reply")
+        self.stop_button.setAccessibleDescription("Interrupt the currently streaming assistant reply")
         self.stop_button.clicked.connect(self._on_stop)
         input_row.addWidget(self.input_box, stretch=1)
         input_row.addWidget(self.attach_btn)
@@ -1095,6 +1186,8 @@ class ChatPanel(QWidget):
         self.queue_badge.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.queue_badge.setVisible(False)
         self.queue_badge.setToolTip("Click to clear the queued messages")
+        self.queue_badge.setAccessibleName("Queued messages")
+        self.queue_badge.setAccessibleDescription("Shows the number of messages queued to send. Click to clear the queue")
         self.queue_badge.setCursor(Qt.CursorShape.PointingHandCursor)
         self.queue_badge.clicked.connect(self._on_queue_badge_clicked)
         root.addWidget(self.queue_badge)
@@ -1120,6 +1213,9 @@ class ChatPanel(QWidget):
         Local-server discovery is slow (up to ~11s of timeouts), so it runs
         in a background worker. This method only renders whatever the last
         discovery produced and shows a placeholder while a scan is running.
+
+        Each model ID is added only once, preferring the richest source entry:
+        current configured > discovered local > cached OpenRouter > cloud presets.
         """
         from system_sl.chatbot import load_config, get_model_cache, get_preset_models
         self.model_combo.blockSignals(True)
@@ -1132,9 +1228,18 @@ class ChatPanel(QWidget):
 
         has_config = bool(current_model and config.provider)
 
+        # Track model IDs we've already added to avoid duplicates.
+        # Value is the display text for the richest source.
+        seen_models: dict[str, str] = {}
+
+        def add_model(model_id: str, display: str) -> None:
+            """Add a model if not already present, or keep the richer display."""
+            if model_id and model_id not in seen_models:
+                seen_models[model_id] = display
+
         if has_config:
-            # 1. Current configured model (first, bold)
-            self.model_combo.addItem(f"✦ {current_model}", current_model)
+            # 1. Current configured model (first, bold) - highest priority
+            add_model(current_model, f"✦ {current_model}")
         else:
             # Placeholder when no config
             self.model_combo.addItem("⚙ Configure LLM in Settings…", "")
@@ -1150,7 +1255,7 @@ class ChatPanel(QWidget):
             self.model_combo.model().item(self.model_combo.count() - 1).setEnabled(False)
         else:
             for display, model_id in self._local_models:
-                self.model_combo.addItem(display, model_id)
+                add_model(model_id, display)
 
         # 4. Cached models from OpenRouter (if any)
         # provider is only ever "google" or "openai"; the endpoint is what
@@ -1161,15 +1266,19 @@ class ChatPanel(QWidget):
                 self.model_combo.insertSeparator(self.model_combo.count())
                 for model in cached:
                     badge = "✨ " if model.is_free else ""
-                    self.model_combo.addItem(f"☁️ {badge}{model.name} ({model.id})", model.id)
+                    add_model(model.id, f"☁️ {badge}{model.name} ({model.id})")
 
         # 5. Separator if we have cloud preset models
         cloud_models = get_preset_models()
         if cloud_models:
             self.model_combo.insertSeparator(self.model_combo.count())
 
-        # 6. Cloud preset models
+        # 6. Cloud preset models (lowest priority)
         for display, model_id in cloud_models:
+            add_model(model_id, display)
+
+        # Now populate the combo box in priority order
+        for model_id, display in seen_models.items():
             self.model_combo.addItem(display, model_id)
 
         # Select current model
@@ -1445,9 +1554,9 @@ class ChatPanel(QWidget):
         elif message.role == NOTE:
             self._append_system_note(message.text, message_id=message.id)
         elif message.role == ALERT:
-            self._append_alert_bubble(message.text, message_id=message.id)
+            self._append_alert_bubble(message.text, message_id=message.id, timestamp=message.timestamp)
         elif message.role == CONFIRMATION:
-            self._append_confirmation_bubble(message.text, message_id=message.id)
+            self._append_confirmation_bubble(message.text, message_id=message.id, timestamp=message.timestamp)
 
     def _message_id_at(self, position: int) -> str | None:
         """Return the id of the message whose text covers ``position``.
@@ -1662,6 +1771,8 @@ class ChatPanel(QWidget):
             }}
         """)
         remove_btn.setToolTip("Remove attachment")
+        remove_btn.setAccessibleName("Remove attachment")
+        remove_btn.setAccessibleDescription(f"Remove the attached file {path.name}")
         remove_btn.clicked.connect(lambda: self._remove_attachment(path))
         layout.addWidget(remove_btn)
 
@@ -1749,12 +1860,36 @@ class ChatPanel(QWidget):
                 (quote_message_action, lambda: self._quote_text(message.plain_text(), message.role))
             )
 
+            # Message-specific actions
+            if message.role == ASSISTANT:
+                menu.addSeparator()
+                regenerate_action = menu.addAction("Regenerate reply")
+                entries.append((regenerate_action, lambda: self._regenerate_reply(message_id)))
+                if message.error:
+                    retry_action = menu.addAction("Retry")
+                    entries.append((retry_action, lambda: self._retry_message(message_id)))
+            elif message.role == USER:
+                menu.addSeparator()
+                edit_resend_action = menu.addAction("Edit and resend")
+                entries.append((edit_resend_action, lambda: self._edit_and_resend(message_id)))
+
         return menu, entries
 
     @staticmethod
     def _copy_to_clipboard(text: str) -> None:
         """Put plain text on the clipboard (never the rendered HTML)."""
         QApplication.clipboard().setText(text or "")
+
+    def _on_anchor_clicked(self, url) -> None:
+        """Handle anchor clicks in the transcript."""
+        url_str = url.toString()
+        if url_str.startswith("alert-detail:"):
+            message_id = url_str.split(":", 1)[1]
+            self._handle_alert_detail_link(message_id)
+        else:
+            # External link - open in browser
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(url)
 
     def _quote_text(self, text: str, role: str) -> None:
         """Add an excerpt to the next message's quotes."""
@@ -1841,6 +1976,8 @@ class ChatPanel(QWidget):
             }}
         """)
         remove_btn.setToolTip("Remove this quote")
+        remove_btn.setAccessibleName("Remove quote")
+        remove_btn.setAccessibleDescription("Remove this quoted excerpt from the message")
         remove_btn.clicked.connect(lambda: self._remove_quote(quote))
         layout.addWidget(remove_btn)
 
@@ -1945,6 +2082,21 @@ class ChatPanel(QWidget):
         self.transcript.moveCursor(QTextCursor.MoveOperation.End)
         self.transcript.ensureCursorVisible()
 
+    @staticmethod
+    def _format_timestamp(timestamp: str) -> tuple[str, str]:
+        """Return (short_time, full_datetime) from ISO timestamp string."""
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            local_dt = dt.astimezone()
+            short = local_dt.strftime("%H:%M")
+            full = local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+            return short, full
+        except Exception:
+            return "", ""
+
     def _append_player(self, message: "ChatMessage") -> None:
         """Append a user (PLAYER) message as a right-aligned bubble, no label."""
         tokens = self._get_live_tokens()
@@ -1956,6 +2108,7 @@ class ChatPanel(QWidget):
             bg_color=bg,
             text_color=fg,
             message_id=message.id,
+            timestamp=message.timestamp,
         )
 
     def _player_html(self, message: "ChatMessage") -> str:
@@ -2011,6 +2164,7 @@ class ChatPanel(QWidget):
             bg_color=bg,
             text_color=body_color,
             message_id=message.id,
+            timestamp=message.timestamp,
         )
 
     def _append_bubble(
@@ -2033,6 +2187,7 @@ class ChatPanel(QWidget):
         bg_color: str,
         text_color: str,
         message_id: str | None = None,
+        timestamp: str = "",
     ) -> None:
         """Insert an already-rendered bubble, tagged with its message id."""
         # Respect the user's scroll position: only follow the tail if they
@@ -2060,6 +2215,20 @@ class ChatPanel(QWidget):
 
         # Set char format on cursor, then insert HTML
         cursor.setCharFormat(char_fmt)
+        
+        # Prepend timestamp if available
+        if timestamp:
+            short_time, full_time = self._format_timestamp(timestamp)
+            if short_time:
+                # Timestamp shown as a small, dim element at the corner of the bubble
+                ts_color = tokens.get("sys_color_text_secondary", "#9ab8e5") if (tokens := self._get_live_tokens()) else "#9ab8e5"
+                timestamp_html = (
+                    f'<span style="font-size:10px; color:{ts_color}; float:{"right" if align_right else "left"}; '
+                    f'margin-{"left" if align_right else "right"}:8px;" '
+                    f'title="{html.escape(full_time)}">{html.escape(short_time)}</span>'
+                )
+                body_html = timestamp_html + body_html
+        
         cursor.insertHtml(body_html)
 
         self._tag_blocks(start, message_id)
@@ -2076,11 +2245,12 @@ class ChatPanel(QWidget):
         text_color: str,
         escape: bool = False,
         message_id: str | None = None,
+        timestamp: str = "",
     ) -> None:
         """Render markdown and insert as a styled bubble block."""
         if not markdown_text.strip():
             self._append_bubble(
-                "", align_right, bg_color, text_color, escape=False, message_id=message_id
+                "", align_right, bg_color, text_color, escape=False, message_id=message_id, timestamp=timestamp
             )
             return
         
@@ -2094,47 +2264,73 @@ class ChatPanel(QWidget):
         )
         if not body:
             self._append_bubble(
-                "", align_right, bg_color, text_color, escape=False, message_id=message_id
+                "", align_right, bg_color, text_color, escape=False, message_id=message_id, timestamp=timestamp
             )
             return
         
         body = _colorize_markdown_html(body, text_color)
+        body = self._enhance_markdown_html(body, text_color, bg_color)
 
-        follow_tail = self._is_at_bottom()
+        self._insert_bubble_html(body, align_right, bg_color, text_color, message_id, timestamp)
 
-        cursor = QTextCursor(self.transcript.document())
-        cursor.movePosition(QTextCursor.MoveOperation.End)
+    def _enhance_markdown_html(self, html: str, text_color: str, bg_color: str) -> str:
+        """Post-process markdown HTML to improve code blocks and tables."""
+        import re
         
-        block_fmt = QTextBlockFormat()
-        block_fmt.setAlignment(Qt.AlignmentFlag.AlignRight if align_right else Qt.AlignmentFlag.AlignLeft)
-        block_fmt.setTopMargin(4)
-        block_fmt.setBottomMargin(4)
-        cursor.insertBlock(block_fmt)
-        start = cursor.block().position()
+        # Enhance code blocks: add monospace, background, padding
+        # Qt markdown produces <pre><code>...</code></pre>
+        def enhance_code_block(match):
+            code_content = match.group(1)
+            return (
+                f'<pre style="background:#1e1e2e; color:#d6e7ff; padding:8px 12px; '
+                f'border-radius:6px; overflow-x:auto; font-family:\'JetBrains Mono\',\'Fira Code\',\'Consolas\',monospace; '
+                f'font-size:12px; line-height:1.5; margin:4px 0;">{code_content}</pre>'
+            )
         
-        char_fmt = QTextCharFormat()
-        char_fmt.setBackground(QColor(bg_color))
-        char_fmt.setForeground(QColor(text_color))
-        char_fmt.setFontFamily("Segoe UI, Helvetica Neue, DejaVu Sans, sans-serif")
-        char_fmt.setFontPointSize(13)
+        # Match <pre><code>...</code></pre> patterns
+        html = re.sub(r'<pre><code>(.*?)</code></pre>', enhance_code_block, html, flags=re.DOTALL)
+        # Also match <pre>...</pre> without inner <code>
+        html = re.sub(r'<pre>(.*?)</pre>', enhance_code_block, html, flags=re.DOTALL)
         
-        cursor.setCharFormat(char_fmt)
-        cursor.insertHtml(body)
-
-        self._tag_blocks(start, message_id)
+        # Enhance inline code: <code>...</code>
+        inline_code_style = (
+            f'background:rgba(128,128,128,0.2); color:{text_color}; '
+            f'padding:1px 4px; border-radius:3px; font-family:monospace; font-size:12px;'
+        )
+        html = re.sub(
+            r'<code>(.*?)</code>',
+            lambda m: f'<code style="{inline_code_style}">{m.group(1)}</code>',
+            html
+        )
         
-        if follow_tail:
-            self.transcript.moveCursor(QTextCursor.MoveOperation.End)
-            self.transcript.ensureCursorVisible()
+        # Enhance tables: add borders and padding
+        # Qt markdown produces basic <table> without styling
+        table_style = (
+            'border-collapse:collapse; width:100%; margin:8px 0; font-size:12px;'
+        )
+        th_style = (
+            f'background:rgba(128,128,128,0.15); color:{text_color}; '
+            f'border:1px solid rgba(128,128,128,0.3); padding:6px 10px; text-align:left; font-weight:bold;'
+        )
+        td_style = (
+            f'color:{text_color}; '
+            f'border:1px solid rgba(128,128,128,0.3); padding:6px 10px;'
+        )
+        
+        html = re.sub(r'<table>', f'<table style="{table_style}">', html)
+        html = re.sub(r'<th>', f'<th style="{th_style}">', html)
+        html = re.sub(r'<td>', f'<td style="{td_style}">', html)
+        
+        return html
 
     def _append_alert(self, text: str) -> None:
         """Append an alert bubble and keep the transcript model in step."""
         from system_sl.chatbot.transcript import ALERT
 
         message = self._messages.append(ALERT, text)
-        self._append_alert_bubble(text, message_id=message.id)
+        self._append_alert_bubble(text, message_id=message.id, timestamp=message.timestamp)
 
-    def _append_alert_bubble(self, text: str, message_id: str | None = None) -> None:
+    def _append_alert_bubble(self, text: str, message_id: str | None = None, timestamp: str = "") -> None:
         safe = html.escape(text).replace("\n", "<br>")
         tokens = self._get_live_tokens()
         alert_color = tokens.get("sys_color_alert", "#ff6b8a")
@@ -2146,7 +2342,59 @@ class ChatPanel(QWidget):
             text_color=alert_text,
             escape=False,
             message_id=message_id,
+            timestamp=timestamp,
         )
+
+    def _append_alert_with_details(self, friendly: str, detail: str) -> None:
+        """Append an alert with a 'Details' link that opens a dialog with the raw error."""
+        from system_sl.chatbot.transcript import ALERT
+
+        message = self._messages.append(ALERT, friendly)
+        tokens = self._get_live_tokens()
+        alert_color = tokens.get("sys_color_alert", "#ff6b8a")
+        alert_text = tokens.get("sys_color_on_alert", "#ffffff")
+        dim_text = tokens.get("sys_color_text_secondary", "#9ab8e5")
+
+        safe_friendly = html.escape(friendly).replace("\n", "<br>")
+        # Use a custom anchor scheme that we can intercept
+        detail_link = f'<a href="alert-detail:{message.id}" style="color:{dim_text}; font-size:11px; text-decoration:underline;">Show details ▸</a>'
+        
+        html_content = f"{safe_friendly}<br>{detail_link}"
+
+        self._append_bubble(
+            html_content,
+            align_right=False,
+            bg_color=alert_color,
+            text_color=alert_text,
+            escape=False,
+            message_id=message.id,
+            timestamp=message.timestamp,
+        )
+
+        # Store the detail for the link handler
+        self._alert_details[message.id] = detail
+
+    def _handle_alert_detail_link(self, message_id: str) -> None:
+        """Show the raw error detail in a dialog."""
+        detail = self._alert_details.get(message_id)
+        if not detail:
+            return
+        from PySide6.QtWidgets import QMessageBox, QTextEdit
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Error Details")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setText("Raw error details:")
+        
+        detail_edit = QTextEdit()
+        detail_edit.setPlainText(detail)
+        detail_edit.setReadOnly(True)
+        detail_edit.setMinimumWidth(500)
+        detail_edit.setMinimumHeight(200)
+        detail_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        dialog.layout().addWidget(detail_edit, 0, 0, 1, dialog.layout().columnCount())
+        
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.exec()
 
     def _reset_stream_state(self) -> None:
         self._answer_open = False
@@ -2166,18 +2414,25 @@ class ChatPanel(QWidget):
         self.reasoning_view.setVisible(False)
 
     def _replace_answer_region(self, rendered_html: str) -> None:
-        """Rewrite the streaming answer block with freshly rendered HTML."""
+        """Rewrite the streaming answer block with freshly rendered HTML.
+
+        Preserves the user's text selection and cursor position.
+        """
         if self._answer_start is None:
             return
 
-        # Capture the scroll state before the rewrite. The rewrite replaces
-        # the whole answer block, so the scrollbar range changes underneath
-        # the user; only follow the tail if they were already reading it.
+        # Save the user's selection and cursor position
+        saved_cursor = self.transcript.textCursor()
+        has_selection = saved_cursor.hasSelection()
+        selection_start = saved_cursor.selectionStart() if has_selection else -1
+        selection_end = saved_cursor.selectionEnd() if has_selection else -1
+        cursor_position = saved_cursor.position()
+
+        # Capture the scroll state before the rewrite.
         follow_tail = self._is_at_bottom()
 
         # Anything appended while the answer streamed (an alert, a note) sits
-        # below the answer block and would be erased by the rewrite. The model
-        # still has it, so it is redrawn afterwards.
+        # below the answer block and would be erased by the rewrite.
         trailing = (
             self._messages.after(self._stream_message_id)
             if self._stream_message_id
@@ -2211,7 +2466,13 @@ class ChatPanel(QWidget):
         for message in trailing:
             self._render_message(message)
 
-        if follow_tail:
+        # Restore selection if it was within the preserved region (before answer)
+        if has_selection and selection_start < self._answer_start:
+            restore_cursor = QTextCursor(doc)
+            restore_cursor.setPosition(selection_start)
+            restore_cursor.setPosition(selection_end, QTextCursor.KeepAnchor)
+            self.transcript.setTextCursor(restore_cursor)
+        elif follow_tail:
             self.transcript.moveCursor(QTextCursor.MoveOperation.End)
             self.transcript.ensureCursorVisible()
 
@@ -2367,6 +2628,37 @@ class ChatPanel(QWidget):
         if follow_tail:
             self.reasoning_view.ensureCursorVisible()
 
+    def _on_tool_activity(self, tool_name: str, status: str, detail: str) -> None:
+        """Display tool activity in the reasoning view."""
+        if self._halted:
+            return
+        
+        # Map tool names to friendly descriptions
+        tool_descriptions = {
+            "load_tasks": "Reading your tasks…",
+            "load_completed_tasks": "Reading completed tasks…",
+            "add_task": "Adding task…",
+            "remove_task": "Removing task…",
+            "mark_task_completed": "Marking task complete…",
+            "get_random_task": "Picking a focus task…",
+            "propose_tasks_batch": "Proposing tasks from document…",
+            "read_persona": "Reading your profile…",
+        }
+        
+        friendly = tool_descriptions.get(tool_name, f"Running {tool_name}…")
+        
+        if status == "start":
+            self._show_reasoning()
+            # Replace the reasoning view content with the tool activity
+            self.reasoning_view.clear()
+            self.reasoning_view.setPlainText(friendly)
+        elif status == "end":
+            # Tool finished, show brief confirmation then clear after a delay
+            self.reasoning_view.clear()
+            self.reasoning_view.setPlainText(f"✓ {friendly}")
+            # Clear after 1.5 seconds
+            QTimer.singleShot(1500, lambda: self.reasoning_view.clear() if self.reasoning_view.toPlainText() == f"✓ {friendly}" else None)
+
     # --- answer ---
 
     def _on_chunk(self, delta: str) -> None:
@@ -2427,7 +2719,7 @@ class ChatPanel(QWidget):
         self._append_alert(f"attachment: {notice}")
 
     def _show_batch_proposal_dialog(self, proposal: dict) -> None:
-        """Show the batch task proposal dialog."""
+        """Show the batch task proposal dialog (non-modal)."""
         from system_sl.frontend.gui.popup_windows import BatchProposalDialog
 
         tasks = proposal.get("tasks", [])
@@ -2444,17 +2736,25 @@ class ChatPanel(QWidget):
             return pairs
 
         dialog = BatchProposalDialog(tasks, self)
-        if dialog.exec() == QDialog.Accepted:
-            # User confirmed - add the selected tasks; the rest were skipped
-            selected_rows = dialog.get_selected_tasks()
-            selected_tasks = [task for _row, task in selected_rows]
-            selected_indexes = {row for row, _task in selected_rows}
-            skipped = [task for i, task in enumerate(tasks) if i not in selected_indexes]
-            self._add_batch_tasks(selected_tasks, declined=as_pairs(skipped))
-        else:
-            # One note for the whole batch, not one per task.
-            self._record_task_confirmation(declined=as_pairs(tasks))
-        # Dialog handles its own cleanup
+        dialog.confirmed.connect(
+            lambda selected_tasks: self._on_batch_confirmed(selected_tasks, tasks, as_pairs)
+        )
+        dialog.cancelled.connect(
+            lambda: self._on_batch_cancelled(tasks, as_pairs)
+        )
+        dialog.show()
+
+    def _on_batch_confirmed(
+        self, selected_tasks: list[dict], all_tasks: list[dict], as_pairs
+    ) -> None:
+        """Handle batch dialog confirmation."""
+        selected_titles = {task["title"] for task in selected_tasks}
+        skipped = [task for task in all_tasks if task.get("title") not in selected_titles]
+        self._add_batch_tasks(selected_tasks, declined=as_pairs(skipped))
+
+    def _on_batch_cancelled(self, all_tasks: list[dict], as_pairs) -> None:
+        """Handle batch dialog cancellation."""
+        self._record_task_confirmation(declined=as_pairs(all_tasks))
 
     def _show_next_proposal(self) -> None:
         """Show the next queued proposal, or hide the bar when none remain."""
@@ -2644,9 +2944,9 @@ class ChatPanel(QWidget):
         from system_sl.chatbot.transcript import CONFIRMATION
 
         message = self._messages.append(CONFIRMATION, text)
-        self._append_confirmation_bubble(text, message_id=message.id)
+        self._append_confirmation_bubble(text, message_id=message.id, timestamp=message.timestamp)
 
-    def _append_confirmation_bubble(self, text: str, message_id: str | None = None) -> None:
+    def _append_confirmation_bubble(self, text: str, message_id: str | None = None, timestamp: str = "") -> None:
         tokens = self._get_live_tokens()
         self._append_bubble(
             text,
@@ -2654,7 +2954,95 @@ class ChatPanel(QWidget):
             bg_color=tokens.get("sys_color_surface", "#2a2a40"),
             text_color=tokens.get("sys_color_primary", "#00d9ff"),
             message_id=message_id,
+            timestamp=timestamp,
         )
+
+    # ----- Message Actions -----
+
+    def _regenerate_reply(self, message_id: str) -> None:
+        """Regenerate the last assistant reply by removing it and re-running the turn."""
+        if self.is_busy():
+            self._append_alert("Cannot regenerate while a reply is in progress")
+            return
+
+        message = self._messages.get(message_id)
+        if not message or message.role != "assistant":
+            return
+
+        # Find the preceding user message
+        idx = self._messages.index_of(message_id)
+        user_msg = None
+        for i in range(idx - 1, -1, -1):
+            if self._messages.messages[i].role == "user":
+                user_msg = self._messages.messages[i]
+                break
+
+        if not user_msg:
+            self._append_alert("No user message found to regenerate from")
+            return
+
+        # Remove the assistant message and any messages after it
+        self._messages.messages = self._messages.messages[:idx]
+        self._render_transcript(self._messages.messages)
+
+        # Re-send the user message (with its attachments and quotes)
+        attachments = list(user_msg.attachments) if user_msg.attachments else []
+        self._send_now(user_msg.body, attachments)
+
+    def _retry_message(self, message_id: str) -> None:
+        """Retry a failed assistant message."""
+        if self.is_busy():
+            self._append_alert("Cannot retry while a reply is in progress")
+            return
+
+        message = self._messages.get(message_id)
+        if not message or message.role != "assistant" or not message.error:
+            return
+
+        # Same as regenerate but for failed messages
+        idx = self._messages.index_of(message_id)
+        user_msg = None
+        for i in range(idx - 1, -1, -1):
+            if self._messages.messages[i].role == "user":
+                user_msg = self._messages.messages[i]
+                break
+
+        if not user_msg:
+            self._append_alert("No user message found to retry from")
+            return
+
+        self._messages.messages = self._messages.messages[:idx]
+        self._render_transcript(self._messages.messages)
+
+        attachments = list(user_msg.attachments) if user_msg.attachments else []
+        self._send_now(user_msg.body, attachments)
+
+    def _edit_and_resend(self, message_id: str) -> None:
+        """Edit a user message and resend from that point (forking the conversation)."""
+        if self.is_busy():
+            self._append_alert("Cannot edit while a reply is in progress")
+            return
+
+        message = self._messages.get(message_id)
+        if not message or message.role != "user":
+            return
+
+        # Put the message text in the input box for editing
+        self.input_box.setPlainText(message.body or message.text)
+        self.input_box.setFocus()
+        self.input_box.moveCursor(QTextCursor.MoveOperation.End)
+
+        # Remove this message and all subsequent messages
+        idx = self._messages.index_of(message_id)
+        self._messages.messages = self._messages.messages[:idx]
+        self._render_transcript(self._messages.messages)
+
+        # Clear any queued messages since we're forking
+        if self._message_queue:
+            self._message_queue.clear()
+            self._update_queue_badge()
+
+        # The user can now edit and press Enter to send
 
     def _show_after_turn(self, append: Callable[[str], None], text: str) -> None:
         """Add a note to the transcript once the running reply has finished.
@@ -2812,6 +3200,7 @@ class ChatPanel(QWidget):
         self._worker.cancelled.connect(self._on_cancelled)
         self._worker.proposal.connect(self._on_proposal)
         self._worker.attachment_notice.connect(self._on_attachment_notice)
+        self._worker.tool_activity.connect(self._on_tool_activity)
         self._worker.finished.connect(self._thread.quit)
         self._worker.failed.connect(self._thread.quit)
         self._worker.cancelled.connect(self._thread.quit)
@@ -2881,6 +3270,67 @@ class ChatPanel(QWidget):
         self._reasoning_shown = False
         self._stop_dots()
 
+    @staticmethod
+    def _friendly_error(message: str) -> tuple[str, str | None]:
+        """Map a raw error message to a user-friendly version and optional detail.
+
+        Returns (friendly_message, raw_detail). If no mapping applies, returns
+        the original message as friendly and None as detail.
+        """
+        lower = message.lower()
+
+        # Authentication / API key errors
+        if any(kw in lower for kw in ("401", "unauthorized", "invalid api key", "authentication failed", "api key")):
+            return (
+                "Authentication failed. Please check your API key in Settings.",
+                message,
+            )
+
+        # Rate limiting
+        if any(kw in lower for kw in ("429", "rate limit", "too many requests", "quota exceeded")):
+            return (
+                "Rate limit exceeded. Please wait a moment and try again.",
+                message,
+            )
+
+        # Network / connection errors
+        if any(kw in lower for kw in ("connection", "connect", "timeout", "network", "dns", "resolve", "unreachable")):
+            return (
+                "Could not connect to the model provider. Check your internet connection and the Base URL in Settings.",
+                message,
+            )
+
+        # Context window / token limit
+        if any(kw in lower for kw in ("context", "token limit", "too long", "maximum context", "context length")):
+            return (
+                "The conversation is too long for this model's context window. Try starting a new chat or switching to a model with a larger context.",
+                message,
+            )
+
+        # Model not found
+        if any(kw in lower for kw in ("404", "not found", "model not found", "unknown model", "does not exist")):
+            return (
+                "The selected model is not available. Please choose a different model in the dropdown or refresh the model list.",
+                message,
+            )
+
+        # Permission / access denied
+        if any(kw in lower for kw in ("403", "forbidden", "permission denied", "access denied")):
+            return (
+                "Access denied. Your API key may not have permission to use this model.",
+                message,
+            )
+
+        # Server errors
+        if any(kw in lower for kw in ("500", "502", "503", "504", "internal server error", "bad gateway", "service unavailable")):
+            return (
+                "The model provider is experiencing issues. Please try again later.",
+                message,
+            )
+
+        # No mapping found - return original with no detail
+        return message, None
+
     def _on_failure(self, message: str) -> None:
         self._md_timer.stop()
         self._stop_dots()
@@ -2895,7 +3345,15 @@ class ChatPanel(QWidget):
         self._answer_open = False
         if self._halted:
             return
-        self._append_alert(message)
+
+        friendly, detail = self._friendly_error(message)
+        if detail:
+            # Log the raw error for debugging
+            logger.error("LLM error: %s", detail)
+            # Show friendly message with expandable details
+            self._append_alert_with_details(friendly, detail)
+        else:
+            self._append_alert(friendly)
 
     def _on_cancelled(self) -> None:
         self._md_timer.stop()
@@ -2947,3 +3405,19 @@ class ChatPanel(QWidget):
             # one starts; a direct call would re-enter the worker setup
             # while this signal is still being delivered.
             QTimer.singleShot(0, lambda: self._send_now(queued_text, queued_attachments))
+
+    def closeEvent(self, event) -> None:
+        """Flush pending notes and confirmations before the panel closes."""
+        # Flush any pending "after turn" notes
+        if self._notes_after_turn:
+            notes, self._notes_after_turn = self._notes_after_turn, []
+            for append, text in notes:
+                append(text)
+        # Flush any pending task confirmations
+        self._flush_pending_confirmations()
+        # Cancel any running worker thread
+        if self._thread is not None:
+            self._thread.requestInterruption()
+            self._thread.quit()
+            self._thread.wait(1000)
+        super().closeEvent(event)

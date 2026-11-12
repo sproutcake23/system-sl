@@ -30,7 +30,7 @@ from system_sl.utils import (
 
 from system_sl.chatbot.system_prompts import SYSTEM_MENTOR_PROMPT
 from system_sl.chatbot.agent_middleware import make_context_middleware
-from system_sl.chatbot.config import ChatConfig, load_config
+from system_sl.chatbot.config import ChatConfig, load_config, validate_config
 from system_sl.chatbot.llm_factory import create_llm_from_config, LLMFactoryError
 from system_sl.chatbot.memory import get_checkpointer
 
@@ -71,15 +71,14 @@ def is_explicit_task_request(text: str) -> bool:
     return bool(text and _EXPLICIT_ADD.search(text))
 
 
-@dataclass
-class _TurnContext:
-    """The user message (and proposal sink) for the turn currently running."""
+# Context variable for the current turn's user text and proposal callback.
+# Using contextvars ensures isolation between concurrent turns (e.g., when
+# multiple workers run) and avoids the module-global race.
+import contextvars
 
-    user_text: str
-    on_proposal: Optional[Callable[[dict], None]] = None
-
-
-_turn_context: Optional[_TurnContext] = None
+_turn_context: contextvars.ContextVar[tuple[str, Callable[[dict], None]] | None] = contextvars.ContextVar(
+    "_turn_context", default=None
+)
 
 
 def set_turn_context(
@@ -87,14 +86,17 @@ def set_turn_context(
     on_proposal: Optional[Callable[[dict], None]] = None,
 ) -> None:
     """Scope a user message to the tools that run during this turn."""
-    global _turn_context
-    _turn_context = _TurnContext(user_text=user_text or "", on_proposal=on_proposal)
+    _turn_context.set((user_text or "", on_proposal))
 
 
 def clear_turn_context() -> None:
     """Drop the turn context once the turn has finished or been abandoned."""
-    global _turn_context
-    _turn_context = None
+    _turn_context.set(None)
+
+
+def _get_turn_context() -> tuple[str, Callable[[dict], None] | None]:
+    """Get the current turn's context, returning empty defaults if unset."""
+    return _turn_context.get() or ("", None)
 
 
 # =============================================================================
@@ -121,12 +123,12 @@ def add_task(category: str, title: str, deadline: Optional[str] = None) -> Any:
     latest message. Otherwise it is queued for a Yes/No confirmation and the
     result is ``pending_confirmation`` — do not claim it was added.
     """
-    context = _turn_context
-    if context is None or not is_explicit_task_request(context.user_text) or _attached_doc_present(context.user_text):
+    user_text, on_proposal = _get_turn_context()
+    if not is_explicit_task_request(user_text) or _attached_doc_present(user_text):
         proposal = {"category": category, "title": title, "deadline": deadline}
-        if context is not None and context.on_proposal is not None:
+        if on_proposal is not None:
             try:
-                context.on_proposal(proposal)
+                on_proposal(proposal)
             except Exception:
                 pass
         return {
@@ -189,7 +191,7 @@ def propose_tasks_batch(tasks: list[dict]) -> Any:
     Returns:
         dict with status "pending_confirmation" and the full task list.
     """
-    context = _turn_context
+    _, on_proposal = _get_turn_context()
     validated: list[dict] = []
     errors: list[str] = []
 
@@ -213,9 +215,9 @@ def propose_tasks_batch(tasks: list[dict]) -> Any:
         return {"status": "error", "message": "No valid tasks in batch: " + "; ".join(errors)}
 
     proposal = {"type": "batch", "tasks": validated}
-    if context is not None and context.on_proposal is not None:
+    if on_proposal is not None:
         try:
-            context.on_proposal(proposal)
+            on_proposal(proposal)
         except Exception:
             pass
 
@@ -257,6 +259,13 @@ SYSTEM_TOOLS = [
 # LAZY INITIALIZATION
 # =============================================================================
 
+def _maybe_reset_on_config_change() -> None:
+    """Check if config file changed externally and invalidate caches if so."""
+    from system_sl.chatbot.config import _check_config_mtime
+    if _check_config_mtime():
+        reset_agent_cache()
+
+
 @lru_cache(maxsize=1)
 def _get_cached_llm():
     """Build (once) and return the shared LLM based on current config.
@@ -264,27 +273,12 @@ def _get_cached_llm():
     Construction is deferred until first use so that config is loaded
     and any required API keys are available.
     """
+    _maybe_reset_on_config_change()
     config = load_config()
     errors = validate_config(config)
     if errors:
         raise LLMFactoryError("; ".join(errors))
     return create_llm_from_config(config)
-
-
-def validate_config(config: ChatConfig) -> list[str]:
-    """Validate configuration and return list of errors."""
-    errors = []
-    if config.provider not in ("google", "openai"):
-        errors.append(f"Invalid provider: {config.provider}. Must be 'google' or 'openai'")
-    if config.provider == "google":
-        if not config.api_key:
-            errors.append("Google provider requires an API key")
-    elif config.provider == "openai":
-        if not config.base_url:
-            errors.append("OpenAI-compatible provider requires base_url")
-    if not config.system_model:
-        errors.append("system_model cannot be empty")
-    return errors
 
 
 @lru_cache(maxsize=8)
@@ -297,6 +291,7 @@ def build_agent_for_model(model_name: str):
     HTTP clients belong to the model that is about to answer, to cancel a
     stream on Stop.
     """
+    _maybe_reset_on_config_change()
     config = load_config()
 
     # LLMFactoryError is raised unchanged so callers can tell "no API key
@@ -313,10 +308,16 @@ def build_agent_for_model(model_name: str):
             raise LLMFactoryError("; ".join(errors))
         llm = create_llm_from_config(override)
 
+    # Build system prompt with optional addendum
+    system_prompt = SYSTEM_MENTOR_PROMPT
+    addendum = config.system_prompt_addendum.strip()
+    if addendum:
+        system_prompt += "\n\n--- Additional Instructions ---\n" + addendum
+
     agent = create_agent(
         model=llm,
         tools=SYSTEM_TOOLS,
-        system_prompt=SYSTEM_MENTOR_PROMPT,
+        system_prompt=system_prompt,
         middleware=[make_context_middleware()],
         checkpointer=get_checkpointer(),
     )
@@ -325,7 +326,10 @@ def build_agent_for_model(model_name: str):
 
 @lru_cache(maxsize=1)
 def get_system_agent():
-    """Build (once) and return the SYSTEM mentor agent for the saved default."""
+    """Build (once) and return the SYSTEM mentor agent for the saved default.
+
+    The cache is invalidated by ``reset_agent_cache()`` when config changes.
+    """
     return build_agent_for_model(load_config().system_model)[0]
 
 

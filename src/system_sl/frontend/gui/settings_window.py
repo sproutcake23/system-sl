@@ -57,3 +57,8 @@ class AppSettingsDialog(QDialog):
         self.tabs.setTabToolTip(
             self.LLM_TAB, "" if available else "Available once the reply finishes"
         )
+
+    def closeEvent(self, event) -> None:
+        """Ensure LLM page threads are cleaned up on dialog close."""
+        self.llm_page.closeEvent(event)
+        super().closeEvent(event)
