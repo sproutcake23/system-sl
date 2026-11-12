@@ -1,14 +1,26 @@
+"""Small, non-blocking task-reminder toast.
+
+This deliberately is not a modal window: a reminder must never steal focus
+from what the Player is doing. It is a compact frameless toast in the corner
+of the screen that dismisses itself, and can also be dismissed with Esc or a
+click.
+"""
+
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
-    QHBoxLayout,
     QLabel,
-    QPushButton,
     QFrame,
 )
-from PySide6.QtCore import Qt
+
 from system_sl.utils.audio_manager import play_sound, get_current_sound
 from system_sl.frontend.gui.theme import get_current_theme_tokens
+
+
+_TOAST_WIDTH = 360
+_AUTO_DISMISS_MS = 8000
+_SCREEN_MARGIN = 24
 
 
 class SystemNotification(QWidget):
@@ -17,87 +29,84 @@ class SystemNotification(QWidget):
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(800, 500)
-        self._center_window()
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setFixedWidth(_TOAST_WIDTH)
+        self._auto_dismiss = QTimer(self)
+        self._auto_dismiss.setSingleShot(True)
+        self._auto_dismiss.timeout.connect(self.hide)
         self._setup_ui()
         self.refresh_theme()
-
-    def _center_window(self):
-        screen = self.screen()
-        if screen:
-            screen_geo = screen.geometry() # resolution of the whole screen
-            x = (screen_geo.width() - self.width()) // 2
-            y = (screen_geo.height() - self.height()) // 2
-            self.move(x,y)
 
     def _setup_ui(self):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
+
         self.container = QFrame()
         self.container.setObjectName("systemWindow")
         self.container_layout = QVBoxLayout(self.container)
+        self.container_layout.setContentsMargins(14, 10, 14, 12)
+        self.container_layout.setSpacing(6)
 
-        self.header_frame = QFrame()
-        self.header_frame.setObjectName("header")
-        header_layout = QHBoxLayout(self.header_frame)
-        self.header_text = QLabel("NOTIFICATION")
+        header_layout = QVBoxLayout()
+        self.header_text = QLabel("THE SYSTEM")
         self.header_text.setObjectName("headerText")
-        header_layout.addStretch()
         header_layout.addWidget(self.header_text)
-        header_layout.addStretch()
+        self.container_layout.addLayout(header_layout)
 
         self.content_area = QFrame()
         self.content_layout = QVBoxLayout(self.content_area)
-        # self.cat_label = QLabel("[ CATEGORY ]")
-        # self.cat_label.setObjectName("notifCategory")
-
-        self.msg_labels = []
-
-
-        self.dismiss_btn = QPushButton("DISMISS")
-        self.dismiss_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.dismiss_btn.clicked.connect(self.hide)
-
-        self.container_layout.addWidget(self.header_frame)
-        self.container_layout.addStretch()
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(4)
         self.container_layout.addWidget(self.content_area)
-        self.container_layout.addStretch()
-
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.dismiss_btn)
-        btn_layout.addStretch()
-        self.container_layout.addLayout(btn_layout)
 
         self.main_layout.addWidget(self.container)
 
+    def _position_toast(self):
+        screen = self.screen()
+        if screen is None:
+            return
+        geometry = screen.availableGeometry()
+        self.move(
+            geometry.right() - self.width() - _SCREEN_MARGIN,
+            geometry.bottom() - self.height() - _SCREEN_MARGIN,
+        )
+
     def show_system_style(self):
+        self.refresh_theme()
+        self.adjustSize()
+        self._position_toast()
         self.show()
         self.raise_()
-        self.activateWindow()
+        # Deliberately no activateWindow()/setFocus(): a reminder must not
+        # take keyboard focus away from the Player.
 
-    def keyPressEvent(self, event):
+    def mousePressEvent(self, event):
         self.hide()
 
-    def refresh_theme(self, tokens=None):
-        """Re-apply the stylesheet using the current theme tokens.
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+        else:
+            super().keyPressEvent(event)
 
-        Called on init and before every notification so the notification
-        always matches the palette selected in Settings.
-        """
+    def hide(self):
+        self._auto_dismiss.stop()
+        super().hide()
+
+    def refresh_theme(self, tokens=None):
+        """Re-apply the stylesheet using the current theme tokens."""
         if tokens is None:
             tokens = get_current_theme_tokens()
 
         bg = tokens.get("sys_color_background", "#060912")
         primary = tokens.get("sys_color_primary", "#00d9ff")
-        on_primary = tokens.get("sys_color_on_primary", "#04121a")
         text_main = tokens.get("sys_color_text_main", "#d6e7ff")
-        text_secondary = tokens.get("sys_color_text_secondary", "#b3d4ff")
         surface = tokens.get("sys_color_surface", "#0b0f1a")
 
         self.setStyleSheet(f"""
@@ -106,49 +115,41 @@ class SystemNotification(QWidget):
                 font-family: 'Montserrat', sans-serif;
             }}
             #systemWindow {{
-                background-color: {bg};
+                background-color: {surface};
                 border: 1px solid {primary};
-                border-radius: 8px;
+                border-radius: 10px;
             }}
-            #header {{
-                border: 1px solid {primary};
-                margin: 40px 100px 0px 100px;
-                max-height: 50px;
-            }}
-            #headerText {{ color: {text_main}; font-size: 20px; letter-spacing: 4px; }}
-            #notifCategory {{ color: {text_secondary}; font-weight: 700; font-size: 18px; }}
-            #notifMessage {{ font-size: 22px; color: {text_main}; }}
-            QPushButton {{
-                border: 1px solid {primary};
+            #headerText {{
                 color: {primary};
-                background: {surface};
-                padding: 8px 35px;
+                font-size: 11px;
                 font-weight: 700;
+                letter-spacing: 3px;
             }}
-            QPushButton:hover {{ background: {primary}; color: {on_primary}; }}
+            #notifMessage {{
+                color: {text_main};
+                font-size: 14px;
+                qproperty-wordWrap: true;
+            }}
         """)
 
-    def display_message(self,message: list) -> None:
-        if not message or not any(m.strip() for m in message):
+    def display_message(self, message: list) -> None:
+        if not message or not any(str(m).strip() for m in message):
             return
-        # Re-apply the live theme before showing each notification.
+
         self.refresh_theme()
         while self.content_layout.count():
             item = self.content_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        text = "Loading task"
 
-        for i in range(len(message)):
-            label = QLabel(f"{text}{i}")
-            label.setObjectName("notifMessage")  # Keeps your QSS styling consistent
-
-            self.content_layout.addWidget(label)  # Assuming self.layout is your QVBoxLayout
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        for text in message:
+            label = QLabel(str(text))
+            label.setObjectName("notifMessage")
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
             self.content_layout.addWidget(label)
-            label.setText(message[i])
 
-        current_sound = get_current_sound()
-        play_sound(current_sound)
+        play_sound(get_current_sound())
         self.show_system_style()
+        self._auto_dismiss.start(_AUTO_DISMISS_MS)
