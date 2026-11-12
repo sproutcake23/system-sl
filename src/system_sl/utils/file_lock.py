@@ -67,6 +67,7 @@ def file_lock(lock_path: str | Path):
 
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
     depths[key] = 1
+    locked = False
     try:
         if os.name == "nt":
             # msvcrt.locking locks a byte range; lock the first byte.
@@ -74,13 +75,15 @@ def file_lock(lock_path: str | Path):
             msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
         else:
             fcntl.flock(fd, fcntl.LOCK_EX)
+        locked = True
         yield
     finally:
         try:
-            if os.name == "nt":
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+            if locked:
+                if os.name == "nt":
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             depths[key] = 0
             os.close(fd)
