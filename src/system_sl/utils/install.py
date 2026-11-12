@@ -129,8 +129,8 @@ def create_desktop_shortcut(target_path: Path, install_dir: Path):
         "[Desktop Entry]",
         "Type=Application",
         "Name=THE SYSTEM",
-        f"Exec={target_path}",
-        f"Path={install_dir}",
+        f'Exec="{target_path}"',
+        f'Path="{install_dir}"',
         "Terminal=false",
         f"Icon={icon_path}",
         "Categories=Utility;Productivity;",
@@ -192,7 +192,7 @@ def install_the_system():
     else:
         # Development mode
         bundle_dir = Path(__file__).parent.absolute()
-        project_root = bundle_dir.parent.parent.parent.parent
+        project_root = bundle_dir.parent.parent.parent
         dev_binary = project_root / "dist" / binary_name
 
         if dev_binary.exists():
