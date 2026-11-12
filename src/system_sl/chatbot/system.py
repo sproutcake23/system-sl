@@ -309,5 +309,7 @@ def get_system_agent():
 # Force rebuild of agent when config changes
 def reset_agent_cache() -> None:
     """Clear the cached agent and LLM. Call after config changes."""
+    from system_sl.chatbot.llm_factory import clear_cached_llm
     _get_cached_llm.cache_clear()
     get_system_agent.cache_clear()
+    clear_cached_llm()
