@@ -907,6 +907,23 @@ class ChatPanel(QWidget):
 
         root.addLayout(header)
 
+        # --- Conversation row: reopen a past chat, or start a new one ---
+        chat_row = QHBoxLayout()
+        chat_row.addWidget(QLabel("Chat:"))
+        self.history_combo = QComboBox()
+        self.history_combo.setMinimumWidth(220)
+        self.history_combo.setToolTip("Reopen a past conversation")
+        self.history_combo.currentIndexChanged.connect(self._on_history_changed)
+        chat_row.addWidget(self.history_combo, stretch=1)
+
+        self.new_chat_btn = QPushButton()
+        self.new_chat_btn.setIcon(get_icon("add"))
+        self.new_chat_btn.setFixedWidth(36)
+        self.new_chat_btn.setToolTip("Start a new conversation")
+        self.new_chat_btn.clicked.connect(self._on_new_chat)
+        chat_row.addWidget(self.new_chat_btn)
+        root.addLayout(chat_row)
+
         # --- Transcript ---
         self.transcript = QTextBrowser()
         self.transcript.setReadOnly(True)
@@ -1007,6 +1024,11 @@ class ChatPanel(QWidget):
         # Enable drag & drop on the panel itself
         self.setAcceptDrops(True)
 
+        # Reopen the conversation that was on screen when the app last closed
+        # (or start the first one) before the model dropdown is filled, so the
+        # dropdown selects the model that conversation was last using.
+        self._restore_active_conversation()
+
         # Initialize model list. The local-server scan runs in the background;
         # the dropdown is usable immediately.
         self._populate_model_list()
@@ -1073,17 +1095,16 @@ class ChatPanel(QWidget):
             self.model_combo.addItem(display, model_id)
 
         # Select current model
-        if has_config:
-            idx = self.model_combo.findData(current_model)
-            if idx >= 0:
-                self.model_combo.setCurrentIndex(idx)
-            else:
-                self.model_combo.setCurrentIndex(0)
-        else:
-            self.model_combo.setCurrentIndex(0)
-
-        self._current_model = current_model
         self.model_combo.blockSignals(False)
+        self._current_model = current_model
+        if has_config:
+            # Reuses the restored conversation's model even when discovery has
+            # not returned it yet, so the dropdown matches what will answer.
+            self._select_model_in_combo(current_model)
+        else:
+            self.model_combo.blockSignals(True)
+            self.model_combo.setCurrentIndex(0)
+            self.model_combo.blockSignals(False)
         self._update_default_button()
 
     # ----- Background model discovery -----
@@ -1158,6 +1179,10 @@ class ChatPanel(QWidget):
         # The conversation (thread) and its transcript stay exactly as they
         # are: the new model answers from the same message history. Only the
         # agent behind the session is replaced.
+        from system_sl.chatbot.memory import update_conversation
+
+        update_conversation(self._thread_id, last_model=model_id)
+        self._refresh_history_combo()
         self._update_default_button()
         self._append_system_note(f"Switched to {model_id} — the conversation continues")
 
@@ -1189,6 +1214,175 @@ class ChatPanel(QWidget):
         self._session = None
         self._update_default_button()
         self._append_alert(f"Default model set to: {self._current_model}")
+
+    # ----- Conversations -----
+
+    def _restore_active_conversation(self) -> None:
+        """Open the conversation that was active when the app last closed."""
+        from system_sl.chatbot import load_config
+        from system_sl.chatbot.memory import ensure_active_conversation
+
+        try:
+            default_model = load_config().system_model
+        except Exception:
+            default_model = ""
+
+        entry = ensure_active_conversation(model_name=default_model)
+        self._thread_id = entry["id"]
+        self._current_model = entry.get("last_model") or ""
+        self._refresh_history_combo()
+        self._render_transcript(self._messages_for_thread(self._thread_id))
+
+    def _conversation_label(self, entry: dict) -> str:
+        """Display name for a conversation in the history dropdown."""
+        title = (entry.get("title") or "").strip()
+        return title or "New conversation"
+
+    def _refresh_history_combo(self) -> None:
+        """Rebuild the conversation dropdown, keeping the open one selected."""
+        from system_sl.chatbot.memory import list_conversations
+
+        self.history_combo.blockSignals(True)
+        self.history_combo.clear()
+        selected = -1
+        for entry in list_conversations():
+            self.history_combo.addItem(
+                self._conversation_label(entry), entry["id"]
+            )
+            updated = entry.get("updated") or entry.get("created") or ""
+            model = entry.get("last_model") or "default model"
+            index = self.history_combo.count() - 1
+            self.history_combo.setItemData(
+                index,
+                f"{self._conversation_label(entry)}\nlast used {updated}\nmodel: {model}",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+            if entry["id"] == self._thread_id:
+                selected = index
+        if selected >= 0:
+            self.history_combo.setCurrentIndex(selected)
+        self.history_combo.blockSignals(False)
+
+    def _on_new_chat(self) -> None:
+        """Start a new conversation with a fresh thread id."""
+        if self.is_busy():
+            return
+        from system_sl.chatbot import load_config
+        from system_sl.chatbot.memory import create_conversation
+
+        try:
+            model = self._current_model or load_config().system_model
+        except Exception:
+            model = self._current_model
+        entry = create_conversation(model_name=model)
+        self._open_conversation(entry["id"])
+
+    def _on_history_changed(self, index: int) -> None:
+        """Reopen the conversation picked in the dropdown."""
+        if index < 0 or self.is_busy():
+            return
+        thread_id = self.history_combo.itemData(index)
+        if thread_id and thread_id != self._thread_id:
+            self._open_conversation(thread_id)
+
+    def _open_conversation(self, thread_id: str) -> None:
+        """Show a stored conversation and make it the active one."""
+        from system_sl.chatbot.memory import get_conversation, select_conversation
+
+        select_conversation(thread_id)
+
+        # Resolve pending proposals against the conversation that produced
+        # them before the session is replaced.
+        self._clear_proposals()
+
+        self._thread_id = thread_id
+        self._session = None
+        self._reset_stream_state()
+
+        entry = get_conversation(thread_id) or {}
+        last_model = entry.get("last_model")
+        if last_model and last_model != self._current_model:
+            self._current_model = last_model
+            self._select_model_in_combo(last_model)
+            self._update_default_button()
+
+        self._render_transcript(self._messages_for_thread(thread_id))
+        self._refresh_history_combo()
+        self.input_box.setFocus()
+
+    def _select_model_in_combo(self, model_name: str) -> None:
+        """Show ``model_name`` in the dropdown without triggering a switch."""
+        index = self.model_combo.findData(model_name)
+        self.model_combo.blockSignals(True)
+        if index < 0:
+            # The model is not in the list (discovery has not found it, or it
+            # is not in the cached presets). Still show what will answer.
+            self.model_combo.insertItem(0, f"✦ {model_name}", model_name)
+            index = 0
+        self.model_combo.setCurrentIndex(index)
+        self.model_combo.blockSignals(False)
+
+    def _messages_for_thread(self, thread_id: str) -> list:
+        """Read a conversation's messages straight from the checkpointer."""
+        from system_sl.chatbot.memory import load_thread_messages
+
+        try:
+            return load_thread_messages(thread_id)
+        except Exception:
+            return []
+
+    def _render_transcript(self, messages: list) -> None:
+        """Rebuild the transcript from a conversation's stored messages.
+
+        Only the Player's messages and the System's answers are bubbles; tool
+        traffic is internal, and app-injected notes are shown dimmed so they
+        are not mistaken for something the Player typed.
+        """
+        from system_sl.chatbot.memory import is_app_note, note_body
+
+        self.transcript.clear()
+        if not messages:
+            return
+
+        for message in messages:
+            role = getattr(message, "type", "")
+            content = getattr(message, "content", "")
+            text = content if isinstance(content, str) else self._flatten_content(content)
+            if not text.strip():
+                continue
+
+            if role == "human":
+                text = self._strip_date_prefix(text)
+                if is_app_note(text):
+                    self._append_system_note(note_body(text))
+                else:
+                    self._append_player(text)
+            elif role == "ai":
+                # Tool-call-only turns have no text worth showing.
+                self._append_bot(text)
+        self._scroll_to_bottom()
+
+    @staticmethod
+    def _flatten_content(content) -> str:
+        """Join a rich content payload into plain text."""
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+            return "".join(parts)
+        return str(content or "")
+
+    @staticmethod
+    def _strip_date_prefix(text: str) -> str:
+        """Drop the "[Today's date: …]" line the client adds to each turn."""
+        if text.startswith("[Today's date:"):
+            newline = text.find("\n")
+            if newline != -1:
+                return text[newline + 1 :]
+        return text
 
     def _append_system_note(self, text: str) -> None:
         """Append a dim, italic, centred note (not a chat bubble)."""
@@ -1391,12 +1585,11 @@ class ChatPanel(QWidget):
 
             agent, llm = build_agent_for_model(model_name)
             self._session = ChatSession(
-                thread_id=self._thread_id or None,
+                thread_id=self._thread_id,
                 model_name=model_name,
                 agent=agent,
                 llm=llm,
             )
-            self._thread_id = self._session.thread_id
             return self._session
         except (ChatConfigError, LLMFactoryError) as e:
             # Config missing/invalid — offer to configure
@@ -2023,6 +2216,9 @@ class ChatPanel(QWidget):
         self.model_combo.setEnabled(not busy)
         self.refresh_btn.setEnabled(not busy)
         self.settings_btn.setEnabled(not busy)
+        # Switching conversations mid-reply would orphan the running turn.
+        self.history_combo.setEnabled(not busy)
+        self.new_chat_btn.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
         self.busy_changed.emit(busy)
 
@@ -2071,12 +2267,15 @@ class ChatPanel(QWidget):
 
     def _send_now(self, text: str, attachment_paths: list[str]) -> None:
         """Run a turn immediately with the given message and attachments."""
+        from system_sl.chatbot import load_config
         from system_sl.chatbot.llm_factory import (
             get_cached_llm_clients,
             register_active_llm,
             _set_current_llm_clients,
         )
+        from system_sl.chatbot.memory import title_from_message, update_conversation
 
+        model = self._current_model or load_config().system_model
         session = self._get_session()
         if session is None:
             # No usable session (LLM not configured, or the provider
@@ -2085,6 +2284,15 @@ class ChatPanel(QWidget):
             self.input_box.setPlainText(text)
             self.input_box.setFocus()
             return
+
+        # Title the conversation from its first message and remember which
+        # model is answering; both are read by the history dropdown.
+        update_conversation(
+            self._thread_id,
+            title_if_empty=title_from_message(text),
+            last_model=model,
+        )
+        self._refresh_history_combo()
 
         # Show attachments in the player message if any
         if attachment_paths:

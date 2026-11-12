@@ -1,4 +1,4 @@
-"""Tests for persistent chat memory (the shared checkpointer).
+"""Tests for persistent chat memory (checkpointer + conversation index).
 
 The chat model is a stub (``fake_chat_model.FakeChatModel``), so nothing here
 touches the network or a real provider.
@@ -163,6 +163,56 @@ def test_stop_leaves_a_repairable_checkpoint(config_dir):
     # What the model had already written is kept.
     assert "Adding that now." in _texts(messages)
     assert "continuing" in _texts(messages)
+
+
+# =============================================================================
+# 2. CONVERSATION INDEX
+# =============================================================================
+
+def test_conversation_index_tracks_title_model_and_active(config_dir):
+    first = memory_mod.create_conversation(model_name="model-a")
+    second = memory_mod.create_conversation(model_name="model-b")
+
+    assert memory_mod.active_conversation_id() == second["id"]
+    assert [c["id"] for c in memory_mod.list_conversations()][0] == second["id"]
+
+    memory_mod.update_conversation(
+        first["id"], title_if_empty=memory_mod.title_from_message("Plan my week please")
+    )
+    memory_mod.select_conversation(first["id"])
+    stored = memory_mod.get_conversation(first["id"])
+
+    assert stored["title"] == "Plan my week please"
+    assert stored["last_model"] == "model-a"
+    assert memory_mod.active_conversation_id() == first["id"]
+
+    # A later title must not overwrite the first one.
+    memory_mod.update_conversation(
+        first["id"], title_if_empty=memory_mod.title_from_message("something else")
+    )
+    assert memory_mod.get_conversation(first["id"])["title"] == "Plan my week please"
+
+
+def test_titles_are_short_and_ignore_the_date_prefix(config_dir):
+    title = memory_mod.title_from_message("[Today's date: 2026-11-12]\n   Rank my tasks  ")
+    assert title == "Rank my tasks"
+
+    long_title = memory_mod.title_from_message("word " * 40)
+    assert len(long_title) <= 61
+    assert long_title.endswith("…")
+
+
+def test_deleting_a_conversation_forgets_its_messages(config_dir):
+    entry = memory_mod.create_conversation(model_name="fake")
+    agent, _model = _agent(AIMessage(content="hello"))
+    session = ChatSession(thread_id=entry["id"], agent=agent)
+    session.run_turn("hi there")
+    assert session.messages()
+
+    memory_mod.delete_conversation(entry["id"])
+
+    assert memory_mod.get_conversation(entry["id"]) is None
+    assert memory_mod.load_thread_messages(entry["id"]) == []
 
 
 # =============================================================================

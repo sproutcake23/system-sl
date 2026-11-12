@@ -1,10 +1,15 @@
 """Persistent conversation memory for the System agent.
 
-One SQLite-backed LangGraph checkpointer stores every message of every
-conversation. It is created once per process so that rebuilding the agent
-(model switch, Stop, settings change) never loses the history. Message history
-is kept in LangGraph state (``messages``), not replayed by hand, so a trimming
-middleware can later be added in front of it.
+Two things live here:
+
+* **The checkpointer** — one SQLite-backed LangGraph checkpointer that stores
+  every message of every conversation. It is created once per process so that
+  rebuilding the agent (model switch, Stop, settings change) never loses the
+  history. Message history is kept in LangGraph state (``messages``), not
+  replayed by hand, so a trimming middleware can later be added in front of it.
+* **The conversation index** — a small JSON file listing conversations
+  (id, title, timestamps, last model) plus which one was last open, so the
+  chat panel can offer history and restore it at start-up.
 
 The database lives next to the other user data (see ``utils.paths``):
 ``~/.config/system-sl/chat_memory.sqlite`` on Linux,
@@ -16,18 +21,23 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from typing import Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage
+from langsmith import uuid7
 
+from system_sl.utils.atomic_json import atomic_write_json, load_json_or_default
 from system_sl.utils.paths import get_tasks_file_path
 
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_FILENAME = "chat_memory.sqlite"
+CONVERSATION_INDEX_FILENAME = "chat_conversations.json"
 
-# Prefix for messages the app itself injects into the history (stopped turns).
-# The chat panel uses it to render them as notes instead of Player bubbles.
+# Prefix for messages the app itself injects into the history (stopped
+# turns). The chat panel uses it to render them as notes instead of Player
+# bubbles when rebuilding a transcript.
 STOP_NOTE_PREFIX = "[turn stopped]"
 NOTE_PREFIXES = (STOP_NOTE_PREFIX,)
 
@@ -50,6 +60,9 @@ def note_body(text: str) -> str:
             return text[len(prefix) :].strip()
     return (text or "").strip()
 
+
+_INDEX_VERSION = 1
+_TITLE_LIMIT = 60
 
 # =============================================================================
 # CHECKPOINTER
@@ -200,3 +213,185 @@ def _rollback_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage] | N
 
 def _thread_id(config: dict) -> str:
     return str((config.get("configurable") or {}).get("thread_id") or "?")
+
+
+# =============================================================================
+# CONVERSATION INDEX
+# =============================================================================
+
+
+def _index_path() -> str:
+    return get_tasks_file_path(CONVERSATION_INDEX_FILENAME)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def load_conversation_index() -> dict:
+    """Return the conversation index, tolerating a missing/corrupt file."""
+    data = load_json_or_default(_index_path(), {})
+    if not isinstance(data, dict):
+        return {"version": _INDEX_VERSION, "active": None, "conversations": []}
+
+    conversations = [
+        entry
+        for entry in data.get("conversations") or []
+        if isinstance(entry, dict) and entry.get("id")
+    ]
+    active = data.get("active")
+    if active and not any(entry["id"] == active for entry in conversations):
+        active = None
+    return {
+        "version": _INDEX_VERSION,
+        "active": active,
+        "conversations": conversations,
+    }
+
+
+def save_conversation_index(index: dict) -> None:
+    """Persist the conversation index atomically."""
+    try:
+        atomic_write_json(_index_path(), index)
+    except OSError:
+        logger.warning("could not save the conversation index", exc_info=True)
+
+
+def new_thread_id() -> str:
+    """Return a fresh, time-ordered conversation id."""
+    return str(uuid7())
+
+
+def title_from_message(text: str, limit: int = _TITLE_LIMIT) -> str:
+    """Make a conversation title from the first Player message.
+
+    Deterministic on purpose: the title must appear immediately and must never
+    wait on (or fail because of) a network call.
+    """
+    flat = " ".join((text or "").split())
+    # The panel prefixes every turn with the date; it is not part of the title.
+    if flat.startswith("[Today's date:"):
+        closing = flat.find("]")
+        if closing != -1:
+            flat = flat[closing + 1 :].strip()
+    if not flat:
+        return ""
+    if len(flat) <= limit:
+        return flat
+    cut = flat[:limit].rsplit(" ", 1)[0] or flat[:limit]
+    return cut.rstrip(" ,.;:-") + "…"
+
+
+def list_conversations() -> list[dict]:
+    """Return every conversation, most recently updated first.
+
+    Timestamps only have microsecond resolution, so two conversations created
+    in the same tick would otherwise sort oldest-first (stable sort on insertion
+    order). Reversing first makes "newest wins" true even for a tie.
+    """
+    conversations = load_conversation_index()["conversations"]
+    return sorted(
+        reversed(conversations),
+        key=lambda entry: entry.get("updated") or entry.get("created") or "",
+        reverse=True,
+    )
+
+
+def get_conversation(thread_id: str) -> dict | None:
+    """Return one conversation's index entry, or None."""
+    for entry in load_conversation_index()["conversations"]:
+        if entry["id"] == thread_id:
+            return entry
+    return None
+
+
+def active_conversation_id() -> str | None:
+    """Return the conversation that was open when the app last closed."""
+    return load_conversation_index()["active"]
+
+
+def create_conversation(model_name: str = "", title: str = "") -> dict:
+    """Create a conversation, make it active, and return its entry."""
+    index = load_conversation_index()
+    entry = {
+        "id": new_thread_id(),
+        "title": title or "",
+        "created": _now(),
+        "updated": _now(),
+        "last_model": model_name or "",
+    }
+    index["conversations"].append(entry)
+    index["active"] = entry["id"]
+    save_conversation_index(index)
+    return entry
+
+
+def select_conversation(thread_id: str) -> dict | None:
+    """Mark ``thread_id`` as the active conversation."""
+    index = load_conversation_index()
+    entry = next((e for e in index["conversations"] if e["id"] == thread_id), None)
+    if entry is None:
+        return None
+    if index["active"] != thread_id:
+        index["active"] = thread_id
+        save_conversation_index(index)
+    return entry
+
+
+def update_conversation(
+    thread_id: str,
+    *,
+    title: str | None = None,
+    title_if_empty: str | None = None,
+    last_model: str | None = None,
+    touch: bool = True,
+) -> dict | None:
+    """Update a conversation's title/model and bump its ``updated`` stamp."""
+    index = load_conversation_index()
+    entry = next((e for e in index["conversations"] if e["id"] == thread_id), None)
+    if entry is None:
+        return None
+
+    changed = False
+    if title is not None and entry.get("title") != title:
+        entry["title"] = title
+        changed = True
+    if title_if_empty and not entry.get("title"):
+        entry["title"] = title_if_empty
+        changed = True
+    if last_model is not None and entry.get("last_model") != last_model:
+        entry["last_model"] = last_model
+        changed = True
+    if touch:
+        entry["updated"] = _now()
+        changed = True
+
+    if changed:
+        save_conversation_index(index)
+    return entry
+
+
+def ensure_active_conversation(model_name: str = "") -> dict:
+    """Return the conversation to open at start-up, creating one if needed."""
+    active = active_conversation_id()
+    if active:
+        entry = get_conversation(active)
+        if entry is not None:
+            return entry
+    return create_conversation(model_name=model_name)
+
+
+def delete_conversation(thread_id: str) -> None:
+    """Drop a conversation from the index and delete its checkpoints."""
+    index = load_conversation_index()
+    remaining = [e for e in index["conversations"] if e["id"] != thread_id]
+    if len(remaining) == len(index["conversations"]):
+        return
+    index["conversations"] = remaining
+    if index["active"] == thread_id:
+        index["active"] = remaining[0]["id"] if remaining else None
+    save_conversation_index(index)
+    try:
+        get_checkpointer().delete_thread(thread_id)
+    except Exception:
+        logger.warning("could not delete checkpoints for %s", thread_id, exc_info=True)
