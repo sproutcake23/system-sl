@@ -1,6 +1,7 @@
 import os
 import sys
 import subprocess
+import threading
 
 from dotenv import load_dotenv, set_key
 
@@ -46,7 +47,7 @@ from system_sl.utils.audio_manager import (
     DEFAULT_SOUNDS_DIR,
 )
 from system_sl.utils.autostart_migration import initialize_application_autostart
-from system_sl.utils.worker_threads import shutdown_workers
+from system_sl.utils.worker_threads import new_worker_thread, shutdown_workers
 from system_sl.utils.notification_settings import (
     load_notifications_enabled,
     save_notifications_enabled,
@@ -61,14 +62,24 @@ from system_sl.utils.auto_updater import (
 
 class _GoogleSyncWorker(QObject):
     """Runs the Google Tasks sync off the UI thread, since sign-in can wait on the browser."""
+
     finished = Signal(int, int)
     failed = Signal(str)
 
+    def __init__(self, cancel_event: threading.Event):
+        super().__init__()
+        self.cancel_event = cancel_event
+
     def run(self):
+        from system_sl.utils.google_api import GoogleSyncCancelled
+
         try:
-            engine = GoogleSyncEngine()
+            engine = GoogleSyncEngine(cancel_event=self.cancel_event)
             imported, skipped = engine.execute_sync(TasksProvider(engine.client))
             self.finished.emit(imported, skipped)
+        except GoogleSyncCancelled:
+            # Shutdown or a deliberate cancel: no error dialog.
+            return
         except GoogleSyncError as e:
             self.failed.emit(str(e))
         except Exception as e:
@@ -115,6 +126,7 @@ class MainWindow(QMainWindow):
         self.update_thread = None
         self._sync_thread = None
         self._sync_worker = None
+        self._sync_cancel = threading.Event()
         self._allow_exit = False
         self.close_to_tray_enabled = self.settings.value(
             "close_to_tray", False, type=bool
@@ -555,6 +567,8 @@ class MainWindow(QMainWindow):
             self.tasks_window.hide()
         self.hide()
         self._stop_notifier()
+        # Cancel a sign-in waiting on the browser before waiting for workers.
+        self._sync_cancel.set()
         shutdown_workers()
         # The SQLite checkpointer is process-wide and shared with the chat
         # worker; close it only after that worker has stopped.
@@ -636,14 +650,13 @@ class MainWindow(QMainWindow):
         self.google_button.setEnabled(False)
         self._set_sidebar_button_label(self.google_button, "Syncing...")
 
-        self._sync_thread = QThread(self)
-        self._sync_worker = _GoogleSyncWorker()
-        self._sync_worker.moveToThread(self._sync_thread)
-        self._sync_thread.started.connect(self._sync_worker.run)
+        # An unparented, tracked thread: quitting cannot destroy it mid-sync,
+        # and cancelling the sign-in lets it end promptly (see _shutdown_for_quit).
+        self._sync_cancel = threading.Event()
+        self._sync_worker = _GoogleSyncWorker(self._sync_cancel)
+        self._sync_thread = new_worker_thread(self._sync_worker)
         self._sync_worker.finished.connect(self._on_google_sync_finished)
         self._sync_worker.failed.connect(self._on_google_sync_failed)
-        self._sync_worker.finished.connect(self._sync_thread.quit)
-        self._sync_worker.failed.connect(self._sync_thread.quit)
         self._sync_thread.finished.connect(self._cleanup_google_sync)
         self._sync_thread.start()
 
@@ -662,8 +675,8 @@ class MainWindow(QMainWindow):
     def _cleanup_google_sync(self):
         self.google_button.setEnabled(True)
         self._set_sidebar_button_label(self.google_button, "Google")
-        self._sync_worker.deleteLater()
-        self._sync_thread.deleteLater()
+        # The thread and worker are owned by the worker-thread tracker until
+        # they have really finished; dropping them here is enough.
         self._sync_worker = None
         self._sync_thread = None
 

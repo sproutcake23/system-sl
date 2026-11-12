@@ -4,6 +4,7 @@ import json
 import os.path
 import subprocess
 import sys
+import threading
 import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -68,20 +69,32 @@ class GoogleSyncError(Exception):
     """
 
 
+class GoogleSyncCancelled(GoogleSyncError):
+    """Raised when the Player (or app shutdown) cancels a sync."""
+
+
 class GoogleAPIClient:
     """Handles authentication and fetches raw data from the Google Tasks API."""
 
-    def __init__(self, scopes: List[str]) -> None:
+    def __init__(
+        self, scopes: List[str], cancel_event: Optional[threading.Event] = None
+    ) -> None:
         """Initializes the Google API client with required OAuth scopes.
 
         Args:
             scopes (List[str]): A list of Google OAuth scope URIs needed for permissions.
+            cancel_event: Set to ask a blocking sign-in to give up promptly.
         """
 
         from system_sl.core.tasks import get_tasks_file_path
 
         self.scopes: List[str] = scopes
         self._creds_path: str = get_tasks_file_path("credentials.json")
+        self.cancel_event = cancel_event or threading.Event()
+
+    def _check_cancelled(self) -> None:
+        if self.cancel_event.is_set():
+            raise GoogleSyncCancelled("Google sync was cancelled.")
 
     def _get_credentials(self) -> Credentials:
         """Handles user authentication, reading cached tokens, or initiating local OAuth flows.
@@ -97,6 +110,7 @@ class GoogleAPIClient:
         Raises:
             GoogleSyncError: If no OAuth client is configured or sign-in fails.
         """
+        self._check_cancelled()
         creds: Optional[Credentials] = None
 
         # Load cached token from secure storage.
@@ -128,7 +142,13 @@ class GoogleAPIClient:
         return creds
 
     def _run_sign_in_flow(self) -> Credentials:
-        """Runs the browser OAuth consent flow and returns the new credentials."""
+        """Runs the browser OAuth consent flow and returns the new credentials.
+
+        ``run_local_server`` has no cancellation hook, so it runs on a daemon
+        thread while this thread waits on the cancel event. Cancelling returns
+        immediately; the local server is left to time out on its own.
+        """
+        self._check_cancelled()
         # A credentials.json the user set up themselves wins over the app's
         # own client shipped with release builds.
         bundled_path = _bundled_client_path()
@@ -150,21 +170,42 @@ class GoogleAPIClient:
                 "See the Google Tasks Sync page in the wiki for setup steps."
             )
 
-        try:
-            # Opens the browser and waits for the localhost redirect. The
-            # sign-in URL is also printed to stdout in case no browser opens.
-            return flow.run_local_server(
-                port=0,
-                timeout_seconds=120,
-                open_browser=True,
-                browser=_sign_in_browser(),
-            )
-        except Exception as e:
-            raise GoogleSyncError(
-                "Google sign-in did not complete.\n\n"
-                "Finish the sign-in in your browser within 2 minutes, then try again.\n"
-                f"({type(e).__name__}: {e})"
-            ) from e
+        result: dict[str, object] = {}
+
+        def run_flow() -> None:
+            try:
+                # Opens the browser and waits for the localhost redirect. The
+                # sign-in URL is also printed to stdout in case no browser opens.
+                result["creds"] = flow.run_local_server(
+                    port=0,
+                    timeout_seconds=120,
+                    open_browser=True,
+                    browser=_sign_in_browser(),
+                )
+            except Exception as exc:  # reported to the caller below
+                result["error"] = exc
+
+        flow_thread = threading.Thread(
+            target=run_flow, name="google-oauth-flow", daemon=True
+        )
+        flow_thread.start()
+        while flow_thread.is_alive():
+            if self.cancel_event.wait(0.2):
+                raise GoogleSyncCancelled("Google sign-in was cancelled.")
+            # The flow thread is a daemon: leaving it to time out is safe.
+        if "creds" in result:
+            creds = result["creds"]
+            if isinstance(creds, Credentials):
+                return creds
+            raise GoogleSyncError("Google sign-in returned no credentials.")
+        error = result.get("error")
+        if isinstance(error, GoogleSyncCancelled):
+            raise error
+        raise GoogleSyncError(
+            "Google sign-in did not complete.\n\n"
+            "Finish the sign-in in your browser within 2 minutes, then try again.\n"
+            f"({type(error).__name__}: {error})"
+        ) from (error if isinstance(error, BaseException) else None)
 
     def _store_token(self, creds: Credentials) -> None:
         """Persists the acquired/refreshed token securely, never in plaintext."""

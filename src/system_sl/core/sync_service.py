@@ -1,11 +1,13 @@
 """Module for synchronizing external data sources using the Dependency Inversion Principle."""
 
 import datetime
+import threading
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from system_sl.core.tasks import add_tasks
 from system_sl.utils import GoogleAPIClient
+from system_sl.utils.google_api import GoogleSyncCancelled
 
 SCOPES: List[str] = [
     "https://www.googleapis.com/auth/tasks.readonly",
@@ -57,8 +59,15 @@ class TasksProvider(GoogleProvider):
 class GoogleSyncEngine:
     """Orchestrates synchronization workflows generically using GoogleProvider abstractions."""
 
-    def __init__(self, api_client: Optional[GoogleAPIClient] = None) -> None:
-        self.client: GoogleAPIClient = api_client or GoogleAPIClient(scopes=SCOPES)
+    def __init__(
+        self,
+        api_client: Optional[GoogleAPIClient] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
+        self.cancel_event = cancel_event or threading.Event()
+        self.client: GoogleAPIClient = api_client or GoogleAPIClient(
+            scopes=SCOPES, cancel_event=self.cancel_event
+        )
 
     def _format_deadline(self, deadline_str: Optional[str]) -> Optional[str]:
         """Converts incoming varied Google timestamp strings into a uniform local format."""
@@ -96,6 +105,8 @@ class GoogleSyncEngine:
         Raises:
             GoogleSyncError: If authentication fails or the API cannot be reached.
         """
+        if self.cancel_event.is_set():
+            raise GoogleSyncCancelled("Google sync was cancelled.")
         print(f"Connecting to Google Service for [{provider.source_name}]...")
         now = datetime.datetime.utcnow()
         six_months_later = now + datetime.timedelta(days=182)
@@ -110,6 +121,8 @@ class GoogleSyncEngine:
 
         count = 0
         for item in raw_items:
+            if self.cancel_event.is_set():
+                raise GoogleSyncCancelled("Google sync was cancelled.")
             title, raw_deadline = provider.extract_item_details(item)
             clean_deadline = self._format_deadline(raw_deadline)
             count += self._process_and_add_task(provider.source_name, title, clean_deadline)
