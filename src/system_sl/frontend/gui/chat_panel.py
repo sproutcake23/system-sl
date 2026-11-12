@@ -58,6 +58,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Older turns were stored with a "[Today's date: …]" prefix. The date now
+# comes from the CONTEXT block, but old conversations still carry the prefix
+# and the transcript should not show it.
+_DATE_PREFIX_RE = re.compile(r"^\s*\[Today's date:[^\]]*\]\s*")
+
+
 def _colorize_markdown_html(body: str, color: str) -> str:
     """Give every markdown element an explicit theme colour.
 
@@ -1381,12 +1387,15 @@ class ChatPanel(QWidget):
 
     @staticmethod
     def _strip_date_prefix(text: str) -> str:
-        """Drop the "[Today's date: …]" line the client adds to each turn."""
-        if text.startswith("[Today's date:"):
-            newline = text.find("\n")
-            if newline != -1:
-                return text[newline + 1 :]
-        return text
+        """Drop the "[Today's date: …]" line older turns were stored with.
+
+        The client used to prefix every message with the date. That prefix is
+        gone now (the date lives in the CONTEXT block instead), but old
+        conversations still carry it, and the transcript should not show it.
+        """
+        if not text:
+            return text
+        return _DATE_PREFIX_RE.sub("", text, count=1)
 
     def _append_system_note(self, text: str) -> None:
         """Append a dim, italic, centred note (not a chat bubble)."""

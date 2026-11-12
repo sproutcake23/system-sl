@@ -270,7 +270,7 @@ def title_from_message(text: str, limit: int = _TITLE_LIMIT) -> str:
     wait on (or fail because of) a network call.
     """
     flat = " ".join((text or "").split())
-    # The panel prefixes every turn with the date; it is not part of the title.
+    # Old turns were stored with a date prefix; it is not part of the title.
     if flat.startswith("[Today's date:"):
         closing = flat.find("]")
         if closing != -1:

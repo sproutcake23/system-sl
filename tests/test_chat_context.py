@@ -187,3 +187,29 @@ def test_a_casual_question_triggers_no_tool_call(config_dir):
     assert not any(
         getattr(message, "tool_calls", None) for message in model.seen[-1]
     )
+# =============================================================================
+# 2. NO DATE PREFIX IN USER MESSAGES
+# =============================================================================
+
+def test_stored_messages_have_no_date_prefix(config_dir):
+    """The date moved into the context block; the message is untouched."""
+    agent, model = _agent(AIMessage(content="ok"))
+    session = ChatSession(thread_id="conv-date", agent=agent)
+
+    session.run_turn("what are my tasks?")
+
+    stored = _texts(session.messages())
+    assert not any("[Today's date" in text for text in stored)
+    assert "what are my tasks?" in _humans(session.messages())
+
+
+def test_old_date_prefix_is_stripped_when_rendering(config_dir):
+    """Conversations stored before the change still render without it."""
+    from system_sl.frontend.gui.chat_panel import ChatPanel
+
+    old = "[Today's date: 2026-11-12]\nwhat are my tasks?"
+    assert ChatPanel._strip_date_prefix(old) == "what are my tasks?"
+    # A message without the prefix is left alone.
+    assert ChatPanel._strip_date_prefix("plain") == "plain"
+
+
