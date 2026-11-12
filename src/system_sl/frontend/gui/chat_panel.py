@@ -1,5 +1,6 @@
 """Chat panel widget for System-SL GUI."""
 
+import logging
 import re
 import html
 from pathlib import Path
@@ -53,6 +54,8 @@ from system_sl.frontend.gui.icons import get_icon
 if TYPE_CHECKING:
     from system_sl.chatbot import ChatConfig, ChatSession, ModelInfo
     from system_sl.chatbot.llm_factory import ProviderPreset
+
+logger = logging.getLogger(__name__)
 
 
 def _colorize_markdown_html(body: str, color: str) -> str:
@@ -806,7 +809,12 @@ class ChatPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self._sessions: "dict[str, ChatSession]" = {}  # model_name -> ChatSession
+        # One conversation at a time, backed by the shared LangGraph
+        # checkpointer: the id (thread) does not depend on the model, so
+        # switching models, pressing Stop, or restarting the app continues the
+        # same history. The session object is rebuilt when the model changes.
+        self._session: "ChatSession | None" = None
+        self._thread_id: str = ""
         self._current_model: str = ""
         self._thread: QThread | None = None
         self._worker: _ChatWorker | None = None
@@ -1147,17 +1155,11 @@ class ChatPanel(QWidget):
             self._update_queue_badge()
             self._append_alert(f"dropped {dropped} queued message(s) — model changed")
 
-        # The transcript showed the previous model's conversation, so it is no
-        # longer the context the new model will answer from. Start a new one
-        # with a visible divider.
-        #
-        # TODO(chat-history): carry the conversation across models instead.
-        # That needs a persistent LangGraph checkpointer on
-        # get_system_agent(); each turn currently starts from empty state.
-        self._reset_stream_state()
-        self._clear_transcript_for_model(model_id)
+        # The conversation (thread) and its transcript stay exactly as they
+        # are: the new model answers from the same message history. Only the
+        # agent behind the session is replaced.
         self._update_default_button()
-        self._append_alert(f"Switched to model: {model_id}")
+        self._append_system_note(f"Switched to {model_id} — the conversation continues")
 
     def _update_default_button(self) -> None:
         """Offer to save the current model only when it is not the default."""
@@ -1182,23 +1184,25 @@ class ChatPanel(QWidget):
         config.system_model = self._current_model
         save_config(config)
         # The shared agent was built for the old default; rebuild it and drop
-        # sessions so the next turn uses the newly saved configuration.
+        # the session so the next turn uses the newly saved configuration.
         reload_agent()
-        self._sessions.clear()
+        self._session = None
         self._update_default_button()
         self._append_alert(f"Default model set to: {self._current_model}")
 
-    def _clear_transcript_for_model(self, model_id: str) -> None:
-        """Clear the transcript and mark where the new conversation starts."""
-        self.transcript.clear()
+    def _append_system_note(self, text: str) -> None:
+        """Append a dim, italic, centred note (not a chat bubble)."""
         tokens = self._get_live_tokens()
         dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
 
+        follow_tail = self._is_at_bottom()
         cursor = QTextCursor(self.transcript.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+
         block_fmt = QTextBlockFormat()
         block_fmt.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        block_fmt.setTopMargin(8)
-        block_fmt.setBottomMargin(8)
+        block_fmt.setTopMargin(6)
+        block_fmt.setBottomMargin(6)
         cursor.insertBlock(block_fmt)
 
         char_fmt = QTextCharFormat()
@@ -1206,7 +1210,11 @@ class ChatPanel(QWidget):
         char_fmt.setFontPointSize(11)
         char_fmt.setFontItalic(True)
         cursor.setCharFormat(char_fmt)
-        cursor.insertText(f"— New conversation with {model_id} —")
+        cursor.insertText(text)
+
+        if follow_tail:
+            self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+            self.transcript.ensureCursorVisible()
 
     def _open_settings(self) -> None:
         self.settings_requested.emit()
@@ -1215,8 +1223,8 @@ class ChatPanel(QWidget):
         """Pick up a newly saved LLM config."""
         from system_sl.chatbot import reload_agent
         reload_agent()
-        # Existing sessions hold agents built from the previous config.
-        self._sessions.clear()
+        # The session holds an agent built from the previous config.
+        self._session = None
         self._populate_model_list()
         self._start_discovery()
 
@@ -1360,31 +1368,43 @@ class ChatPanel(QWidget):
 
     # ----- Session Management -----
 
-    def _get_session(self, model_name: str) -> "ChatSession | None":
-        """Get or create a ChatSession for the given model."""
-        if model_name not in self._sessions:
-            # Imported here, not at module level: the chatbot package pulls in
-            # langchain, and the panel is built during GUI startup.
-            from system_sl.chatbot import ChatSession, ChatConfigError, load_config
-            from system_sl.chatbot.llm_factory import LLMFactoryError
-            from system_sl.chatbot.system import get_system_agent_for_model
-            try:
-                # A model picked in the dropdown is a per-conversation
-                # override; only the configured default uses the shared agent.
-                agent = None
-                if model_name != load_config().system_model:
-                    agent = get_system_agent_for_model(model_name)
-                self._sessions[model_name] = ChatSession(
-                    model_name=model_name, agent=agent
-                )
-            except (ChatConfigError, LLMFactoryError) as e:
-                # Config missing/invalid — offer to configure
-                self._prompt_llm_config(str(e))
-                return None
-            except Exception as e:
-                self._append_alert(f"Could not open channel: {e}")
-                return None
-        return self._sessions[model_name]
+    def _get_session(self) -> "ChatSession | None":
+        """Return the session for the open conversation, built for the model.
+
+        The conversation is one thread id regardless of model. When the
+        dropdown changes, the same session is pointed at a different agent so
+        the new model continues the existing history.
+        """
+        from system_sl.chatbot import ChatSession, ChatConfigError, load_config
+        from system_sl.chatbot.llm_factory import LLMFactoryError
+        from system_sl.chatbot.system import build_agent_for_model
+
+        model_name = self._current_model or load_config().system_model
+
+        try:
+            if self._session is not None and self._session.thread_id == self._thread_id:
+                if self._session.model_name == model_name:
+                    return self._session
+                agent, llm = build_agent_for_model(model_name)
+                self._session.switch_model(model_name, agent=agent, llm=llm)
+                return self._session
+
+            agent, llm = build_agent_for_model(model_name)
+            self._session = ChatSession(
+                thread_id=self._thread_id or None,
+                model_name=model_name,
+                agent=agent,
+                llm=llm,
+            )
+            self._thread_id = self._session.thread_id
+            return self._session
+        except (ChatConfigError, LLMFactoryError) as e:
+            # Config missing/invalid — offer to configure
+            self._prompt_llm_config(str(e))
+            return None
+        except Exception as e:
+            self._append_alert(f"Could not open channel: {e}")
+            return None
 
     def _prompt_llm_config(self, error: str) -> None:
         """Prompt user to configure LLM when chat is used without valid config."""
@@ -1821,7 +1841,7 @@ class ChatPanel(QWidget):
                 self._add_batch_tasks(selected_tasks)
         else:
             # User declined - feed back confirmation for all proposed tasks
-            session = self._get_session(self._current_model)
+            session = self._get_session()
             if session is not None:
                 for task in tasks:
                     title = task.get("title", "").strip()
@@ -1876,7 +1896,7 @@ class ChatPanel(QWidget):
                         self._append_confirmation, f'Added "{title}" to {category}.'
                     )
                     # Feed confirmation result back to the model
-                    session = self._get_session(self._current_model)
+                    session = self._get_session()
                     if session is not None:
                         session.inject_confirmation_result(title, category, True)
 
@@ -1888,15 +1908,33 @@ class ChatPanel(QWidget):
             title = str(proposal.get("title") or "").strip()
             category = str(proposal.get("category") or "none")
             # Feed confirmation result back to the model
-            session = self._get_session(self._current_model)
+            session = self._get_session()
             if session is not None:
                 session.inject_confirmation_result(title, category, False)
         self._current_proposal = None
         self._show_next_proposal()
 
+    def _repair_session_after_turn(self, session) -> None:
+        """Close a graph step the finished worker left pending (Stop, crash).
+
+        Repairing here keeps the checkpoint valid as soon as the turn ends, so
+        an already-open second window, or the next launch, reads a clean state.
+        ChatSession also repairs before every turn as a safety net.
+        """
+        from system_sl.chatbot.memory import repair_interrupted_turn
+
+        try:
+            repair_interrupted_turn(session.agent, session.config)
+        except Exception:
+            logger.warning(
+                "could not close the interrupted turn in conversation %s",
+                session.thread_id,
+                exc_info=True,
+            )
+
     def _clear_proposals(self) -> None:
         # Feed back "declined" for all pending proposals when clearing
-        session = self._get_session(self._current_model)
+        session = self._get_session()
         if session is not None:
             for proposal in self._pending_proposals:
                 title = str(proposal.get("title") or "").strip()
@@ -1947,7 +1985,7 @@ class ChatPanel(QWidget):
                 self._append_confirmation, f"Added {added} task(s) from document."
             )
             # Feed confirmation results back to the model for each added task
-            session = self._get_session(self._current_model)
+            session = self._get_session()
             if session is not None:
                 for title, category in added_tasks:
                     session.inject_confirmation_result(title, category, True)
@@ -2033,11 +2071,13 @@ class ChatPanel(QWidget):
 
     def _send_now(self, text: str, attachment_paths: list[str]) -> None:
         """Run a turn immediately with the given message and attachments."""
-        from system_sl.chatbot import load_config
-        from system_sl.chatbot.llm_factory import get_cached_llm_clients, _set_current_llm_clients
+        from system_sl.chatbot.llm_factory import (
+            get_cached_llm_clients,
+            register_active_llm,
+            _set_current_llm_clients,
+        )
 
-        model = self._current_model or load_config().system_model
-        session = self._get_session(model)
+        session = self._get_session()
         if session is None:
             # No usable session (LLM not configured, or the provider
             # rejected the credentials). The message was already taken out
@@ -2057,7 +2097,9 @@ class ChatPanel(QWidget):
         self._set_busy(True)
         self._start_answer_line()
 
-        # Track the LLM's HTTP clients so we can cancel the stream on Stop.
+        # Track the HTTP clients of the LLM that will actually answer, so
+        # Stop cancels this stream and not another model's.
+        register_active_llm(session.llm)
         sync_client, async_client = get_cached_llm_clients()
         _set_current_llm_clients(sync_client, async_client)
 
@@ -2108,8 +2150,10 @@ class ChatPanel(QWidget):
         # Reset the agent cache so the next request gets a fresh LLM with new HTTP clients.
         from system_sl.chatbot import reset_agent_cache
         reset_agent_cache()
-        # Clear the session cache so a new session with the new agent is created.
-        self._sessions.clear()
+        # Drop the session object; the next turn rebuilds it for the same
+        # conversation on a fresh agent. The checkpoint is untouched, and any
+        # dangling tool call is repaired before the following turn.
+        self._session = None
         self._thread.requestInterruption()
         self.stop_button.setEnabled(False)
         self.stop_button.setToolTip("Stopping...")
@@ -2162,6 +2206,11 @@ class ChatPanel(QWidget):
     def _cleanup_thread(self) -> None:
         self._md_timer.stop()
         self._stop_dots()
+        # Keep the session of the turn that just ended: it is needed to close a
+        # graph step the worker abandoned.
+        finished_session = (
+            getattr(self._worker, "session", None) if self._worker is not None else None
+        )
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
@@ -2171,6 +2220,11 @@ class ChatPanel(QWidget):
         # Clear tracked LLM HTTP clients so they can be re-acquired for next request.
         from system_sl.chatbot.llm_factory import _clear_current_llm_clients
         _clear_current_llm_clients()
+        # The worker has stopped, so the checkpoint is safe to write again:
+        # close a turn that was cancelled mid-tool, then record any task
+        # outcome the Player answered while it was streaming.
+        if finished_session is not None:
+            self._repair_session_after_turn(finished_session)
         notes, self._notes_after_turn = self._notes_after_turn, []
         for append, text in notes:
             append(text)

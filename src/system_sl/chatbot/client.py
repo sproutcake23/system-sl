@@ -1,6 +1,7 @@
 """Chat session management for System-SL."""
 
 import json
+import logging
 from datetime import datetime
 from typing import Callable, Iterator, List, Optional, Union
 
@@ -8,13 +9,20 @@ from langchain_core.messages import AIMessageChunk, SystemMessage
 
 from system_sl.chatbot.system import (
     get_system_agent,
+    get_system_agent_for_model,
     reset_agent_cache,
     set_turn_context,
     clear_turn_context,
 )
+from system_sl.chatbot.memory import (
+    load_thread_messages,
+    repair_interrupted_turn,
+)
 from system_sl.chatbot.config import ChatConfig, load_config, save_config
 
 from langsmith import uuid7
+
+logger = logging.getLogger(__name__)
 
 
 def _content_text(content) -> str:
@@ -89,10 +97,17 @@ def _augment_with_date(user_msg: Union[str, List[str]]) -> str:
 class ChatSession:
     """Manages an active multi-turn conversation session with the System agent.
 
+    The conversation is identified by ``thread_id`` and stored by the shared
+    LangGraph checkpointer, so it survives model switches, Stop presses and
+    application restarts. Several ``ChatSession`` objects can point at the same
+    thread (one per model) without losing the history.
+
     Attributes:
         config (dict): The runtime configuration dictionary containing the `thread_id`
             for state tracking.
+        thread_id (str): The conversation id shared with the checkpoint store.
         agent (Runnable): The compiled LangGraph agent graph.
+        llm: The chat model behind ``agent``, used to cancel a running stream.
         model_name (str): The model name being used (for display purposes).
     """
 
@@ -102,6 +117,7 @@ class ChatSession:
         config: dict | None = None,
         model_name: str | None = None,
         agent=None,
+        llm=None,
     ):
         """Initializes a new or existing ChatSession.
 
@@ -113,6 +129,7 @@ class ChatSession:
             model_name (str | None, optional): Display name of the model being used.
             agent (optional): A pre-built agent for a model chosen for this
                 session only. Defaults to the shared, config-backed agent.
+            llm (optional): The chat model behind ``agent``, if the caller built it.
         """
         if config:
             self.config = config
@@ -120,9 +137,53 @@ class ChatSession:
             chosen_id = thread_id or str(uuid7())
             self.config = {"configurable": {"thread_id": chosen_id}}
 
+        self.thread_id = str(
+            (self.config.get("configurable") or {}).get("thread_id") or ""
+        )
+
         # Select the pre-compiled agent (built on first use via lazy init)
         self.agent = agent or get_system_agent()
+        self.llm = llm
         self.model_name = model_name or "system"
+
+    def switch_model(self, model_name: str, agent=None, llm=None) -> None:
+        """Continue this conversation with a different model.
+
+        The thread id (and therefore the checkpoint) is untouched: the new
+        model answers from the same message history the old one built.
+        """
+        if model_name == self.model_name and agent is None:
+            return
+        self.agent = agent or get_system_agent_for_model(model_name)
+        self.llm = llm
+        self.model_name = model_name
+
+    def messages(self) -> list:
+        """Return this conversation's stored messages (oldest first)."""
+        return load_thread_messages(self.thread_id)
+
+    def _prepare_turn(self) -> None:
+        """Make the checkpoint safe to continue from before a new turn.
+
+        A turn abandoned mid-graph (Stop, crash, provider error) leaves
+        LangGraph pending tasks behind. Repairing them here, on the thread that
+        owns the graph, avoids running a cancelled tool call or failing the
+        next turn outright. If the repair cannot be written the turn is
+        abandoned: continuing would resume the very tool the Player cancelled.
+        """
+        try:
+            repaired = repair_interrupted_turn(self.agent, self.config)
+        except Exception as exc:
+            logger.error(
+                "could not repair the interrupted turn in conversation %s",
+                self.thread_id,
+                exc_info=True,
+            )
+            raise RuntimeError(
+                "the previous reply did not finish cleanly and could not be closed"
+            ) from exc
+        if repaired:
+            logger.info("conversation %s repaired before the next turn", self.thread_id)
 
     def wrap_message(self, user_msg: Union[str, List[str]]) -> List[dict]:
         """Formats a raw string or list of strings into the standard message format.
@@ -158,6 +219,7 @@ class ChatSession:
         augmented = _augment_with_date(user_msg)
         formatted_messages = self.wrap_message(augmented)
 
+        self._prepare_turn()
         set_turn_context(_user_text(augmented), on_proposal)
         try:
             response = self.agent.invoke(
@@ -213,6 +275,7 @@ class ChatSession:
         augmented = _augment_with_date(user_msg)
         formatted_messages = self.wrap_message(augmented)
 
+        self._prepare_turn()
         set_turn_context(_user_text(augmented), on_proposal)
         try:
             for chunk, metadata in self.agent.stream(
@@ -295,13 +358,19 @@ class ChatSession:
 
     @classmethod
     def create_with_model(cls, model_name: str, thread_id: str | None = None) -> "ChatSession":
-        """Create a session with a specific model by temporarily overriding config.
+        """Create a session that answers with ``model_name`` on ``thread_id``.
 
-        Note: This creates a new agent with the specified model. The model change
-        persists for the session lifetime.
+        The model choice is per-session; the saved default is untouched.
         """
-        # We'll handle model switching at the ChatPanel level by recreating sessions
-        return cls(thread_id=thread_id, model_name=model_name)
+        from system_sl.chatbot.system import build_agent_for_model
+
+        agent, llm = build_agent_for_model(model_name)
+        return cls(
+            thread_id=thread_id,
+            model_name=model_name,
+            agent=agent,
+            llm=llm,
+        )
 
 
 def reload_agent() -> None:

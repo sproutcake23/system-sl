@@ -1,0 +1,178 @@
+"""Tests for persistent chat memory (the shared checkpointer).
+
+The chat model is a stub (``fake_chat_model.FakeChatModel``), so nothing here
+touches the network or a real provider.
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from fake_chat_model import FakeChatModel  # noqa: E402
+
+from system_sl.chatbot import memory as memory_mod  # noqa: E402
+from system_sl.chatbot.client import ChatSession  # noqa: E402
+from system_sl.chatbot.system import SYSTEM_TOOLS, reset_agent_cache  # noqa: E402
+
+
+# =============================================================================
+# FIXTURES
+# =============================================================================
+
+@pytest.fixture
+def config_dir(tmp_path, monkeypatch):
+    """Point chat memory at a throwaway config directory."""
+    directory = tmp_path / "system-sl"
+    directory.mkdir()
+    monkeypatch.setattr(
+        memory_mod, "get_tasks_file_path", lambda name: str(directory / name)
+    )
+    memory_mod.close_checkpointer()
+    yield directory
+    memory_mod.close_checkpointer()
+
+
+def _agent(*replies: AIMessage, tools=None):
+    """Build an agent on the shared checkpointer and return ``(agent, model)``."""
+    model = FakeChatModel(replies=list(replies))
+    agent = create_agent(
+        model=model,
+        tools=tools if tools is not None else SYSTEM_TOOLS,
+        system_prompt="test prompt",
+        checkpointer=memory_mod.get_checkpointer(),
+    )
+    return agent, model
+
+
+def _texts(messages) -> list[str]:
+    return [str(getattr(message, "content", "")) for message in messages]
+
+
+def _humans(messages) -> list[str]:
+    return [str(m.content) for m in messages if getattr(m, "type", "") == "human"]
+
+
+# =============================================================================
+# 1. PERSISTENT MEMORY
+# =============================================================================
+
+def test_second_turn_sees_the_first(config_dir):
+    """(a) Turn 2's state contains turn 1, both on disk and in the prompt."""
+    agent, model = _agent(AIMessage(content="first answer"), AIMessage(content="second answer"))
+    session = ChatSession(thread_id="conv-two-turns", agent=agent, model_name="fake")
+
+    session.run_turn("my code word is aurora")
+    session.run_turn("what is my code word?")
+
+    stored = _texts(session.messages())
+    assert any("aurora" in text for text in stored)
+    assert "first answer" in stored
+    assert len(_humans(session.messages())) == 2
+
+    # The model's second prompt carried the first exchange, not just the new
+    # message — this is what used to be missing.
+    second_prompt = _texts(model.seen[-1])
+    assert any("aurora" in text for text in second_prompt)
+    assert any("first answer" in text for text in second_prompt)
+
+
+def test_memory_survives_model_switch_and_agent_reset(config_dir):
+    """(b) A new model on the same thread continues the conversation."""
+    agent_a, model_a = _agent(AIMessage(content="noted, aurora it is"))
+    session = ChatSession(thread_id="conv-switch", agent=agent_a, model_name="model-a")
+    session.run_turn("remember: aurora")
+    assert "aurora" in str(model_a.seen[-1])
+
+    checkpointer_before = memory_mod.get_checkpointer()
+    reset_agent_cache()
+    # The memory is not an agent-cache entry: resetting the agent must not
+    # drop it.
+    assert memory_mod.get_checkpointer() is checkpointer_before
+
+    agent_b, model_b = _agent(AIMessage(content="you said aurora"))
+    session.switch_model("model-b", agent=agent_b)
+    session.run_turn("what did I just say?")
+
+    assert session.model_name == "model-b"
+    assert "aurora" in str(model_b.seen[-1]), "the new model did not get the old history"
+    assert len(_humans(session.messages())) == 2
+
+
+def test_memory_survives_restart(config_dir):
+    """(c) A new checkpointer instance on the same file still has the history."""
+    agent, _model = _agent(AIMessage(content="before the restart"))
+    session = ChatSession(thread_id="conv-restart", agent=agent)
+    session.run_turn("I like green tea")
+    assert any("green tea" in text for text in _texts(session.messages()))
+
+    # Simulate quitting the app: drop the connection, then reopen the file.
+    memory_mod.close_checkpointer()
+    agent_after, model_after = _agent(AIMessage(content="yes, green tea"))
+    reopened = ChatSession(thread_id="conv-restart", agent=agent_after)
+    reopened.run_turn("what do I like?")
+
+    assert "green tea" in str(model_after.seen[-1])
+    assert len(_humans(reopened.messages())) == 2
+
+
+def test_stop_leaves_a_repairable_checkpoint(config_dir):
+    """A cancelled tool call is closed before the next turn, not re-run."""
+    calls: list[str] = []
+
+    @tool
+    def failing_tool(category: str, title: str) -> str:
+        """Pretend to add a task, failing the first time like a cancelled turn."""
+        calls.append(title)
+        raise RuntimeError("stream cancelled")
+
+    agent, _model = _agent(
+        AIMessage(
+            content="Adding that now.",
+            tool_calls=[
+                {
+                    "name": "failing_tool",
+                    "args": {"category": "study", "title": "Wave equation"},
+                    "id": "call_1",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        AIMessage(content="continuing"),
+        tools=[failing_tool],
+    )
+    session = ChatSession(thread_id="conv-stop", agent=agent)
+
+    # The turn dies mid-tool, leaving LangGraph with a pending tool task.
+    with pytest.raises(RuntimeError):
+        session.run_turn("add wave equation")
+    assert agent.get_state(session.config).next == ("tools",)
+
+    session.run_turn("never mind, what next?")
+    messages = session.messages()
+
+    assert calls == ["Wave equation"], "the cancelled tool must not run twice"
+    assert agent.get_state(session.config).next == ()
+    assert not any(getattr(m, "tool_calls", None) for m in messages)
+    assert memory_mod.STOP_NOTE in _texts(messages)
+    # What the model had already written is kept.
+    assert "Adding that now." in _texts(messages)
+    assert "continuing" in _texts(messages)
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def test_thread_messages_are_plain_langchain_messages(config_dir):
+    agent, _model = _agent(AIMessage(content="answer"))
+    session = ChatSession(thread_id="conv-types", agent=agent)
+    session.run_turn("question")
+
+    for message in session.messages():
+        assert isinstance(message, (HumanMessage, AIMessage, ToolMessage))

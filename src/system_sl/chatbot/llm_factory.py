@@ -54,6 +54,17 @@ def _register_cached_llm(llm: BaseChatModel) -> None:
     _cached_llm_instance = llm
 
 
+def register_active_llm(llm: BaseChatModel | None) -> None:
+    """Point the client registry at the LLM that is about to answer.
+
+    Each model in the dropdown has its own LLM instance. Registering it before
+    a turn starts makes ``get_cached_llm_clients()`` return the right HTTP
+    clients, so Stop cancels the stream that is actually running.
+    """
+    if llm is not None:
+        _register_cached_llm(llm)
+
+
 def get_cached_llm_clients() -> tuple[Any, Any]:
     """Get the HTTP client(s) from the cached LLM instance.
 
