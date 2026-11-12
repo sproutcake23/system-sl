@@ -659,8 +659,9 @@ class OnboardingWindow(QWidget):
 
         impact_row = QHBoxLayout()
         self.impact_buttons = []
-        for label in ["Low (1)", "Medium (2)", "High (3)"]:
+        for i, label in enumerate(["Low (1)", "Medium (2)", "High (3)"]):
             btn = QPushButton(label)
+            btn.setProperty("impact", i + 1)
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
             btn.toggled.connect(self._validate_input)
@@ -674,13 +675,22 @@ class OnboardingWindow(QWidget):
 
         layout.addStretch(1)
 
+        button_row = QHBoxLayout()
+        self.back_button = QPushButton()
+        self.back_button.setIcon(get_icon("back"))
+        self.back_button.setText("Back")
+        self.back_button.setMinimumHeight(36)
+        self.back_button.clicked.connect(self._on_back)
         self.next_button = QPushButton()
         self.next_button.setIcon(get_icon("next"))
         self.next_button.setText("Next")
         self.next_button.setEnabled(False)
         self.next_button.setMinimumHeight(36)
         self.next_button.clicked.connect(self._on_next)
-        layout.addWidget(self.next_button)
+        button_row.addWidget(self.back_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self.next_button)
+        layout.addLayout(button_row)
 
         return page
 
@@ -698,23 +708,48 @@ class OnboardingWindow(QWidget):
         self.completion_subtitle.setStyleSheet("font-size: 14px; margin-bottom: 20px;")
         layout.addWidget(self.completion_subtitle)
 
+        summary_label = QLabel("Review and edit your answers before saving:")
+        summary_label.setStyleSheet("font-size: 13px;")
+        layout.addWidget(summary_label)
+
+        # The summary is editable: the Player can correct a keyword or change
+        # an impact rating before the profile is written.
+        self.summary_table = QTableWidget(0, 3)
+        self.summary_table.setHorizontalHeaderLabels(
+            ["Category", "Answer", "Impact (1-3)"]
+        )
+        self.summary_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self.summary_table.verticalHeader().setVisible(False)
+        self.summary_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.AllEditTriggers
+        )
+        layout.addWidget(self.summary_table, 1)
+
         self.stats_label = QLabel()
         self.stats_label.setStyleSheet("font-size: 14px;")
         layout.addWidget(self.stats_label)
+
+        completion_buttons = QHBoxLayout()
+        completion_back = QPushButton()
+        completion_back.setIcon(get_icon("back"))
+        completion_back.setText("Back")
+        completion_back.clicked.connect(self._on_completion_back)
+        finish_btn = QPushButton()
+        finish_btn.setIcon(get_icon("finish"))
+        finish_btn.setText("Save Profile")
+        finish_btn.setMinimumHeight(36)
+        finish_btn.clicked.connect(self._on_finish)
+        completion_buttons.addWidget(completion_back)
+        completion_buttons.addStretch(1)
+        completion_buttons.addWidget(finish_btn)
+        layout.addLayout(completion_buttons)
 
         self.path_label = QLabel()
         self.path_label.setStyleSheet("font-size: 12px; margin-top: 10px;")
         self.path_label.setWordWrap(True)
         layout.addWidget(self.path_label)
-
-        layout.addStretch(1)
-
-        finish_btn = QPushButton()
-        finish_btn.setIcon(get_icon("finish"))
-        finish_btn.setText("Begin Journey")
-        finish_btn.setMinimumHeight(36)
-        finish_btn.clicked.connect(self._on_finish)
-        layout.addWidget(finish_btn)
 
         return page
 
@@ -763,12 +798,21 @@ class OnboardingWindow(QWidget):
         self.quest_label.setText(f"QUEST {q['id']}/{n} - {q['category']}")
         self.question_label.setText(q["question"])
         self.hint_label.setText(f"Example: {q['hint']}")
-        self.answer_input.clear()
+        existing = (
+            self.responses[self.current_index]
+            if self.current_index < len(self.responses)
+            else None
+        )
+        self.answer_input.setText((existing or {}).get("answer", ""))
         self.impact_group.setExclusive(False)
         for btn in self.impact_buttons:
-            btn.setChecked(False)
+            btn.setChecked(
+                bool(existing) and btn.property("impact") == existing.get("impact")
+            )
         self.impact_group.setExclusive(True)
+        self.back_button.setVisible(self.current_index > 0)
         self.next_button.setEnabled(False)
+        self._validate_input()
         if self.current_index == n - 1:
             self.next_button.setText("Finish")
         else:
@@ -787,35 +831,101 @@ class OnboardingWindow(QWidget):
         impact = self.impact_group.checkedId()
         q = self.questions[self.current_index]
 
-        self.responses.append(
-            {
-                "question_id": q["id"],
-                "category": q["category"],
-                "question": q["question"],
-                "answer": answer,
-                "impact": impact,
-            }
-        )
+        response = {
+            "question_id": q["id"],
+            "category": q["category"],
+            "question": q["question"],
+            "answer": answer,
+            "impact": impact,
+        }
+        if self.current_index < len(self.responses):
+            self.responses[self.current_index] = response
+        else:
+            self.responses.append(response)
 
         if self.current_index < len(self.questions) - 1:
             self.current_index += 1
             self._show_question()
         else:
-            stats = {
-                "high_count": sum(1 for r in self.responses if r["impact"] == 3),
-                "medium_count": sum(1 for r in self.responses if r["impact"] == 2),
-                "low_count": sum(1 for r in self.responses if r["impact"] == 1),
-            }
-            self.storage.write_persona_profile(self.responses, stats)
-            self.stats_label.setText(
-                f"Core Attributes:      {stats['high_count']} (High Priority)\n"
-                f"Secondary Attributes: {stats['medium_count']} (Medium Priority)\n"
-                f"Support Attributes:   {stats['low_count']} (Low Priority)"
+            self._show_completion()
+
+    def _on_back(self):
+        if self.current_index > 0:
+            self.current_index -= 1
+            self._show_question()
+
+    def _show_completion(self):
+        """Show every answer in an editable table; nothing is saved yet."""
+        self.summary_table.setRowCount(len(self.questions))
+        for row, q in enumerate(self.questions):
+            existing = (
+                self.responses[row]
+                if row < len(self.responses)
+                else {}
             )
-            self.path_label.setText(f"Profile saved to: {self.storage.persona_file}")
-            self.stack.setCurrentIndex(2)
+            category = QTableWidgetItem(q["category"])
+            category.setFlags(category.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            answer = QTableWidgetItem(str(existing.get("answer", "")))
+            impact = QTableWidgetItem(
+                str(existing.get("impact", ""))
+            )
+            self.summary_table.setItem(row, 0, category)
+            self.summary_table.setItem(row, 1, answer)
+            self.summary_table.setItem(row, 2, impact)
+
+        high = sum(1 for r in self.responses if r.get("impact") == 3)
+        medium = sum(1 for r in self.responses if r.get("impact") == 2)
+        low = sum(1 for r in self.responses if r.get("impact") == 1)
+        self.stats_label.setText(
+            f"Core Attributes:      {high} (High Priority)\n"
+            f"Secondary Attributes: {medium} (Medium Priority)\n"
+            f"Support Attributes:   {low} (Low Priority)"
+        )
+        self.path_label.setText(
+            f"Profile will be saved to: {self.storage.persona_file}"
+        )
+        self.stack.setCurrentIndex(2)
+
+    def _on_completion_back(self):
+        self.current_index = len(self.questions) - 1
+        self._show_question()
+        self.stack.setCurrentIndex(1)
 
     def _on_finish(self):
+        responses = []
+        for row, q in enumerate(self.questions):
+            answer_item = self.summary_table.item(row, 1)
+            impact_item = self.summary_table.item(row, 2)
+            answer = (answer_item.text() if answer_item else "").strip().lower()
+            try:
+                impact = int((impact_item.text() if impact_item else "").strip())
+            except (TypeError, ValueError):
+                impact = 0
+            if not answer or len(answer) < 3 or impact not in (1, 2, 3):
+                QMessageBox.warning(
+                    self,
+                    "Incomplete profile",
+                    f"Please give question {q['id']} an answer of at least 3 "
+                    "characters and an impact of 1, 2 or 3.",
+                )
+                return
+            responses.append(
+                {
+                    "question_id": q["id"],
+                    "category": q["category"],
+                    "question": q["question"],
+                    "answer": answer,
+                    "impact": impact,
+                }
+            )
+
+        self.responses = responses
+        stats = {
+            "high_count": sum(1 for r in responses if r["impact"] == 3),
+            "medium_count": sum(1 for r in responses if r["impact"] == 2),
+            "low_count": sum(1 for r in responses if r["impact"] == 1),
+        }
+        self.storage.write_persona_profile(responses, stats)
         self._done = True
         self.onboarding_complete.emit(True)
         self.close()
