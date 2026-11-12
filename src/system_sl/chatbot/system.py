@@ -4,7 +4,7 @@ Provides a LangGraph agent with tools for task management,
 using a configurable LLM backend (Google Gemini or OpenAI-compatible).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 from functools import lru_cache
 import re
@@ -31,6 +31,7 @@ from system_sl.utils import (
 from system_sl.chatbot.system_prompts import SYSTEM_MENTOR_PROMPT
 from system_sl.chatbot.config import ChatConfig, load_config
 from system_sl.chatbot.llm_factory import create_llm_from_config, LLMFactoryError
+from system_sl.chatbot.memory import get_checkpointer
 
 
 # =============================================================================
@@ -287,29 +288,66 @@ def validate_config(config: ChatConfig) -> list[str]:
     return errors
 
 
-@lru_cache(maxsize=1)
-def get_system_agent():
-    """Build (once) and return the SYSTEM mentor agent.
+@lru_cache(maxsize=8)
+def build_agent_for_model(model_name: str):
+    """Build (once per model) an agent and return ``(agent, llm)``.
 
-    Uses the configured LLM provider and model.
-    Rebuilds if config changes (cache keyed on config hash via lru_cache).
+    Every agent shares the one process-wide checkpointer, so switching models
+    continues the same conversation instead of starting from empty state.
+    The LLM is returned alongside because the chat panel has to know which
+    HTTP clients belong to the model that is about to answer, to cancel a
+    stream on Stop.
     """
+    config = load_config()
+
     # LLMFactoryError is raised unchanged so callers can tell "no API key
     # configured" apart from a genuine failure. The chat panel uses that to
     # offer the settings dialog instead of showing a raw error.
-    llm = _get_cached_llm()
+    if model_name == config.system_model:
+        llm = _get_cached_llm()
+    else:
+        # A model picked in the dropdown is a per-conversation override; it
+        # must never be written into the saved default.
+        override = replace(config, system_model=model_name)
+        errors = validate_config(override)
+        if errors:
+            raise LLMFactoryError("; ".join(errors))
+        llm = create_llm_from_config(override)
 
-    return create_agent(
+    agent = create_agent(
         model=llm,
         tools=SYSTEM_TOOLS,
         system_prompt=SYSTEM_MENTOR_PROMPT,
+        checkpointer=get_checkpointer(),
     )
+    return agent, llm
+
+
+@lru_cache(maxsize=1)
+def get_system_agent():
+    """Build (once) and return the SYSTEM mentor agent for the saved default."""
+    return build_agent_for_model(load_config().system_model)[0]
+
+
+def get_system_agent_for_model(model_name: str):
+    """Build an agent for ``model_name`` without changing the saved default.
+
+    The chat panel lets the Player try another model for the current
+    conversation. Writing that choice into the global config used to make a
+    casual switch the new default, so the override stays ephemeral here.
+    """
+    return build_agent_for_model(model_name)[0]
 
 
 # Force rebuild of agent when config changes
 def reset_agent_cache() -> None:
-    """Clear the cached agent and LLM. Call after config changes."""
+    """Clear the cached agents and LLMs. Call after config changes.
+
+    The checkpointer is intentionally left alone: the conversation memory is
+    not an agent cache entry, and dropping it would erase every conversation.
+    """
     from system_sl.chatbot.llm_factory import clear_cached_llm
     _get_cached_llm.cache_clear()
     get_system_agent.cache_clear()
+    build_agent_for_model.cache_clear()
     clear_cached_llm()

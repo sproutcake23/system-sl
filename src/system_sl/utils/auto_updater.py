@@ -2,12 +2,13 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
 import zipfile
 import hashlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import requests
 from PySide6.QtCore import QThread, Signal
@@ -241,6 +242,75 @@ def download_asset(url: str, dest_dir: Path) -> Path:
     return dest_file
 
 
+def checksum_failure(
+    archive_path: Path, asset_name: str, checksums_text: str | None
+) -> str | None:
+    """Return why the download cannot be trusted, or None when it verifies.
+
+    ``checksums_text`` is None when the release publishes no checksums. That
+    is fatal: without a published hash there is nothing to compare against,
+    and installing anyway would make the verification decorative.
+    """
+    if checksums_text is None:
+        return (
+            "Update failed: this release publishes no checksums, so the "
+            "download cannot be verified. Refusing to install."
+        )
+    expected = parse_checksums(checksums_text, asset_name)
+    if expected is None:
+        return (
+            f"Update failed: no checksum entry for {asset_name} in release checksums."
+        )
+    if not verify_checksum(archive_path, expected):
+        return (
+            "Update failed: SHA-256 checksum mismatch — the download may be "
+            "corrupt or tampered."
+        )
+    return None
+
+
+def _safe_extract_zip(archive: zipfile.ZipFile, dest_dir: Path) -> None:
+    """Extract a zip under ``dest_dir``, rejecting escapes and symlinks.
+
+    ``ZipFile.extractall`` joins member names onto the destination without
+    checking where they land, so an archive with ``../`` members (or absolute
+    names, or symlinks pointing out) writes wherever it likes. Each member is
+    resolved first and anything outside the destination is refused.
+    """
+    root = dest_dir.resolve()
+    for info in archive.infolist():
+        # Zip member names always use "/", but a Windows-created archive may
+        # carry backslashes; treat both as separators before validating.
+        parts = PurePosixPath(info.filename.replace("\\", "/"))
+        if not parts.parts:
+            continue
+        if parts.is_absolute() or ".." in parts.parts or re.match(
+            r"^[A-Za-z]:", info.filename
+        ):
+            raise ValueError(f"Refusing to extract '{info.filename}' outside {root}")
+
+        mode = info.external_attr >> 16
+        file_type = stat.S_IFMT(mode)
+        if file_type and not (
+            stat.S_ISREG(mode) or stat.S_ISDIR(mode)
+        ):
+            raise ValueError(
+                f"Refusing to extract non-regular file '{info.filename}'"
+            )
+
+        target = root.joinpath(*parts.parts)
+        if not target.resolve().is_relative_to(root):
+            raise ValueError(f"Refusing to extract '{info.filename}' outside {root}")
+
+        if info.is_dir() or info.filename.endswith("/"):
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(info) as src, open(target, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
 def extract_binary(archive_path: Path, dest_dir: Path) -> Path:
     """Extract the system-sl binary from a tar.xz or zip archive."""
     binary_name = "system-sl.exe" if os.name == "nt" else "system-sl"
@@ -256,7 +326,7 @@ def extract_binary(archive_path: Path, dest_dir: Path) -> Path:
                 tar.extractall(path=dest_dir)
     elif archive_path.suffix == ".zip":
         with zipfile.ZipFile(archive_path, "r") as zf:
-            zf.extractall(dest_dir)
+            _safe_extract_zip(zf, dest_dir)
     else:
         raise ValueError(f"Unsupported archive format: {archive_path.name}")
 
@@ -439,7 +509,17 @@ class UpdateCheckThread(QThread):
                 self.progress.emit(50)
                 # Supply-chain verification: confirm the downloaded asset
                 # matches the SHA-256 published in the release checksums.
+                # Fail closed: no checksums asset, no matching entry, or a
+                # mismatch all abort instead of installing blindly.
+                #
+                # TODO(release-signing): verify a detached signature (e.g.
+                # minisign/ed25519 with a public key embedded in the app) as
+                # well. A checksum only proves the download matches the
+                # release metadata, which whoever can publish a release can
+                # rewrite. Nothing in the UI or README claims signature
+                # verification yet; do not claim it until this exists.
                 checksums_asset = find_checksums_asset(assets)
+                checksums_text = None
                 if checksums_asset is not None:
                     try:
                         checksums_text = requests.get(
@@ -450,19 +530,10 @@ class UpdateCheckThread(QThread):
                             False, f"Update failed: could not fetch release checksums: {e}"
                         )
                         return
-                    expected = parse_checksums(checksums_text, asset["name"])
-                    if expected is None:
-                        self.update_complete.emit(
-                            False,
-                            f"Update failed: no checksum entry for {asset['name']} in release checksums.",
-                        )
-                        return
-                    if not verify_checksum(archive, expected):
-                        self.update_complete.emit(
-                            False,
-                            "Update failed: SHA-256 checksum mismatch — the download may be corrupt or tampered.",
-                        )
-                        return
+                failure = checksum_failure(archive, asset["name"], checksums_text)
+                if failure is not None:
+                    self.update_complete.emit(False, failure)
+                    return
                 if appimage is not None:
                     # The AppImage is already the artifact; unpacking it would
                     # only produce a stray bare binary.

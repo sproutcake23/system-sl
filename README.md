@@ -22,20 +22,20 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 ## Features
 
 - **Persona Builder** — An optional 10-step onboarding process that builds your Player Profile from your real-world ambitions. Edit it any time from Settings.
-- **Task Management** — Add, edit, complete, and drag to reorder quests with deadlines. Your reordering is saved and applied to the ranking.
+- **Task Management** — Add, edit, complete, and drag to reorder quests with deadlines. Your drag order is saved and used as the display order.
 - **Priority Engine** — Context-aware scoring (PRESSURE / GROWTH / RECOVERY) of what to work on next.
 - **NLP Vectorizer** — spaCy-powered persona vectors built from your responses and task history, with temporal decay.
 - **AI Chatbot** — Talk to the System, an AI mentor with task-aware tools, streaming replies, and live markdown. It asks before adding a quest you didn't explicitly request.
 - **Your Choice of Model** — Google Gemini, Ollama, LM Studio, OpenRouter, Groq, Together AI, or any OpenAI-compatible endpoint. Switch models from the chat panel.
 - **Document Attachments** — Attach or drag in a PDF, DOCX, HTML, or text file and review the tasks found in it before they're added. Scanned PDFs are read with OCR.
 - **Google Tasks Sync** — Import your Google Tasks as quests. Opt-in from Settings.
-- **Native Notifications** — Desktop alerts styled like the System, with custom notification sounds.
+- **Desktop Reminders** — Notifications drawn by the app as styled Qt popups, with custom notification sounds. They are not OS-native notifications.
 - **Background Reminder** — An hourly notifier that keeps you on track, with its own on/off switch.
 - **Cross-Platform Autostart** — Register the notifier on Linux, Windows, or macOS.
 - **Themes** — Follow the system’s light/dark appearance, choose Light, pick a darker near-black Dark palette, or generate colors from your wallpaper.
 - **Tabbed Settings and Collapsible Sidebar** — All options live in one Settings window, and `Ctrl+Shift+S` shrinks the sidebar to a rail of icons.
 - **System Tray** — Optionally keep the app running in the tray when you close the window.
-- **Auto Update** — Optionally install new releases at launch, verified against their published SHA-256 checksums.
+- **Auto Update** — Optionally install new releases at launch. A download is installed only when the release publishes a SHA-256 checksum for it and the hash matches; releases without a checksum are refused. Updates are not cryptographically signed.
 - **Secure Key Storage** — API keys and Google tokens are kept in your system keyring, or an encrypted file if none is available.
 
 ## Installation

@@ -16,3 +16,4 @@ python-dotenv==1.2.2
 spacy==3.8.14
 Pillow==12.3.0
 imagecodecs==2025.3.30
+langgraph_checkpoint_sqlite==3.1.3

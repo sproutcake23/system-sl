@@ -1,5 +1,6 @@
 """Chat panel widget for System-SL GUI."""
 
+import logging
 import re
 import html
 from pathlib import Path
@@ -53,6 +54,8 @@ from system_sl.frontend.gui.icons import get_icon
 if TYPE_CHECKING:
     from system_sl.chatbot import ChatConfig, ChatSession, ModelInfo
     from system_sl.chatbot.llm_factory import ProviderPreset
+
+logger = logging.getLogger(__name__)
 
 
 def _colorize_markdown_html(body: str, color: str) -> str:
@@ -806,7 +809,12 @@ class ChatPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self._sessions: "dict[str, ChatSession]" = {}  # model_name -> ChatSession
+        # One conversation at a time, backed by the shared LangGraph
+        # checkpointer: the id (thread) does not depend on the model, so
+        # switching models, pressing Stop, or restarting the app continues the
+        # same history. The session object is rebuilt when the model changes.
+        self._session: "ChatSession | None" = None
+        self._thread_id: str = ""
         self._current_model: str = ""
         self._thread: QThread | None = None
         self._worker: _ChatWorker | None = None
@@ -833,6 +841,7 @@ class ChatPanel(QWidget):
         self._halted: bool = False            # user pressed Stop
 
         self._answer_text: str = ""           # raw markdown accumulated this turn
+        self._answer_stopped: bool = False    # Stop was pressed; UI-only marker
         self._answer_start: int | None = None # doc position of the [SYSTEM] line
         self._last_rendered_html: str = ""
         self._stream_tokens: dict = {}        # theme captured once per turn
@@ -857,6 +866,10 @@ class ChatPanel(QWidget):
         # Task proposals awaiting the Player's Yes/No
         self._pending_proposals: list[dict] = []
         self._current_proposal: dict | None = None
+        # Confirmation notes waiting for the running turn to end. Writing to
+        # the checkpoint while the agent is still running would race with it,
+        # so they are flushed from _cleanup_thread().
+        self._pending_confirmations: list[tuple] = []
         self._notes_after_turn: list[tuple[Callable[[str], None], str]] = []
 
         root = QVBoxLayout(self)
@@ -886,7 +899,34 @@ class ChatPanel(QWidget):
         self.settings_btn.clicked.connect(self._open_settings)
         header.addWidget(self.settings_btn)
 
+        # Model choice is per-conversation. Saving it as the default is an
+        # explicit action, never a side effect of browsing the dropdown.
+        self.default_model_btn = QPushButton("Set as default")
+        self.default_model_btn.setToolTip(
+            "Use this model for new conversations from now on"
+        )
+        self.default_model_btn.setEnabled(False)
+        self.default_model_btn.clicked.connect(self._set_model_as_default)
+        header.addWidget(self.default_model_btn)
+
         root.addLayout(header)
+
+        # --- Conversation row: reopen a past chat, or start a new one ---
+        chat_row = QHBoxLayout()
+        chat_row.addWidget(QLabel("Chat:"))
+        self.history_combo = QComboBox()
+        self.history_combo.setMinimumWidth(220)
+        self.history_combo.setToolTip("Reopen a past conversation")
+        self.history_combo.currentIndexChanged.connect(self._on_history_changed)
+        chat_row.addWidget(self.history_combo, stretch=1)
+
+        self.new_chat_btn = QPushButton()
+        self.new_chat_btn.setIcon(get_icon("add"))
+        self.new_chat_btn.setFixedWidth(36)
+        self.new_chat_btn.setToolTip("Start a new conversation")
+        self.new_chat_btn.clicked.connect(self._on_new_chat)
+        chat_row.addWidget(self.new_chat_btn)
+        root.addLayout(chat_row)
 
         # --- Transcript ---
         self.transcript = QTextBrowser()
@@ -988,6 +1028,11 @@ class ChatPanel(QWidget):
         # Enable drag & drop on the panel itself
         self.setAcceptDrops(True)
 
+        # Reopen the conversation that was on screen when the app last closed
+        # (or start the first one) before the model dropdown is filled, so the
+        # dropdown selects the model that conversation was last using.
+        self._restore_active_conversation()
+
         # Initialize model list. The local-server scan runs in the background;
         # the dropdown is usable immediately.
         self._populate_model_list()
@@ -1007,7 +1052,9 @@ class ChatPanel(QWidget):
         self.model_combo.clear()
 
         config = load_config()
-        current_model = config.system_model
+        # A per-conversation choice survives discovery refreshes; only fall
+        # back to the configured default when nothing has been picked yet.
+        current_model = self._current_model or config.system_model
 
         has_config = bool(current_model and config.provider)
 
@@ -1052,17 +1099,17 @@ class ChatPanel(QWidget):
             self.model_combo.addItem(display, model_id)
 
         # Select current model
-        if has_config:
-            idx = self.model_combo.findData(current_model)
-            if idx >= 0:
-                self.model_combo.setCurrentIndex(idx)
-            else:
-                self.model_combo.setCurrentIndex(0)
-        else:
-            self.model_combo.setCurrentIndex(0)
-
-        self._current_model = current_model
         self.model_combo.blockSignals(False)
+        self._current_model = current_model
+        if has_config:
+            # Reuses the restored conversation's model even when discovery has
+            # not returned it yet, so the dropdown matches what will answer.
+            self._select_model_in_combo(current_model)
+        else:
+            self.model_combo.blockSignals(True)
+            self.model_combo.setCurrentIndex(0)
+            self.model_combo.blockSignals(False)
+        self._update_default_button()
 
     # ----- Background model discovery -----
 
@@ -1112,7 +1159,7 @@ class ChatPanel(QWidget):
         self._start_discovery()
 
     def _on_model_changed(self, index: int) -> None:
-        """Handle model selection change."""
+        """Handle model selection change for this conversation only."""
         if index < 0:
             return
 
@@ -1120,17 +1167,9 @@ class ChatPanel(QWidget):
         if not model_id or model_id == self._current_model:
             return
 
-        from system_sl.chatbot import load_config, save_config, reload_agent
-        # Update config with new model
-        config = load_config()
-        config.system_model = model_id
-        save_config(config)
-
-        # Reload agent with new model
-        reload_agent()
-
-        # Clear session cache for new model
-        self._sessions.clear()
+        # Deliberately not saved to the global config: browsing the dropdown
+        # must not change the default for every future conversation. The
+        # "Set as default" button is the explicit way to persist it.
         self._current_model = model_id
         self._clear_proposals()
         # Queued messages were composed for the previous model; sending them
@@ -1141,7 +1180,239 @@ class ChatPanel(QWidget):
             self._update_queue_badge()
             self._append_alert(f"dropped {dropped} queued message(s) — model changed")
 
-        self._append_alert(f"Switched to model: {model_id}")
+        # The conversation (thread) and its transcript stay exactly as they
+        # are: the new model answers from the same message history. Only the
+        # agent behind the session is replaced.
+        from system_sl.chatbot.memory import update_conversation
+
+        update_conversation(self._thread_id, last_model=model_id)
+        self._refresh_history_combo()
+        self._update_default_button()
+        self._append_system_note(f"Switched to {model_id} — the conversation continues")
+
+    def _update_default_button(self) -> None:
+        """Offer to save the current model only when it is not the default."""
+        from system_sl.chatbot import load_config
+
+        is_default = bool(
+            self._current_model
+            and self._current_model == load_config().system_model
+        )
+        self.default_model_btn.setEnabled(bool(self._current_model) and not is_default)
+
+    def _set_model_as_default(self) -> None:
+        """Persist the current model as the default, on explicit request."""
+        if not self._current_model:
+            return
+
+        from system_sl.chatbot import load_config, save_config, reload_agent
+
+        config = load_config()
+        if config.system_model == self._current_model:
+            return
+        config.system_model = self._current_model
+        save_config(config)
+        # The shared agent was built for the old default; rebuild it and drop
+        # the session so the next turn uses the newly saved configuration.
+        reload_agent()
+        self._session = None
+        self._update_default_button()
+        self._append_alert(f"Default model set to: {self._current_model}")
+
+    # ----- Conversations -----
+
+    def _restore_active_conversation(self) -> None:
+        """Open the conversation that was active when the app last closed."""
+        from system_sl.chatbot import load_config
+        from system_sl.chatbot.memory import ensure_active_conversation
+
+        try:
+            default_model = load_config().system_model
+        except Exception:
+            default_model = ""
+
+        entry = ensure_active_conversation(model_name=default_model)
+        self._thread_id = entry["id"]
+        self._current_model = entry.get("last_model") or ""
+        self._refresh_history_combo()
+        self._render_transcript(self._messages_for_thread(self._thread_id))
+
+    def _conversation_label(self, entry: dict) -> str:
+        """Display name for a conversation in the history dropdown."""
+        title = (entry.get("title") or "").strip()
+        return title or "New conversation"
+
+    def _refresh_history_combo(self) -> None:
+        """Rebuild the conversation dropdown, keeping the open one selected."""
+        from system_sl.chatbot.memory import list_conversations
+
+        self.history_combo.blockSignals(True)
+        self.history_combo.clear()
+        selected = -1
+        for entry in list_conversations():
+            self.history_combo.addItem(
+                self._conversation_label(entry), entry["id"]
+            )
+            updated = entry.get("updated") or entry.get("created") or ""
+            model = entry.get("last_model") or "default model"
+            index = self.history_combo.count() - 1
+            self.history_combo.setItemData(
+                index,
+                f"{self._conversation_label(entry)}\nlast used {updated}\nmodel: {model}",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+            if entry["id"] == self._thread_id:
+                selected = index
+        if selected >= 0:
+            self.history_combo.setCurrentIndex(selected)
+        self.history_combo.blockSignals(False)
+
+    def _on_new_chat(self) -> None:
+        """Start a new conversation with a fresh thread id."""
+        if self.is_busy():
+            return
+        from system_sl.chatbot import load_config
+        from system_sl.chatbot.memory import create_conversation
+
+        try:
+            model = self._current_model or load_config().system_model
+        except Exception:
+            model = self._current_model
+        entry = create_conversation(model_name=model)
+        self._open_conversation(entry["id"])
+
+    def _on_history_changed(self, index: int) -> None:
+        """Reopen the conversation picked in the dropdown."""
+        if index < 0 or self.is_busy():
+            return
+        thread_id = self.history_combo.itemData(index)
+        if thread_id and thread_id != self._thread_id:
+            self._open_conversation(thread_id)
+
+    def _open_conversation(self, thread_id: str) -> None:
+        """Show a stored conversation and make it the active one."""
+        from system_sl.chatbot.memory import get_conversation, select_conversation
+
+        select_conversation(thread_id)
+
+        # Resolve pending proposals against the conversation that produced
+        # them before the session is replaced.
+        self._clear_proposals()
+
+        self._thread_id = thread_id
+        self._session = None
+        self._reset_stream_state()
+
+        entry = get_conversation(thread_id) or {}
+        last_model = entry.get("last_model")
+        if last_model and last_model != self._current_model:
+            self._current_model = last_model
+            self._select_model_in_combo(last_model)
+            self._update_default_button()
+
+        self._render_transcript(self._messages_for_thread(thread_id))
+        self._refresh_history_combo()
+        self.input_box.setFocus()
+
+    def _select_model_in_combo(self, model_name: str) -> None:
+        """Show ``model_name`` in the dropdown without triggering a switch."""
+        index = self.model_combo.findData(model_name)
+        self.model_combo.blockSignals(True)
+        if index < 0:
+            # The model is not in the list (discovery has not found it, or it
+            # is not in the cached presets). Still show what will answer.
+            self.model_combo.insertItem(0, f"✦ {model_name}", model_name)
+            index = 0
+        self.model_combo.setCurrentIndex(index)
+        self.model_combo.blockSignals(False)
+
+    def _messages_for_thread(self, thread_id: str) -> list:
+        """Read a conversation's messages straight from the checkpointer."""
+        from system_sl.chatbot.memory import load_thread_messages
+
+        try:
+            return load_thread_messages(thread_id)
+        except Exception:
+            return []
+
+    def _render_transcript(self, messages: list) -> None:
+        """Rebuild the transcript from a conversation's stored messages.
+
+        Only the Player's messages and the System's answers are bubbles; tool
+        traffic is internal, and app-injected notes are shown dimmed so they
+        are not mistaken for something the Player typed.
+        """
+        from system_sl.chatbot.memory import is_app_note, note_body
+
+        self.transcript.clear()
+        if not messages:
+            return
+
+        for message in messages:
+            role = getattr(message, "type", "")
+            content = getattr(message, "content", "")
+            text = content if isinstance(content, str) else self._flatten_content(content)
+            if not text.strip():
+                continue
+
+            if role == "human":
+                text = self._strip_date_prefix(text)
+                if is_app_note(text):
+                    self._append_system_note(note_body(text))
+                else:
+                    self._append_player(text)
+            elif role == "ai":
+                # Tool-call-only turns have no text worth showing.
+                self._append_bot(text)
+        self._scroll_to_bottom()
+
+    @staticmethod
+    def _flatten_content(content) -> str:
+        """Join a rich content payload into plain text."""
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+            return "".join(parts)
+        return str(content or "")
+
+    @staticmethod
+    def _strip_date_prefix(text: str) -> str:
+        """Drop the "[Today's date: …]" line the client adds to each turn."""
+        if text.startswith("[Today's date:"):
+            newline = text.find("\n")
+            if newline != -1:
+                return text[newline + 1 :]
+        return text
+
+    def _append_system_note(self, text: str) -> None:
+        """Append a dim, italic, centred note (not a chat bubble)."""
+        tokens = self._get_live_tokens()
+        dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
+
+        follow_tail = self._is_at_bottom()
+        cursor = QTextCursor(self.transcript.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+
+        block_fmt = QTextBlockFormat()
+        block_fmt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        block_fmt.setTopMargin(6)
+        block_fmt.setBottomMargin(6)
+        cursor.insertBlock(block_fmt)
+
+        char_fmt = QTextCharFormat()
+        char_fmt.setForeground(QColor(dim))
+        char_fmt.setFontPointSize(11)
+        char_fmt.setFontItalic(True)
+        cursor.setCharFormat(char_fmt)
+        cursor.insertText(text)
+
+        if follow_tail:
+            self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+            self.transcript.ensureCursorVisible()
 
     def _open_settings(self) -> None:
         self.settings_requested.emit()
@@ -1150,6 +1421,8 @@ class ChatPanel(QWidget):
         """Pick up a newly saved LLM config."""
         from system_sl.chatbot import reload_agent
         reload_agent()
+        # The session holds an agent built from the previous config.
+        self._session = None
         self._populate_model_list()
         self._start_discovery()
 
@@ -1293,23 +1566,42 @@ class ChatPanel(QWidget):
 
     # ----- Session Management -----
 
-    def _get_session(self, model_name: str) -> "ChatSession | None":
-        """Get or create a ChatSession for the given model."""
-        if model_name not in self._sessions:
-            # Imported here, not at module level: the chatbot package pulls in
-            # langchain, and the panel is built during GUI startup.
-            from system_sl.chatbot import ChatSession, ChatConfigError
-            from system_sl.chatbot.llm_factory import LLMFactoryError
-            try:
-                self._sessions[model_name] = ChatSession(model_name=model_name)
-            except (ChatConfigError, LLMFactoryError) as e:
-                # Config missing/invalid — offer to configure
-                self._prompt_llm_config(str(e))
-                return None
-            except Exception as e:
-                self._append_alert(f"Could not open channel: {e}")
-                return None
-        return self._sessions[model_name]
+    def _get_session(self) -> "ChatSession | None":
+        """Return the session for the open conversation, built for the model.
+
+        The conversation is one thread id regardless of model. When the
+        dropdown changes, the same session is pointed at a different agent so
+        the new model continues the existing history.
+        """
+        from system_sl.chatbot import ChatSession, ChatConfigError, load_config
+        from system_sl.chatbot.llm_factory import LLMFactoryError
+        from system_sl.chatbot.system import build_agent_for_model
+
+        model_name = self._current_model or load_config().system_model
+
+        try:
+            if self._session is not None and self._session.thread_id == self._thread_id:
+                if self._session.model_name == model_name:
+                    return self._session
+                agent, llm = build_agent_for_model(model_name)
+                self._session.switch_model(model_name, agent=agent, llm=llm)
+                return self._session
+
+            agent, llm = build_agent_for_model(model_name)
+            self._session = ChatSession(
+                thread_id=self._thread_id,
+                model_name=model_name,
+                agent=agent,
+                llm=llm,
+            )
+            return self._session
+        except (ChatConfigError, LLMFactoryError) as e:
+            # Config missing/invalid — offer to configure
+            self._prompt_llm_config(str(e))
+            return None
+        except Exception as e:
+            self._append_alert(f"Could not open channel: {e}")
+            return None
 
     def _prompt_llm_config(self, error: str) -> None:
         """Prompt user to configure LLM when chat is used without valid config."""
@@ -1494,6 +1786,7 @@ class ChatPanel(QWidget):
         self._reasoning_shown = False
         self._halted = False
         self._answer_text = ""
+        self._answer_stopped = False
         self._answer_start = None
         self._last_rendered_html = ""
         self._stream_tokens = {}
@@ -1559,7 +1852,18 @@ class ChatPanel(QWidget):
             else:
                 body = _colorize_markdown_html(body, body_color)
                 rendered = self._wrap_answer_html(body, bg, body_color)
-        
+
+        if self._answer_stopped:
+            # UI-only badge after the message; the reply text stays clean.
+            alert = tokens.get("sys_color_alert", "#ff6b8a")
+            on_alert = tokens.get("sys_color_on_alert", "#ffffff")
+            rendered += (
+                '<div style="margin-top:4px;">'
+                f'<span style="background:{alert}; color:{on_alert};'
+                ' border-radius:8px; padding:1px 8px; font-size:11px;">'
+                "stopped</span></div>"
+            )
+
         if rendered == self._last_rendered_html:
             return
         self._last_rendered_html = rendered
@@ -1696,7 +2000,10 @@ class ChatPanel(QWidget):
     def _mark_stopped(self) -> None:
         if not self._answer_open:
             return
-        self._answer_text += " [stopped]"
+        # Keep the reply text clean. Anything that later stores or quotes it
+        # must not inherit a "[stopped]" suffix, so the marker is rendered as
+        # part of the bubble instead.
+        self._answer_stopped = True
         self._render_answer()
         self._answer_open = False
 
@@ -1723,21 +2030,26 @@ class ChatPanel(QWidget):
         if not tasks:
             return
 
+        def as_pairs(items: list[dict]) -> list[tuple[str, str]]:
+            pairs = []
+            for task in items:
+                title = str(task.get("title") or "").strip()
+                category = str(task.get("category") or "study").strip().lower()
+                if title:
+                    pairs.append((title, category))
+            return pairs
+
         dialog = BatchProposalDialog(tasks, self)
         if dialog.exec() == QDialog.Accepted:
-            # User confirmed - add the selected tasks
-            selected_tasks = [task for _row, task in dialog.get_selected_tasks()]
-            if selected_tasks:
-                self._add_batch_tasks(selected_tasks)
+            # User confirmed - add the selected tasks; the rest were skipped
+            selected_rows = dialog.get_selected_tasks()
+            selected_tasks = [task for _row, task in selected_rows]
+            selected_indexes = {row for row, _task in selected_rows}
+            skipped = [task for i, task in enumerate(tasks) if i not in selected_indexes]
+            self._add_batch_tasks(selected_tasks, declined=as_pairs(skipped))
         else:
-            # User declined - feed back confirmation for all proposed tasks
-            session = self._get_session(self._current_model)
-            if session is not None:
-                for task in tasks:
-                    title = task.get("title", "").strip()
-                    category = task.get("category", "study").strip().lower()
-                    if title:
-                        session.inject_confirmation_result(title, category, False)
+            # One note for the whole batch, not one per task.
+            self._record_task_confirmation(declined=as_pairs(tasks))
         # Dialog handles its own cleanup
 
     def _show_next_proposal(self) -> None:
@@ -1772,19 +2084,23 @@ class ChatPanel(QWidget):
                 self._show_after_turn(self._append_alert, "cannot add a task without a title")
             elif title in existing:
                 self._show_after_turn(self._append_alert, f"task '{title}' already exists")
+                self._record_task_confirmation(failed=[(title, category)])
             else:
                 try:
                     add_tasks(category, title, deadline)
                 except ValueError as e:
                     self._show_after_turn(self._append_alert, str(e))
+                    self._record_task_confirmation(failed=[(title, category)])
+                except OSError as e:
+                    self._show_after_turn(
+                        self._append_alert, f"could not save the new task: {e}"
+                    )
+                    self._record_task_confirmation(failed=[(title, category)])
                 else:
                     self._show_after_turn(
                         self._append_confirmation, f'Added "{title}" to {category}.'
                     )
-                    # Feed confirmation result back to the model
-                    session = self._get_session(self._current_model)
-                    if session is not None:
-                        session.inject_confirmation_result(title, category, True)
+                    self._record_task_confirmation(added=[(title, category)])
 
         self._show_next_proposal()
 
@@ -1793,37 +2109,93 @@ class ChatPanel(QWidget):
         if proposal is not None:
             title = str(proposal.get("title") or "").strip()
             category = str(proposal.get("category") or "none")
-            # Feed confirmation result back to the model
-            session = self._get_session(self._current_model)
-            if session is not None:
-                session.inject_confirmation_result(title, category, False)
+            if title:
+                self._record_task_confirmation(declined=[(title, category)])
         self._current_proposal = None
         self._show_next_proposal()
 
+    def _record_task_confirmation(
+        self,
+        added: list[tuple[str, str]] | None = None,
+        declined: list[tuple[str, str]] | None = None,
+        failed: list[tuple[str, str]] | None = None,
+    ) -> None:
+        """Tell the conversation what happened to proposed tasks.
+
+        While a reply is streaming, the write waits for the turn to finish: the
+        agent is still running on this thread, and writing a checkpoint
+        underneath it would race. Everything queued in one 'event' (a batch
+        dialog, clearing the proposal queue) becomes one summarizing message.
+        """
+        added = list(added or [])
+        declined = list(declined or [])
+        failed = list(failed or [])
+        if not (added or declined or failed):
+            return
+
+        session = self._session
+        if session is None:
+            return
+
+        if self.is_busy():
+            self._pending_confirmations.append((session, added, declined, failed))
+            return
+        session.record_task_confirmation(added=added, declined=declined, failed=failed)
+
+    def _flush_pending_confirmations(self) -> None:
+        """Write the task outcomes queued while the reply was streaming."""
+        pending, self._pending_confirmations = self._pending_confirmations, []
+        for session, added, declined, failed in pending:
+            session.record_task_confirmation(
+                added=added, declined=declined, failed=failed
+            )
+
+    def _repair_session_after_turn(self, session) -> None:
+        """Close a graph step the finished worker left pending (Stop, crash).
+
+        Repairing here keeps the checkpoint valid as soon as the turn ends, so
+        an already-open second window, or the next launch, reads a clean state.
+        ChatSession also repairs before every turn as a safety net.
+        """
+        from system_sl.chatbot.memory import repair_interrupted_turn
+
+        try:
+            repair_interrupted_turn(session.agent, session.config)
+        except Exception:
+            logger.warning(
+                "could not close the interrupted turn in conversation %s",
+                session.thread_id,
+                exc_info=True,
+            )
+
     def _clear_proposals(self) -> None:
-        # Feed back "declined" for all pending proposals when clearing
-        session = self._get_session(self._current_model)
-        if session is not None:
-            for proposal in self._pending_proposals:
-                title = str(proposal.get("title") or "").strip()
-                category = str(proposal.get("category") or "none")
-                if title:
-                    session.inject_confirmation_result(title, category, False)
-            if self._current_proposal is not None:
-                title = str(self._current_proposal.get("title") or "").strip()
-                category = str(self._current_proposal.get("category") or "none")
-                if title:
-                    session.inject_confirmation_result(title, category, False)
+        """Drop queued proposals and record them as declined, in one note."""
+        queue = list(self._pending_proposals)
+        if self._current_proposal is not None:
+            queue.append(self._current_proposal)
+
+        declined: list[tuple[str, str]] = []
+        for proposal in queue:
+            title = str(proposal.get("title") or "").strip()
+            category = str(proposal.get("category") or "none")
+            if title:
+                declined.append((title, category))
+        self._record_task_confirmation(declined=declined)
 
         self._pending_proposals.clear()
         self._current_proposal = None
         self.confirm_bar.setVisible(False)
 
-    def _add_batch_tasks(self, tasks: list[dict]) -> None:
+    def _add_batch_tasks(
+        self,
+        tasks: list[dict],
+        declined: list[tuple[str, str]] | None = None,
+    ) -> None:
         """Add multiple tasks from batch proposal and re-prioritize."""
         from system_sl.core.priority_engine_new import run_prioritization
 
         added_tasks = []  # Track (title, category) for confirmation feedback
+        failed_tasks: list[tuple[str, str]] = []
         added = 0
         errors = []
         for task in tasks:
@@ -1838,6 +2210,10 @@ class ChatPanel(QWidget):
                 added_tasks.append((title, category))
             except ValueError as e:
                 errors.append(f"{title}: {e}")
+                failed_tasks.append((title, category))
+            except OSError as e:
+                errors.append(f"{title}: could not save: {e}")
+                failed_tasks.append((title, category))
 
         if added > 0:
             # Re-prioritize after adding tasks
@@ -1850,11 +2226,13 @@ class ChatPanel(QWidget):
             self._show_after_turn(
                 self._append_confirmation, f"Added {added} task(s) from document."
             )
-            # Feed confirmation results back to the model for each added task
-            session = self._get_session(self._current_model)
-            if session is not None:
-                for title, category in added_tasks:
-                    session.inject_confirmation_result(title, category, True)
+        # One summarizing note for the whole batch: which were added, which
+        # were skipped in the dialog, and which failed (duplicates, save errors).
+        self._record_task_confirmation(
+            added=added_tasks,
+            declined=list(declined or []),
+            failed=failed_tasks,
+        )
         for err in errors:
             self._show_after_turn(self._append_alert, err)
 
@@ -1889,6 +2267,9 @@ class ChatPanel(QWidget):
         self.model_combo.setEnabled(not busy)
         self.refresh_btn.setEnabled(not busy)
         self.settings_btn.setEnabled(not busy)
+        # Switching conversations mid-reply would orphan the running turn.
+        self.history_combo.setEnabled(not busy)
+        self.new_chat_btn.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
         self.busy_changed.emit(busy)
 
@@ -1938,10 +2319,15 @@ class ChatPanel(QWidget):
     def _send_now(self, text: str, attachment_paths: list[str]) -> None:
         """Run a turn immediately with the given message and attachments."""
         from system_sl.chatbot import load_config
-        from system_sl.chatbot.llm_factory import get_cached_llm_clients, _set_current_llm_clients
+        from system_sl.chatbot.llm_factory import (
+            get_cached_llm_clients,
+            register_active_llm,
+            _set_current_llm_clients,
+        )
+        from system_sl.chatbot.memory import title_from_message, update_conversation
 
         model = self._current_model or load_config().system_model
-        session = self._get_session(model)
+        session = self._get_session()
         if session is None:
             # No usable session (LLM not configured, or the provider
             # rejected the credentials). The message was already taken out
@@ -1949,6 +2335,15 @@ class ChatPanel(QWidget):
             self.input_box.setPlainText(text)
             self.input_box.setFocus()
             return
+
+        # Title the conversation from its first message and remember which
+        # model is answering; both are read by the history dropdown.
+        update_conversation(
+            self._thread_id,
+            title_if_empty=title_from_message(text),
+            last_model=model,
+        )
+        self._refresh_history_combo()
 
         # Show attachments in the player message if any
         if attachment_paths:
@@ -1961,7 +2356,9 @@ class ChatPanel(QWidget):
         self._set_busy(True)
         self._start_answer_line()
 
-        # Track the LLM's HTTP clients so we can cancel the stream on Stop.
+        # Track the HTTP clients of the LLM that will actually answer, so
+        # Stop cancels this stream and not another model's.
+        register_active_llm(session.llm)
         sync_client, async_client = get_cached_llm_clients()
         _set_current_llm_clients(sync_client, async_client)
 
@@ -2012,8 +2409,10 @@ class ChatPanel(QWidget):
         # Reset the agent cache so the next request gets a fresh LLM with new HTTP clients.
         from system_sl.chatbot import reset_agent_cache
         reset_agent_cache()
-        # Clear the session cache so a new session with the new agent is created.
-        self._sessions.clear()
+        # Drop the session object; the next turn rebuilds it for the same
+        # conversation on a fresh agent. The checkpoint is untouched, and any
+        # dangling tool call is repaired before the following turn.
+        self._session = None
         self._thread.requestInterruption()
         self.stop_button.setEnabled(False)
         self.stop_button.setToolTip("Stopping...")
@@ -2066,6 +2465,11 @@ class ChatPanel(QWidget):
     def _cleanup_thread(self) -> None:
         self._md_timer.stop()
         self._stop_dots()
+        # Keep the session of the turn that just ended: it is needed to close a
+        # graph step the worker abandoned.
+        finished_session = (
+            getattr(self._worker, "session", None) if self._worker is not None else None
+        )
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
@@ -2075,9 +2479,15 @@ class ChatPanel(QWidget):
         # Clear tracked LLM HTTP clients so they can be re-acquired for next request.
         from system_sl.chatbot.llm_factory import _clear_current_llm_clients
         _clear_current_llm_clients()
+        # The worker has stopped, so the checkpoint is safe to write again:
+        # close a turn that was cancelled mid-tool, then record any task
+        # outcome the Player answered while it was streaming.
+        if finished_session is not None:
+            self._repair_session_after_turn(finished_session)
         notes, self._notes_after_turn = self._notes_after_turn, []
         for append, text in notes:
             append(text)
+        self._flush_pending_confirmations()
         self.stop_button.setToolTip("Interrupt the reply")
         self._set_busy(False)
         self.input_box.setFocus()

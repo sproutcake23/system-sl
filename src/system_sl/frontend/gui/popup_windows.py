@@ -1,4 +1,14 @@
-from PySide6.QtCore import QDate, QSize, Qt, Signal, QTimer, QRegularExpression
+from PySide6.QtCore import (
+    QDate,
+    QObject,
+    QSize,
+    Qt,
+    QThread,
+    Signal,
+    QTimer,
+    QRegularExpression,
+)
+from pathlib import Path
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -35,10 +45,11 @@ from system_sl.core.tasks import (
 from system_sl.core.priority_engine_new import (
     load_manual_order,
     run_prioritization,
-    ThompsonSampler,
     save_manual_order,
 )  # we are importing run_prioritization from api section(priority_engine_new)
 from system_sl.frontend.gui.theme import get_current_theme_tokens
+from system_sl.utils.data_health import DataIssue, pop_issues, record_issue
+from system_sl.utils.paths import get_tasks_file_path
 
 
 # GUI-added tasks no longer carry a user-chosen category — the model assigns one
@@ -81,6 +92,25 @@ class ReorderableTaskList(QListWidget):
             self.reordered.emit(moved_text, old_rank, new_rank, new_texts, new_titles)
 
 
+class _RankingWorker(QObject):
+    """Runs the priority engine away from the GUI thread.
+
+    Loading the NLP model and scoring every task takes seconds on first use,
+    which used to freeze the window on every refresh.
+    """
+
+    finished = Signal(object)  # ranking result dict
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            result = run_prioritization(display=False)
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+            return
+        self.finished.emit(result)
+
+
 class TasksWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -96,6 +126,17 @@ class TasksWindow(QWidget):
         # wiped by, nor endlessly appended to, a standing ranking notice.
         self._status_message = ""
         self._priority_note = ""
+
+        # Quarantine notices are shown once per file per session, not on every
+        # refresh.
+        self._reported_corrupt: set[str] = set()
+
+        # One ranking worker at a time. A refresh requested while it runs is
+        # coalesced: its result is discarded and ranking starts again, so the
+        # list never shows a stale order.
+        self._ranking_thread: QThread | None = None
+        self._ranking_worker: _RankingWorker | None = None
+        self._refresh_pending = False
 
         root = QVBoxLayout(self)
         root.addWidget(QLabel("Here are your tasks!!"))
@@ -171,11 +212,96 @@ class TasksWindow(QWidget):
             text = f"{text} · {self._priority_note}" if text else self._priority_note
         self.status_label.setText(text)
 
+    def _report_data_issues(self) -> None:
+        """Show any data-file problems recorded since the last refresh.
+
+        Read failures and quarantine happen below the GUI, so the interface
+        drains the queue and explains them once instead of letting a corrupt
+        file look like an empty task list.
+        """
+        for issue in pop_issues():
+            self._status_message = issue.message()
+            if issue.kind != "corrupt" or issue.corrupt_path is None:
+                continue
+            key = str(issue.corrupt_path)
+            if key in self._reported_corrupt:
+                continue
+            self._reported_corrupt.add(key)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Task data recovered")
+            box.setText(issue.message())
+            box.setInformativeText(
+                "The original file was kept so you can inspect or recover it. "
+                "Move it back to restore those tasks."
+            )
+            box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            box.setModal(False)
+            box.open()
+        self._apply_status()
+
+    def _report_write_failure(self, path: str, error: OSError) -> None:
+        """Record and show a failed save without crashing the window."""
+        record_issue(DataIssue("write_failed", Path(path), detail=str(error)))
+        self._set_status(f"Changes could not be saved: {error}")
+
     def _refresh_list(self):
-        # Re-rank from scratch via the prioritization engine, then render.
-        result = run_prioritization(
-            display=False
-        )  # NOTE: To turn on the thompson sampling we also have to make changes here
+        """Start ranking in the background, keeping the last list visible.
+
+        The engine loads an NLP model and scores every task, so doing this in
+        the GUI thread froze the window. The last rendered order stays on
+        screen until a newer result arrives.
+        """
+        if self._ranking_thread is not None:
+            # A newer refresh supersedes the result still being computed.
+            self._refresh_pending = True
+            return
+
+        self._priority_note = "ranking…"
+        self._apply_status()
+        self._start_ranking()
+
+    def _start_ranking(self) -> None:
+        """Run one prioritization pass in a worker thread."""
+        self._ranking_thread = QThread(self)
+        self._ranking_worker = _RankingWorker()
+        self._ranking_worker.moveToThread(self._ranking_thread)
+        self._ranking_thread.started.connect(self._ranking_worker.run)
+        self._ranking_worker.finished.connect(self._on_ranking_done)
+        self._ranking_worker.failed.connect(self._on_ranking_failed)
+        self._ranking_worker.finished.connect(self._ranking_thread.quit)
+        self._ranking_worker.failed.connect(self._ranking_thread.quit)
+        self._ranking_thread.finished.connect(self._cleanup_ranking)
+        self._ranking_thread.start()
+
+    def _on_ranking_done(self, result: dict) -> None:
+        if self._refresh_pending:
+            return  # a newer refresh will render instead
+        self._render_ranking(result)
+
+    def _on_ranking_failed(self, message: str) -> None:
+        if self._refresh_pending:
+            return
+        self._priority_note = ""
+        self._set_status(f"Ranking failed: {message}")
+        if not self._order:
+            self._order = self._unranked_tasks()
+            self._render(self._order)
+        self._report_data_issues()
+
+    def _cleanup_ranking(self) -> None:
+        if self._ranking_worker is not None:
+            self._ranking_worker.deleteLater()
+            self._ranking_worker = None
+        if self._ranking_thread is not None:
+            self._ranking_thread.deleteLater()
+            self._ranking_thread = None
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self._refresh_list()
+
+    def _render_ranking(self, result: dict) -> None:
+        """Apply a ranking result, falling back to the stored order."""
         self._order = result.get("all_tasks_ranked", [])
 
         # An empty ranking does not mean the player has no tasks. The ranking
@@ -196,6 +322,7 @@ class TasksWindow(QWidget):
 
         self._apply_status()
         self._render(self._order)
+        self._report_data_issues()
 
     @staticmethod
     def _explain(reason: str | None) -> str:
@@ -263,16 +390,15 @@ class TasksWindow(QWidget):
         self._order = new_order_dicts
 
         # 2. HYBRID ACTION A: Save exact layout to disk
-        save_manual_order(self._order)
-
-        # 3. HYBRID ACTION B: Silently train the offline AI Bandit
         try:
-            ThompsonSampler().record_feedback(moved_title, self._order)
-            self._set_status(
-                f"Reordered '{moved_title}' (AI silently updated!)"
-            )
-        except Exception as e:
-            self._set_status(f"Reordered (AI train failed: {e})")
+            save_manual_order(self._order)
+        except OSError as e:
+            self._report_write_failure(get_tasks_file_path("task_order.json"), e)
+
+        # 3. The manual order is the whole signal. Drag-reorder is not fed to
+        # the bandit: the scoring weights it reports are not used by the
+        # gravity blend, so pretending it trains anything was misleading.
+        self._set_status(f"Reordered '{moved_title}'")
 
         # 4. Render safely outside the drop event loop
         QTimer.singleShot(0, lambda: self._render(self._order))
@@ -293,6 +419,8 @@ class TasksWindow(QWidget):
             self._set_status(f"Completed: {title}")
         except ValueError as e:
             self._set_status(str(e))
+        except OSError as e:
+            self._report_write_failure(get_tasks_file_path("tasks.json"), e)
         self._refresh_list()
 
     def _on_remove(self):
@@ -304,6 +432,8 @@ class TasksWindow(QWidget):
             self._set_status(f"Removed: {title}")
         except ValueError as e:
             self._set_status(str(e))
+        except OSError as e:
+            self._report_write_failure(get_tasks_file_path("tasks.json"), e)
         self._refresh_list()
 
     def _on_edit(self):
@@ -360,6 +490,8 @@ class TasksWindow(QWidget):
             self._set_status(f"Edited: {new_title}")
         except ValueError as e:
             self._set_status(str(e))
+        except OSError as e:
+            self._report_write_failure(get_tasks_file_path("tasks.json"), e)
         self._refresh_list()
 
     def _on_add(self):
@@ -381,6 +513,8 @@ class TasksWindow(QWidget):
             self.deadline_edit.setDate(QDate.currentDate())
         except ValueError as e:
             self._set_status(str(e))
+        except OSError as e:
+            self._report_write_failure(get_tasks_file_path("tasks.json"), e)
         self._refresh_list()
 
 
