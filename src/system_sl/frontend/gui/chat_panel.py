@@ -144,6 +144,73 @@ class _ModelFetchWorker(QObject):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+class _ClickableLabel(QLabel):
+    """A label that reports left clicks.
+
+    Defined here rather than imported from main.py: main.py imports this
+    module, so the dependency cannot be reversed.
+    """
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class _ModelDiscoveryWorker(QObject):
+    """Background worker that probes local model servers.
+
+    Probing is slow: the Ollama CLI gets a 5s timeout before the HTTP
+    fallback tries for another 3s, and LM Studio takes 3s more. Running
+    that on the GUI thread freezes the window for up to eleven seconds, so
+    it happens here instead.
+    """
+    finished = Signal(list)
+    failed = Signal(str)
+
+    def run(self):
+        from system_sl.chatbot import discover_local_models
+        try:
+            self.finished.emit(discover_local_models())
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class _TestConnectionWorker(QObject):
+    """Background worker that pings the configured LLM.
+
+    A ping against a cold local model can take tens of seconds, so the
+    round trip must not happen on the GUI thread.
+    """
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, provider: str, model: str, base_url: str | None, api_key: str):
+        super().__init__()
+        self.provider = provider
+        self.model = model
+        self.base_url = base_url
+        self.api_key = api_key
+
+    def run(self):
+        from system_sl.chatbot.llm_factory import create_llm
+        try:
+            llm = create_llm(
+                provider=self.provider,
+                model=self.model,
+                base_url=self.base_url,
+                api_key=self.api_key,
+            )
+            resp = llm.invoke([{"role": "user", "content": "ping"}])
+            content = getattr(resp, "content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            self.finished.emit(content[:100])
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
 # =============================================================================
 # SETTINGS DIALOG
 # =============================================================================
@@ -162,6 +229,8 @@ class LLMSettingsPage(QWidget):
         self._fetched_models: "list[ModelInfo]" = []
         self._fetch_thread: QThread | None = None
         self._fetch_worker: _ModelFetchWorker | None = None
+        self._test_thread: QThread | None = None
+        self._test_worker: "_TestConnectionWorker | None" = None
 
         self._build_ui()
         self._load_current_config()
@@ -565,9 +634,12 @@ class LLMSettingsPage(QWidget):
         )
 
     def _test_connection(self) -> None:
-        """Test the current configuration by creating an LLM and sending a ping."""
+        """Test the current configuration by creating an LLM and sending a ping.
+
+        The ping runs in a background thread: a cold local model can take
+        tens of seconds to answer, and the GUI must stay responsive.
+        """
         from system_sl.chatbot import validate_config
-        from system_sl.chatbot.llm_factory import create_llm
 
         config = self._collect_config()
 
@@ -576,23 +648,43 @@ class LLMSettingsPage(QWidget):
             QMessageBox.warning(self, "Invalid Config", "\n".join(errors))
             return
 
+        if self._test_thread is not None:
+            return  # a test is already running
+
         self.test_btn.setEnabled(False)
         self.test_btn.setText("Testing...")
 
-        try:
-            llm = create_llm(
-                provider=config.provider,
-                model=config.system_model,
-                base_url=config.base_url,
-                api_key=config.api_key,
-            )
-            resp = llm.invoke([{"role": "user", "content": "ping"}])
-            QMessageBox.information(self, "Success", f"Connection OK!\nResponse: {resp.content[:100]}")
-        except Exception as e:
-            QMessageBox.critical(self, "Connection Failed", f"{type(e).__name__}: {e}")
-        finally:
-            self.test_btn.setEnabled(True)
-            self.test_btn.setText("Test Connection")
+        self._test_thread = QThread(self)
+        self._test_worker = _TestConnectionWorker(
+            provider=config.provider,
+            model=config.system_model,
+            base_url=config.base_url,
+            api_key=config.api_key,
+        )
+        self._test_worker.moveToThread(self._test_thread)
+        self._test_thread.started.connect(self._test_worker.run)
+        self._test_worker.finished.connect(self._on_test_succeeded)
+        self._test_worker.failed.connect(self._on_test_failed)
+        self._test_worker.finished.connect(self._test_thread.quit)
+        self._test_worker.failed.connect(self._test_thread.quit)
+        self._test_thread.finished.connect(self._cleanup_test_thread)
+        self._test_thread.start()
+
+    def _on_test_succeeded(self, response: str) -> None:
+        QMessageBox.information(self, "Success", f"Connection OK!\nResponse: {response}")
+
+    def _on_test_failed(self, error: str) -> None:
+        QMessageBox.critical(self, "Connection Failed", error)
+
+    def _cleanup_test_thread(self) -> None:
+        self.test_btn.setEnabled(True)
+        self.test_btn.setText("Test Connection")
+        if self._test_worker is not None:
+            self._test_worker.deleteLater()
+            self._test_worker = None
+        if self._test_thread is not None:
+            self._test_thread.deleteLater()
+            self._test_thread = None
 
     def _on_apply(self) -> bool:
         from system_sl.chatbot import save_config, validate_config
@@ -719,8 +811,20 @@ class ChatPanel(QWidget):
         self._thread: QThread | None = None
         self._worker: _ChatWorker | None = None
 
+        # Background scan of the local model servers. The scan can take
+        # several seconds, so it never runs on the GUI thread.
+        self._local_models: list[tuple[str, str]] = []
+        self._discovery_running: bool = False
+        self._discovery_thread: QThread | None = None
+        self._discovery_worker: "_ModelDiscoveryWorker | None" = None
+
         # Attachment state
         self._attachments: list[Path] = []
+
+        # Messages composed while the assistant is busy. They are sent
+        # automatically, in order, once the running turn finishes.
+        # Each entry is (text, attachment_paths).
+        self._message_queue: list[tuple[str, list[str]]] = []
 
         # Live-streaming state
         self._answer_open: bool = False       # the [SYSTEM] line exists
@@ -869,17 +973,36 @@ class ChatPanel(QWidget):
         input_row.setAlignment(Qt.AlignmentFlag.AlignBottom)
         root.addLayout(input_row)
 
+        # Queue badge: shows how many messages are waiting to be sent.
+        # Placed under the input row so it never competes with the input
+        # for horizontal space. Clicking it clears the queue.
+        self.queue_badge = _ClickableLabel("")
+        self.queue_badge.setObjectName("queueBadge")
+        self.queue_badge.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.queue_badge.setVisible(False)
+        self.queue_badge.setToolTip("Click to clear the queued messages")
+        self.queue_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.queue_badge.clicked.connect(self._on_queue_badge_clicked)
+        root.addWidget(self.queue_badge)
+
         # Enable drag & drop on the panel itself
         self.setAcceptDrops(True)
 
-        # Initialize model list
+        # Initialize model list. The local-server scan runs in the background;
+        # the dropdown is usable immediately.
         self._populate_model_list()
+        self._start_discovery()
 
     # ----- Model Management -----
 
     def _populate_model_list(self) -> None:
-        """Populate the model dropdown with configured + discovered + cached models."""
-        from system_sl.chatbot import load_config, discover_local_models, get_model_cache, get_preset_models
+        """Populate the model dropdown with configured + discovered + cached models.
+
+        Local-server discovery is slow (up to ~11s of timeouts), so it runs
+        in a background worker. This method only renders whatever the last
+        discovery produced and shows a placeholder while a scan is running.
+        """
+        from system_sl.chatbot import load_config, get_model_cache, get_preset_models
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
 
@@ -899,10 +1022,14 @@ class ChatPanel(QWidget):
         # 2. Separator
         self.model_combo.insertSeparator(1)
 
-        # 3. Discovered local models
-        local_models = discover_local_models()
-        for display, model_id in local_models:
-            self.model_combo.addItem(display, model_id)
+        # 3. Discovered local models — a placeholder while the scan runs,
+        #    otherwise the models found by the last scan.
+        if self._discovery_running:
+            self.model_combo.addItem("🔍 Discovering local models…", "")
+            self.model_combo.model().item(self.model_combo.count() - 1).setEnabled(False)
+        else:
+            for display, model_id in self._local_models:
+                self.model_combo.addItem(display, model_id)
 
         # 4. Cached models from OpenRouter (if any)
         # provider is only ever "google" or "openai"; the endpoint is what
@@ -937,9 +1064,52 @@ class ChatPanel(QWidget):
         self._current_model = current_model
         self.model_combo.blockSignals(False)
 
+    # ----- Background model discovery -----
+
+    def _start_discovery(self) -> None:
+        """Probe the local model servers without blocking the GUI thread."""
+        if self._discovery_running:
+            return
+
+        self._discovery_running = True
+        self._populate_model_list()
+
+        self._discovery_thread = QThread(self)
+        self._discovery_worker = _ModelDiscoveryWorker()
+        self._discovery_worker.moveToThread(self._discovery_thread)
+        self._discovery_thread.started.connect(self._discovery_worker.run)
+        self._discovery_worker.finished.connect(self._on_models_discovered)
+        self._discovery_worker.failed.connect(self._on_discovery_failed)
+        self._discovery_worker.finished.connect(self._discovery_thread.quit)
+        self._discovery_worker.failed.connect(self._discovery_thread.quit)
+        self._discovery_thread.finished.connect(self._cleanup_discovery_thread)
+        self._discovery_thread.start()
+
+    def _on_models_discovered(self, models: list) -> None:
+        """Handle a completed local-server scan."""
+        self._local_models = models
+        self._discovery_running = False
+        self._populate_model_list()
+
+    def _on_discovery_failed(self, error: str) -> None:
+        """Handle a failed local-server scan."""
+        self._local_models = []
+        self._discovery_running = False
+        self._populate_model_list()
+        self._append_alert(f"model discovery failed: {error}")
+
+    def _cleanup_discovery_thread(self) -> None:
+        if self._discovery_worker is not None:
+            self._discovery_worker.deleteLater()
+            self._discovery_worker = None
+        if self._discovery_thread is not None:
+            self._discovery_thread.deleteLater()
+            self._discovery_thread = None
+
     def _refresh_models(self) -> None:
         """Refresh the model list from local servers."""
         self._populate_model_list()
+        self._start_discovery()
 
     def _on_model_changed(self, index: int) -> None:
         """Handle model selection change."""
@@ -963,6 +1133,13 @@ class ChatPanel(QWidget):
         self._sessions.clear()
         self._current_model = model_id
         self._clear_proposals()
+        # Queued messages were composed for the previous model; sending them
+        # to a different one would surprise the Player.
+        if self._message_queue:
+            dropped = len(self._message_queue)
+            self._message_queue.clear()
+            self._update_queue_badge()
+            self._append_alert(f"dropped {dropped} queued message(s) — model changed")
 
         self._append_alert(f"Switched to model: {model_id}")
 
@@ -974,6 +1151,7 @@ class ChatPanel(QWidget):
         from system_sl.chatbot import reload_agent
         reload_agent()
         self._populate_model_list()
+        self._start_discovery()
 
     def eventFilter(self, obj: QObject, event) -> bool:
         """Handle Enter/Shift+Enter in the input box."""
@@ -1177,6 +1355,22 @@ class ChatPanel(QWidget):
                 f" background: transparent; padding-left: 6px; }}"
             )
 
+    def _is_at_bottom(self, threshold: int = 48) -> bool:
+        """Return True when the transcript is scrolled to (or near) the bottom.
+
+        Auto-scroll must not fight the user: when they scroll up to read
+        earlier messages, a streamed render must not yank them back down.
+        A small threshold covers the rounding jitter of the scrollbar range
+        while content is being appended.
+        """
+        bar = self.transcript.verticalScrollBar()
+        return bar.value() >= bar.maximum() - threshold
+
+    def _scroll_to_bottom(self) -> None:
+        """Force the transcript to the end (a deliberate user action)."""
+        self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+        self.transcript.ensureCursorVisible()
+
     def _append_player(self, text: str) -> None:
         """Append a user (PLAYER) message as a right-aligned bubble, no label."""
         tokens = self._get_live_tokens()
@@ -1212,7 +1406,12 @@ class ChatPanel(QWidget):
     def _append_bubble(self, text: str, align_right: bool, bg_color: str, text_color: str, escape: bool = True) -> None:
         """Insert a chat bubble using QTextCursor + QTextBlockFormat for proper alignment."""
         safe = html.escape(text).replace("\n", "<br>") if escape else text.replace("\n", "<br>")
-        
+
+        # Respect the user's scroll position: only follow the tail if they
+        # were already there. A bubble appended while they read history must
+        # not yank the viewport back down.
+        follow_tail = self._is_at_bottom()
+
         cursor = QTextCursor(self.transcript.document())
         cursor.movePosition(QTextCursor.MoveOperation.End)
         
@@ -1234,9 +1433,9 @@ class ChatPanel(QWidget):
         cursor.setCharFormat(char_fmt)
         cursor.insertHtml(safe)
         
-        # Ensure scroll to bottom
-        self.transcript.moveCursor(QTextCursor.MoveOperation.End)
-        self.transcript.ensureCursorVisible()
+        if follow_tail:
+            self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+            self.transcript.ensureCursorVisible()
 
     def _append_markdown_bubble(self, markdown_text: str, align_right: bool, bg_color: str, text_color: str, escape: bool = False) -> None:
         """Render markdown and insert as a styled bubble block."""
@@ -1257,7 +1456,9 @@ class ChatPanel(QWidget):
             return
         
         body = _colorize_markdown_html(body, text_color)
-        
+
+        follow_tail = self._is_at_bottom()
+
         cursor = QTextCursor(self.transcript.document())
         cursor.movePosition(QTextCursor.MoveOperation.End)
         
@@ -1276,8 +1477,9 @@ class ChatPanel(QWidget):
         cursor.setCharFormat(char_fmt)
         cursor.insertHtml(body)
         
-        self.transcript.moveCursor(QTextCursor.MoveOperation.End)
-        self.transcript.ensureCursorVisible()
+        if follow_tail:
+            self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+            self.transcript.ensureCursorVisible()
 
     def _append_alert(self, text: str) -> None:
         safe = html.escape(text).replace("\n", "<br>")
@@ -1306,6 +1508,11 @@ class ChatPanel(QWidget):
         if self._answer_start is None:
             return
 
+        # Capture the scroll state before the rewrite. The rewrite replaces
+        # the whole answer block, so the scrollbar range changes underneath
+        # the user; only follow the tail if they were already reading it.
+        follow_tail = self._is_at_bottom()
+
         doc = self.transcript.document()
         end = doc.characterCount() - 1
         if end <= self._answer_start:
@@ -1327,8 +1534,9 @@ class ChatPanel(QWidget):
         cursor.setBlockFormat(QTextBlockFormat())
         cursor.insertHtml(rendered_html)
 
-        self.transcript.moveCursor(QTextCursor.MoveOperation.End)
-        self.transcript.ensureCursorVisible()
+        if follow_tail:
+            self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+            self.transcript.ensureCursorVisible()
 
     def _render_answer(self) -> None:
         """Re-render the streamed answer, skipping no-op rewrites."""
@@ -1453,11 +1661,15 @@ class ChatPanel(QWidget):
         if self._halted:
             return
         self._show_reasoning()
+        # Same rule as the transcript: do not fight the user's scroll position.
+        bar = self.reasoning_view.verticalScrollBar()
+        follow_tail = bar.value() >= bar.maximum() - 48
         cursor = self.reasoning_view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(delta)
         self.reasoning_view.setTextCursor(cursor)
-        self.reasoning_view.ensureCursorVisible()
+        if follow_tail:
+            self.reasoning_view.ensureCursorVisible()
 
     # --- answer ---
 
@@ -1629,7 +1841,9 @@ class ChatPanel(QWidget):
 
     def _set_busy(self, busy: bool) -> None:
         self.send_button.setEnabled(not busy)
-        self.input_box.setEnabled(not busy)
+        # The input stays enabled while the assistant works: the Player can
+        # compose the next message and queue it.
+        self.input_box.setEnabled(True)
         self.model_combo.setEnabled(not busy)
         self.refresh_btn.setEnabled(not busy)
         self.settings_btn.setEnabled(not busy)
@@ -1639,35 +1853,71 @@ class ChatPanel(QWidget):
     def is_busy(self) -> bool:
         return self._thread is not None
 
-    def _on_send(self) -> None:
-        from system_sl.chatbot import load_config
-        from system_sl.chatbot.llm_factory import get_cached_llm_clients, _set_current_llm_clients
-        if self._thread is not None:
+    def _update_queue_badge(self) -> None:
+        """Show or hide the badge that counts queued messages."""
+        count = len(self._message_queue)
+        if count <= 0:
+            self.queue_badge.setVisible(False)
+            self.queue_badge.setText("")
             return
+        noun = "message" if count == 1 else "messages"
+        self.queue_badge.setText(f"⏳ {count} {noun} queued — will send when the reply finishes")
+        self.queue_badge.setVisible(True)
+
+    def _on_queue_badge_clicked(self) -> None:
+        """Clear the queued messages when the badge is clicked."""
+        if not self._message_queue:
+            return
+        dropped = len(self._message_queue)
+        self._message_queue.clear()
+        self._update_queue_badge()
+        self._append_alert(f"cleared {dropped} queued message(s)")
+
+    def _on_send(self) -> None:
+        """Send the composed message, or queue it if a reply is in flight."""
         text = self.input_box.toPlainText().strip()
         if not text:
             return
 
+        # Capture attachments before clearing
+        attachment_paths = [str(p) for p in self._attachments]
+        self.input_box.clear()
+        self._clear_attachments()
+
+        if self.is_busy():
+            # A turn is already running: queue this one instead of dropping it.
+            self._message_queue.append((text, attachment_paths))
+            self._update_queue_badge()
+            self._append_alert("queued — will send when the reply finishes")
+            return
+
+        self._send_now(text, attachment_paths)
+
+    def _send_now(self, text: str, attachment_paths: list[str]) -> None:
+        """Run a turn immediately with the given message and attachments."""
+        from system_sl.chatbot import load_config
+        from system_sl.chatbot.llm_factory import get_cached_llm_clients, _set_current_llm_clients
+
         model = self._current_model or load_config().system_model
         session = self._get_session(model)
         if session is None:
+            # No usable session (LLM not configured, or the provider
+            # rejected the credentials). The message was already taken out
+            # of the input box, so put it back rather than losing it.
+            self.input_box.setPlainText(text)
+            self.input_box.setFocus()
             return
 
-        # Capture attachments before clearing
-        attachment_paths = [str(p) for p in self._attachments]
-
-        self.input_box.clear()
         # Show attachments in the player message if any
         if attachment_paths:
             self._append_player_with_attachments(text, attachment_paths)
         else:
             self._append_player(text)
+        # Sending is a deliberate action: bring the new message into view.
+        self._scroll_to_bottom()
         self._reset_stream_state()
         self._set_busy(True)
         self._start_answer_line()
-
-        # Clear attachments after sending
-        self._clear_attachments()
 
         # Track the LLM's HTTP clients so we can cancel the stream on Stop.
         sync_client, async_client = get_cached_llm_clients()
@@ -1703,6 +1953,15 @@ class ChatPanel(QWidget):
         self._reasoning_shown = False
         if not had_output:
             self._append_alert("stopped before any reply")
+        # Stop is an abort gesture: drop anything that was queued behind the
+        # reply the Player just cancelled. Otherwise the next queued message
+        # would fire the moment this turn unwinds, which reads as "my Stop
+        # button started another reply".
+        if self._message_queue:
+            dropped = len(self._message_queue)
+            self._message_queue.clear()
+            self._update_queue_badge()
+            self._append_alert(f"stopped — dropped {dropped} queued message(s)")
         # Cancel the in-flight HTTP request by closing the LLM's HTTP client(s).
         from system_sl.chatbot.llm_factory import cancel_current_stream
         cancel_current_stream()
@@ -1776,3 +2035,12 @@ class ChatPanel(QWidget):
         self.stop_button.setToolTip("Interrupt the reply")
         self._set_busy(False)
         self.input_box.setFocus()
+
+        # The turn is over: send the next queued message, if any.
+        if self._message_queue:
+            queued_text, queued_attachments = self._message_queue.pop(0)
+            self._update_queue_badge()
+            # Defer so the finished turn's widgets settle before the next
+            # one starts; a direct call would re-enter the worker setup
+            # while this signal is still being delivered.
+            QTimer.singleShot(0, lambda: self._send_now(queued_text, queued_attachments))

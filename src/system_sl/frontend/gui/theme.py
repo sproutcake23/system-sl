@@ -363,6 +363,18 @@ QFrame#taskConfirmBar QLabel {{
     background: transparent;
 }}
 
+/* --- Queued messages badge --- */
+QLabel#queueBadge {{
+    color: {t['sys_color_text_muted']};
+    background: transparent;
+    border: none;
+    padding: 2px 6px 0px 6px;
+    font-size: 11px;
+}}
+QLabel#queueBadge:hover {{
+    color: {t['sys_color_primary']};
+}}
+
 /* --- List widget (task list) --- */
 QListWidget {{
     background-color: {t['sys_color_surface_raised']};
