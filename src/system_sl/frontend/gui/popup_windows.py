@@ -48,7 +48,10 @@ from system_sl.core.priority_engine_new import (
     save_manual_order,
 )  # we are importing run_prioritization from api section(priority_engine_new)
 from system_sl.frontend.gui.theme import get_current_theme_tokens
-from system_sl.frontend.gui.data_issue_reporter import drain_data_issues
+from system_sl.frontend.gui.data_issue_reporter import (
+    drain_data_issues,
+    latest_data_issue_summary,
+)
 from system_sl.utils.data_health import DataIssue, record_issue
 from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.worker_threads import new_worker_thread
@@ -220,10 +223,14 @@ class TasksWindow(QWidget):
         drains the queue and explains them once instead of letting a corrupt
         file look like an empty task list.
         """
-        # Every problem found since the last drain is listed, one per line,
-        # instead of each overwriting the previous one. Dialogs are shown once
-        # per event, shared with the main window's monitor.
-        summary = drain_data_issues(self)
+        # The main window's monitor usually drains the queue first. Use the
+        # summary it stored so this status line still names the problem;
+        # only drain here when nothing has claimed the queue yet.
+        from system_sl.utils.data_health import has_issues
+
+        summary = latest_data_issue_summary()
+        if not summary and has_issues():
+            summary = drain_data_issues(self)
         if summary:
             self._status_message = summary
         self._apply_status()

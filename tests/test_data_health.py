@@ -246,3 +246,19 @@ def test_monitor_drains_queue_without_tasks_window(qapp, tmp_path):
         for box in parent.findChildren(QWidget):
             box.close()
         parent.deleteLater()
+
+
+def test_latest_summary_survives_a_second_drain(tmp_path, monkeypatch):
+    """The Tasks status line can name an issue the main monitor drained."""
+    from system_sl.frontend.gui import data_issue_reporter as reporter
+    from system_sl.utils import data_health
+    from pathlib import Path
+
+    issue = data_health.DataIssue("corrupt", tmp_path / "tasks.json")
+    data_health.record_issue(issue)
+    # Avoid opening a real dialog in the test.
+    monkeypatch.setattr(reporter, "show_issue_dialogs", lambda parent, issues: [])
+    first = reporter.drain_data_issues(None)
+    assert "tasks.json" in first
+    assert reporter.drain_data_issues(None) == ""
+    assert reporter.latest_data_issue_summary() == first
