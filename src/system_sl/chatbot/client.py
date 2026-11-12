@@ -3,9 +3,9 @@
 import json
 import logging
 from datetime import datetime
-from typing import Callable, Iterator, List, Optional, Union
+from typing import Callable, Iterable, Iterator, List, Optional, Union
 
-from langchain_core.messages import AIMessageChunk, SystemMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage
 
 from system_sl.chatbot.system import (
     get_system_agent,
@@ -15,6 +15,7 @@ from system_sl.chatbot.system import (
     clear_turn_context,
 )
 from system_sl.chatbot.memory import (
+    APP_NOTE_PREFIX,
     load_thread_messages,
     repair_interrupted_turn,
 )
@@ -306,55 +307,67 @@ class ChatSession:
         task_title: str,
         category: str,
         confirmed: bool,
-    ) -> None:
-        """Inject a system message about task confirmation into conversation history.
+    ) -> bool:
+        """Record a single task confirmation/decline in the conversation.
 
-        This feeds the confirmation result back to the model so it knows whether
-        the proposed task was actually added.
-
-        Args:
-            task_title: The title of the task that was proposed.
-            category: The category the task was proposed for.
-            confirmed: True if the user confirmed (task was added), False if declined.
+        Thin wrapper around :meth:`record_task_confirmation` for the one-task
+        cases; batch dialogs pass every task at once so the model reads one
+        summarizing message instead of a burst of them.
         """
+        if confirmed:
+            return self.record_task_confirmation(added=[(task_title, category)])
+        return self.record_task_confirmation(declined=[(task_title, category)])
+
+    def record_task_confirmation(
+        self,
+        added: Iterable[tuple[str, str]] = (),
+        declined: Iterable[tuple[str, str]] = (),
+        failed: Iterable[tuple[str, str]] = (),
+    ) -> bool:
+        """Append one note telling the model what happened to proposed tasks.
+
+        This feeds the confirmation result back so the model knows whether a
+        task it proposed was actually created, and does not claim otherwise
+        or propose it again. The note is written with ``update_state`` — the
+        supported LangGraph API — which applies the ``messages`` reducer the
+        same way a turn does, leaving the checkpoint consistent.
+
+        Returns True when the note was stored.
+        """
+        added = [(t, c) for t, c in added if t]
+        declined = [(t, c) for t, c in declined if t]
+        failed = [(t, c) for t, c in failed if t]
+        if not (added or declined or failed):
+            return False
+
+        parts: list[str] = []
+        if added:
+            parts.append(
+                "Player confirmed; added: "
+                + ", ".join(f'"{t}" ({c})' for t, c in added)
+            )
+        if declined:
+            parts.append(
+                "Player declined; not added: "
+                + ", ".join(f'"{t}" ({c})' for t, c in declined)
+            )
+        if failed:
+            parts.append(
+                "Could not be added: " + ", ".join(f'"{t}" ({c})' for t, c in failed)
+            )
+        text = f"{APP_NOTE_PREFIX} {'; '.join(parts)}."
+
+        note = HumanMessage(content=text)
         try:
-            checkpointer = getattr(self.agent, "checkpointer", None)
-            if checkpointer is None:
-                return
-
-            thread_id = self.config.get("configurable", {}).get("thread_id")
-            if not thread_id:
-                return
-
-            # Get current state from checkpointer
-            checkpoint = checkpointer.get(self.config)
-            if checkpoint is None:
-                return
-
-            # Extract messages from checkpoint
-            state_values = checkpoint.get("channel_values", {})
-            messages = state_values.get("messages", [])
-            if not messages:
-                return
-
-            # Create confirmation message
-            if confirmed:
-                msg_text = f"System: User confirmed adding task '{task_title}' to category '{category}'. Task was added."
-            else:
-                msg_text = f"System: User declined adding task '{task_title}' to category '{category}'. Task was not added."
-
-            system_msg = SystemMessage(content=msg_text)
-
-            # Update checkpoint with new message appended
-            new_messages = list(messages) + [system_msg]
-            state_values["messages"] = new_messages
-            checkpoint["channel_values"] = state_values
-
-            # Save updated checkpoint
-            checkpointer.put(self.config, checkpoint, {}, {})
+            self.agent.update_state(self.config, {"messages": [note]})
         except Exception:
-            # Silently ignore - this is best-effort feedback
-            pass
+            logger.warning(
+                "could not record a task confirmation in conversation %s",
+                self.thread_id,
+                exc_info=True,
+            )
+            return False
+        return True
 
     @classmethod
     def create_with_model(cls, model_name: str, thread_id: str | None = None) -> "ChatSession":

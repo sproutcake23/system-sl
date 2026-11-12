@@ -216,6 +216,69 @@ def test_deleting_a_conversation_forgets_its_messages(config_dir):
 
 
 # =============================================================================
+# 3. TASK CONFIRMATION FEEDBACK
+# =============================================================================
+
+def test_confirmation_note_is_in_state_before_the_next_turn(config_dir):
+    """(d) The confirmation result is part of the history the model reads."""
+    agent, model = _agent(AIMessage(content="shall I add those?"), AIMessage(content="yes"))
+    session = ChatSession(thread_id="conv-confirm", agent=agent)
+    session.run_turn("suggest tasks for today")
+
+    stored = session.record_task_confirmation(
+        added=[("Read chapter 3", "study")],
+        declined=[("Old idea", "work")],
+        failed=[("Read chapter 3", "study")],
+    )
+
+    assert stored is True
+    notes = [
+        text
+        for text in _texts(session.messages())
+        if memory_mod.APP_NOTE_PREFIX in text
+    ]
+    assert len(notes) == 1, "one summarizing note, not one message per task"
+    assert "Read chapter 3" in notes[0]
+    assert "Old idea" in notes[0]
+    assert "not added" in notes[0]
+
+    session.run_turn("did you add it?")
+    last_prompt = _texts(model.seen[-1])
+    assert any("Read chapter 3" in text for text in last_prompt)
+    # The note is not duplicated by the next turn.
+    assert sum("Old idea" in text for text in _texts(session.messages())) == 1
+
+
+def test_single_confirmation_wrapper_writes_one_note(config_dir):
+    agent, _model = _agent(AIMessage(content="proposed"))
+    session = ChatSession(thread_id="conv-single", agent=agent)
+    session.run_turn("propose something")
+
+    assert session.inject_confirmation_result("Read chapter 3", "study", True) is True
+    assert session.inject_confirmation_result("Old idea", "work", False) is True
+
+    notes = [
+        text
+        for text in _texts(session.messages())
+        if memory_mod.APP_NOTE_PREFIX in text
+    ]
+    assert len(notes) == 2
+    assert "confirmed" in notes[0]
+    assert "declined" in notes[1]
+
+
+def test_confirmation_without_a_conversation_is_harmless(config_dir):
+    """Recording a result before any turn is written, not raised.
+
+    ``update_state`` on a thread with no checkpoint may or may not create one;
+    either way the caller gets a boolean instead of an exception.
+    """
+    agent, _model = _agent(AIMessage(content="unused"))
+    session = ChatSession(thread_id="conv-empty", agent=agent)
+    assert isinstance(session.record_task_confirmation(added=[("x", "study")]), bool)
+
+
+# =============================================================================
 # HELPERS
 # =============================================================================
 

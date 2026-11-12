@@ -35,11 +35,12 @@ logger = logging.getLogger(__name__)
 CHECKPOINT_FILENAME = "chat_memory.sqlite"
 CONVERSATION_INDEX_FILENAME = "chat_conversations.json"
 
-# Prefix for messages the app itself injects into the history (stopped
-# turns). The chat panel uses it to render them as notes instead of Player
-# bubbles when rebuilding a transcript.
+# Prefix for messages the app itself injects into the history (task
+# confirmations, stopped turns). The chat panel uses it to render them as
+# notes instead of Player bubbles when rebuilding a transcript.
+APP_NOTE_PREFIX = "[task confirmation]"
 STOP_NOTE_PREFIX = "[turn stopped]"
-NOTE_PREFIXES = (STOP_NOTE_PREFIX,)
+NOTE_PREFIXES = (APP_NOTE_PREFIX, STOP_NOTE_PREFIX)
 
 # What an interrupted turn records instead of a tool result.
 STOP_NOTE = (

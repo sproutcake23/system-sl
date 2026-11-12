@@ -866,6 +866,10 @@ class ChatPanel(QWidget):
         # Task proposals awaiting the Player's Yes/No
         self._pending_proposals: list[dict] = []
         self._current_proposal: dict | None = None
+        # Confirmation notes waiting for the running turn to end. Writing to
+        # the checkpoint while the agent is still running would race with it,
+        # so they are flushed from _cleanup_thread().
+        self._pending_confirmations: list[tuple] = []
         self._notes_after_turn: list[tuple[Callable[[str], None], str]] = []
 
         root = QVBoxLayout(self)
@@ -2026,21 +2030,26 @@ class ChatPanel(QWidget):
         if not tasks:
             return
 
+        def as_pairs(items: list[dict]) -> list[tuple[str, str]]:
+            pairs = []
+            for task in items:
+                title = str(task.get("title") or "").strip()
+                category = str(task.get("category") or "study").strip().lower()
+                if title:
+                    pairs.append((title, category))
+            return pairs
+
         dialog = BatchProposalDialog(tasks, self)
         if dialog.exec() == QDialog.Accepted:
-            # User confirmed - add the selected tasks
-            selected_tasks = [task for _row, task in dialog.get_selected_tasks()]
-            if selected_tasks:
-                self._add_batch_tasks(selected_tasks)
+            # User confirmed - add the selected tasks; the rest were skipped
+            selected_rows = dialog.get_selected_tasks()
+            selected_tasks = [task for _row, task in selected_rows]
+            selected_indexes = {row for row, _task in selected_rows}
+            skipped = [task for i, task in enumerate(tasks) if i not in selected_indexes]
+            self._add_batch_tasks(selected_tasks, declined=as_pairs(skipped))
         else:
-            # User declined - feed back confirmation for all proposed tasks
-            session = self._get_session()
-            if session is not None:
-                for task in tasks:
-                    title = task.get("title", "").strip()
-                    category = task.get("category", "study").strip().lower()
-                    if title:
-                        session.inject_confirmation_result(title, category, False)
+            # One note for the whole batch, not one per task.
+            self._record_task_confirmation(declined=as_pairs(tasks))
         # Dialog handles its own cleanup
 
     def _show_next_proposal(self) -> None:
@@ -2075,23 +2084,23 @@ class ChatPanel(QWidget):
                 self._show_after_turn(self._append_alert, "cannot add a task without a title")
             elif title in existing:
                 self._show_after_turn(self._append_alert, f"task '{title}' already exists")
+                self._record_task_confirmation(failed=[(title, category)])
             else:
                 try:
                     add_tasks(category, title, deadline)
                 except ValueError as e:
                     self._show_after_turn(self._append_alert, str(e))
+                    self._record_task_confirmation(failed=[(title, category)])
                 except OSError as e:
                     self._show_after_turn(
                         self._append_alert, f"could not save the new task: {e}"
                     )
+                    self._record_task_confirmation(failed=[(title, category)])
                 else:
                     self._show_after_turn(
                         self._append_confirmation, f'Added "{title}" to {category}.'
                     )
-                    # Feed confirmation result back to the model
-                    session = self._get_session()
-                    if session is not None:
-                        session.inject_confirmation_result(title, category, True)
+                    self._record_task_confirmation(added=[(title, category)])
 
         self._show_next_proposal()
 
@@ -2100,12 +2109,46 @@ class ChatPanel(QWidget):
         if proposal is not None:
             title = str(proposal.get("title") or "").strip()
             category = str(proposal.get("category") or "none")
-            # Feed confirmation result back to the model
-            session = self._get_session()
-            if session is not None:
-                session.inject_confirmation_result(title, category, False)
+            if title:
+                self._record_task_confirmation(declined=[(title, category)])
         self._current_proposal = None
         self._show_next_proposal()
+
+    def _record_task_confirmation(
+        self,
+        added: list[tuple[str, str]] | None = None,
+        declined: list[tuple[str, str]] | None = None,
+        failed: list[tuple[str, str]] | None = None,
+    ) -> None:
+        """Tell the conversation what happened to proposed tasks.
+
+        While a reply is streaming, the write waits for the turn to finish: the
+        agent is still running on this thread, and writing a checkpoint
+        underneath it would race. Everything queued in one 'event' (a batch
+        dialog, clearing the proposal queue) becomes one summarizing message.
+        """
+        added = list(added or [])
+        declined = list(declined or [])
+        failed = list(failed or [])
+        if not (added or declined or failed):
+            return
+
+        session = self._session
+        if session is None:
+            return
+
+        if self.is_busy():
+            self._pending_confirmations.append((session, added, declined, failed))
+            return
+        session.record_task_confirmation(added=added, declined=declined, failed=failed)
+
+    def _flush_pending_confirmations(self) -> None:
+        """Write the task outcomes queued while the reply was streaming."""
+        pending, self._pending_confirmations = self._pending_confirmations, []
+        for session, added, declined, failed in pending:
+            session.record_task_confirmation(
+                added=added, declined=declined, failed=failed
+            )
 
     def _repair_session_after_turn(self, session) -> None:
         """Close a graph step the finished worker left pending (Stop, crash).
@@ -2126,29 +2169,33 @@ class ChatPanel(QWidget):
             )
 
     def _clear_proposals(self) -> None:
-        # Feed back "declined" for all pending proposals when clearing
-        session = self._get_session()
-        if session is not None:
-            for proposal in self._pending_proposals:
-                title = str(proposal.get("title") or "").strip()
-                category = str(proposal.get("category") or "none")
-                if title:
-                    session.inject_confirmation_result(title, category, False)
-            if self._current_proposal is not None:
-                title = str(self._current_proposal.get("title") or "").strip()
-                category = str(self._current_proposal.get("category") or "none")
-                if title:
-                    session.inject_confirmation_result(title, category, False)
+        """Drop queued proposals and record them as declined, in one note."""
+        queue = list(self._pending_proposals)
+        if self._current_proposal is not None:
+            queue.append(self._current_proposal)
+
+        declined: list[tuple[str, str]] = []
+        for proposal in queue:
+            title = str(proposal.get("title") or "").strip()
+            category = str(proposal.get("category") or "none")
+            if title:
+                declined.append((title, category))
+        self._record_task_confirmation(declined=declined)
 
         self._pending_proposals.clear()
         self._current_proposal = None
         self.confirm_bar.setVisible(False)
 
-    def _add_batch_tasks(self, tasks: list[dict]) -> None:
+    def _add_batch_tasks(
+        self,
+        tasks: list[dict],
+        declined: list[tuple[str, str]] | None = None,
+    ) -> None:
         """Add multiple tasks from batch proposal and re-prioritize."""
         from system_sl.core.priority_engine_new import run_prioritization
 
         added_tasks = []  # Track (title, category) for confirmation feedback
+        failed_tasks: list[tuple[str, str]] = []
         added = 0
         errors = []
         for task in tasks:
@@ -2163,8 +2210,10 @@ class ChatPanel(QWidget):
                 added_tasks.append((title, category))
             except ValueError as e:
                 errors.append(f"{title}: {e}")
+                failed_tasks.append((title, category))
             except OSError as e:
                 errors.append(f"{title}: could not save: {e}")
+                failed_tasks.append((title, category))
 
         if added > 0:
             # Re-prioritize after adding tasks
@@ -2177,11 +2226,13 @@ class ChatPanel(QWidget):
             self._show_after_turn(
                 self._append_confirmation, f"Added {added} task(s) from document."
             )
-            # Feed confirmation results back to the model for each added task
-            session = self._get_session()
-            if session is not None:
-                for title, category in added_tasks:
-                    session.inject_confirmation_result(title, category, True)
+        # One summarizing note for the whole batch: which were added, which
+        # were skipped in the dialog, and which failed (duplicates, save errors).
+        self._record_task_confirmation(
+            added=added_tasks,
+            declined=list(declined or []),
+            failed=failed_tasks,
+        )
         for err in errors:
             self._show_after_turn(self._append_alert, err)
 
@@ -2436,6 +2487,7 @@ class ChatPanel(QWidget):
         notes, self._notes_after_turn = self._notes_after_turn, []
         for append, text in notes:
             append(text)
+        self._flush_pending_confirmations()
         self.stop_button.setToolTip("Interrupt the reply")
         self._set_busy(False)
         self.input_box.setFocus()
