@@ -29,6 +29,7 @@ from system_sl.utils import (
 )
 
 from system_sl.chatbot.system_prompts import SYSTEM_MENTOR_PROMPT
+from system_sl.chatbot.agent_middleware import make_context_middleware
 from system_sl.chatbot.config import ChatConfig, load_config
 from system_sl.chatbot.llm_factory import create_llm_from_config, LLMFactoryError
 from system_sl.chatbot.memory import get_checkpointer
@@ -230,14 +231,13 @@ def propose_tasks_batch(tasks: list[dict]) -> Any:
 
 @tool
 def read_persona() -> Any:
-    """Read the user's personal archetype profile configuration."""
-    return load_data(get_tasks_file_path("persona.json"))
+    """Read the Player's persona: background, values and goals.
 
+    Returns a short summary, not the raw profile file.
+    """
+    from system_sl.chatbot.dynamic_context import summarize_persona
 
-@tool
-def read_user_info() -> Any:
-    """Read the legacy user goals and behavioral keywords profile file."""
-    return load_data(get_tasks_file_path("user_info.json"))
+    return summarize_persona(load_data(get_tasks_file_path("persona.json")))
 
 
 # Tool list for the system agent
@@ -250,7 +250,6 @@ SYSTEM_TOOLS = [
     get_random_task,
     propose_tasks_batch,
     read_persona,
-    read_user_info,
 ]
 
 
@@ -318,6 +317,7 @@ def build_agent_for_model(model_name: str):
         model=llm,
         tools=SYSTEM_TOOLS,
         system_prompt=SYSTEM_MENTOR_PROMPT,
+        middleware=[make_context_middleware()],
         checkpointer=get_checkpointer(),
     )
     return agent, llm
