@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -61,14 +62,10 @@ _MISSING_WALLUST_MESSAGE = (
     "Install wallust or set SYSTEM_SL_WALLUST; the built-in palette is being used."
 )
 
-_FAILED_EXTRACTION_MESSAGE = (
-    "Could not read colours from the wallpaper; the built-in palette is being used."
-)
 
 _memory_cache: Optional[dict] = None
 _warned_unavailable = False
 _warned_failure = False
-_last_error: Optional[str] = None
 
 
 # --------------------------------------------------------------------------
@@ -115,11 +112,6 @@ def wallust_available() -> bool:
 
 def missing_wallust_message() -> str:
     return _MISSING_WALLUST_MESSAGE
-
-
-def last_error() -> Optional[str]:
-    """Return the reason the last Dynamic extraction fell back, if it did."""
-    return _last_error
 
 
 def cache_dir() -> Path:
@@ -427,20 +419,36 @@ def _extract_palette(image_path: str) -> Optional[Dict[str, str]]:
     return None
 
 
-def generate_wallust_tokens(image_path: str, *, use_cache: bool = True) -> Dict[str, str]:
+@dataclass(frozen=True)
+class ExtractionResult:
+    """What one palette extraction produced.
+
+    ``tokens`` is None when it failed; ``error`` then says why, in words a
+    player can act on. ``cancelled`` marks a run stopped by shutdown, which
+    is not a failure worth reporting.
+    """
+
+    tokens: Optional[Dict[str, str]] = None
+    error: Optional[str] = None
+    cancelled: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.tokens is not None
+
+
+def extract_wallust_tokens(image_path: str, *, use_cache: bool = True) -> ExtractionResult:
     """Extract a palette from *image_path* and map it to ``sys_color_*`` tokens.
 
-    Always returns a complete token dictionary. When wallust is missing or the
-    image cannot be read, the built-in palette is returned.
+    Unlike :func:`generate_wallust_tokens` this never substitutes the built-in
+    palette: a failure comes back as a failure, so the caller can keep the
+    colours it has and try again later instead of treating navy as the
+    wallpaper's palette.
     """
-    global _last_error
-    _last_error = None
-
     resolved = resolve_wallpaper_path(image_path)
     if not resolved:
         LOG.debug("No readable wallpaper image at %r", image_path)
-        _last_error = _FAILED_EXTRACTION_MESSAGE
-        return dict(DEFAULT_TOKENS)
+        return ExtractionResult(error="Could not read the wallpaper image.")
 
     fingerprint = _file_fingerprint(resolved)
     if use_cache:
@@ -448,28 +456,38 @@ def generate_wallust_tokens(image_path: str, *, use_cache: bool = True) -> Dict[
         if cache and cache.get("fingerprint") == fingerprint:
             global _memory_cache
             _memory_cache = cache
-            return dict(cache["tokens"])
+            return ExtractionResult(tokens=dict(cache["tokens"]))
 
     palette = _extract_palette(resolved)
     if not palette and _cancelled.is_set():
-        # Shutting down: this is not a failure worth reporting.
-        return dict(DEFAULT_TOKENS)
+        return ExtractionResult(cancelled=True)
     if not palette:
         global _warned_failure
-        _last_error = (
-            _FAILED_EXTRACTION_MESSAGE if find_wallust() else _MISSING_WALLUST_MESSAGE
-        )
+        have_wallust = bool(find_wallust())
         if not _warned_failure:
             _warned_failure = True
-            LOG.warning(
-                "Could not extract colours from %s; using the built-in palette.",
-                resolved,
+            LOG.warning("Could not extract colours from %s.", resolved)
+        return ExtractionResult(
+            error=(
+                "Could not read colours from the wallpaper."
+                if have_wallust
+                else "wallust was not found."
             )
-        return dict(DEFAULT_TOKENS)
+        )
 
     tokens = palette_to_tokens(palette)
     _write_cache(fingerprint, resolved, tokens)
-    return tokens
+    return ExtractionResult(tokens=tokens)
+
+
+def generate_wallust_tokens(image_path: str, *, use_cache: bool = True) -> Dict[str, str]:
+    """Like :func:`extract_wallust_tokens`, but always returns a full palette.
+
+    Falls back to the built-in palette on failure, for callers (such as the
+    bundle self-check) that need some palette and compare against the default.
+    """
+    result = extract_wallust_tokens(image_path, use_cache=use_cache)
+    return dict(result.tokens) if result.ok else dict(DEFAULT_TOKENS)
 
 
 # --------------------------------------------------------------------------

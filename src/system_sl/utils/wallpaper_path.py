@@ -62,7 +62,11 @@ def _state(source: str, candidate: Optional[str], extra: str = "", error: Option
         )
     return WallpaperState(
         source=source,
-        error=error or (f"No wallpaper image found for {source}." if not candidate else candidate),
+        error=error or (
+            f"No wallpaper image found for {source}."
+            if not candidate
+            else f"The wallpaper {candidate} could not be opened."
+        ),
     )
 
 
