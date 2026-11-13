@@ -21,6 +21,9 @@ ARTICLES_FILENAME = "intel_articles.json"
 BRIEFINGS_FILENAME = "intel_briefings.json"
 FEEDBACK_FILENAME = "intel_feedback.json"
 SUMMARIES_FILENAME = "intel_summaries.json"
+SOURCES_FILENAME = "intel_sources.json"
+SOURCE_STATE_FILENAME = "intel_source_state.json"
+CONTENT_FILENAME = "intel_content.json"
 
 DEFAULT_CONFIG: dict = {
     "version": 1,
@@ -29,9 +32,14 @@ DEFAULT_CONFIG: dict = {
     "disabled_sources": [],
     "max_articles": 9,
     "fetch_interval_hours": 6,
+    "extract_full_articles": True,
+    "max_extractions_per_run": 6,
+    "story_clustering": True,
     "last_fetch": None,
     "last_updated": None,
 }
+
+MAX_CONTENT_ENTRIES = 300
 
 DEFAULT_FEEDBACK: dict = {
     "version": 1,
@@ -70,6 +78,9 @@ class IntelStore:
         self.briefings_path = self.data_dir / BRIEFINGS_FILENAME
         self.feedback_path = self.data_dir / FEEDBACK_FILENAME
         self.summaries_path = self.data_dir / SUMMARIES_FILENAME
+        self.sources_path = self.data_dir / SOURCES_FILENAME
+        self.source_state_path = self.data_dir / SOURCE_STATE_FILENAME
+        self.content_path = self.data_dir / CONTENT_FILENAME
 
     # ------------------------------------------------------------------
     # Low-level JSON helpers
@@ -140,6 +151,14 @@ class IntelStore:
             config["fetch_interval_hours"] = max(1, min(72, int(config.get("fetch_interval_hours", 6))))
         except (TypeError, ValueError):
             config["fetch_interval_hours"] = 6
+        try:
+            config["max_extractions_per_run"] = max(
+                0, min(12, int(config.get("max_extractions_per_run", 6)))
+            )
+        except (TypeError, ValueError):
+            config["max_extractions_per_run"] = 6
+        config["extract_full_articles"] = config.get("extract_full_articles") is not False
+        config["story_clustering"] = config.get("story_clustering") is not False
 
         for key in ("last_fetch", "last_updated"):
             if config.get(key) is not None and not isinstance(config.get(key), str):
@@ -151,6 +170,89 @@ class IntelStore:
         if isinstance(config, dict):
             merged.update({key: value for key, value in config.items() if key in DEFAULT_CONFIG})
         return self._save(self.config_path, merged)
+
+    # ------------------------------------------------------------------
+    # Source registry and per-source state
+    # ------------------------------------------------------------------
+
+    def load_source_definitions(self) -> dict:
+        raw = self._load(
+            self.sources_path,
+            {"version": 2, "removed_defaults": [], "sources": []},
+        )
+        if not isinstance(raw, dict):
+            return {"version": 2, "removed_defaults": [], "sources": []}
+        sources = raw.get("sources")
+        removed = raw.get("removed_defaults")
+        return {
+            "version": 2,
+            "removed_defaults": [str(item) for item in removed] if isinstance(removed, list) else [],
+            "sources": [item for item in sources if isinstance(item, dict)] if isinstance(sources, list) else [],
+        }
+
+    def save_source_definitions(self, definitions: dict) -> bool:
+        payload = definitions if isinstance(definitions, dict) else {}
+        sources = payload.get("sources")
+        removed = payload.get("removed_defaults")
+        return self._save(
+            self.sources_path,
+            {
+                "version": 2,
+                "updated_at": _utc_now(),
+                "removed_defaults": sorted({str(item) for item in removed}) if isinstance(removed, list) else [],
+                "sources": [item for item in sources if isinstance(item, dict)] if isinstance(sources, list) else [],
+            },
+        )
+
+    def load_source_state(self) -> dict:
+        raw = self._load(self.source_state_path, {"version": 1, "sources": {}})
+        if isinstance(raw, dict) and isinstance(raw.get("sources"), dict):
+            return raw["sources"]
+        return {}
+
+    def save_source_state(self, state: dict) -> bool:
+        return self._save(
+            self.source_state_path,
+            {
+                "version": 1,
+                "updated_at": _utc_now(),
+                "sources": state if isinstance(state, dict) else {},
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Extracted article content cache
+    # ------------------------------------------------------------------
+
+    def load_content_cache(self) -> dict:
+        raw = self._load(self.content_path, {"version": 1, "articles": {}})
+        if isinstance(raw, dict) and isinstance(raw.get("articles"), dict):
+            return raw["articles"]
+        return {}
+
+    def get_content(self, article_id: str) -> Optional[dict]:
+        entry = self.load_content_cache().get(article_id)
+        return entry if isinstance(entry, dict) else None
+
+    def save_content(self, article_id: str, entry: dict) -> bool:
+        if not article_id or not isinstance(entry, dict):
+            return False
+        content = self.load_content_cache()
+        content[article_id] = entry
+        if len(content) > MAX_CONTENT_ENTRIES:
+            ordered = sorted(
+                content.items(),
+                key=lambda item: str(item[1].get("fetched_at") or ""),
+            )
+            for old_id, _ in ordered[: len(content) - MAX_CONTENT_ENTRIES]:
+                content.pop(old_id, None)
+        return self._save(
+            self.content_path,
+            {"version": 1, "updated_at": _utc_now(), "articles": content},
+        )
+
+    def clear_content(self) -> bool:
+        return self._save(self.content_path, {"version": 1, "articles": {}})
 
     # ------------------------------------------------------------------
     # Articles

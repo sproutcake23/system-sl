@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -22,12 +23,19 @@ from system_sl.intel.topics import classify, strip_html, tokenize
 USER_AGENT = "System-SL-DailyIntel/1.0 (+https://github.com/sproutcake23/System-SL)"
 MAX_ARTICLES_PER_FEED = 30
 MAX_DESCRIPTION_CHARS = 2000
+MAX_FEED_BYTES = 2 * 1024 * 1024
 TRACKING_PARAM_PREFIXES = ("utm_", "ref", "source", "campaign", "fbclid", "gclid", "mc_cid", "mc_eid")
+SOURCE_TYPES = ("rss", "atom", "api")
 
 
 @dataclass(frozen=True)
 class NewsSource:
-    """A feed the player can enable or disable."""
+    """A feed the player can enable or disable.
+
+    ``reliability`` is publisher credibility (a stable classification), not a
+    measure of whether the feed answered recently. Technical availability lives
+    in :mod:`system_sl.intel.health` so the two never get confused.
+    """
 
     id: str
     name: str
@@ -37,6 +45,9 @@ class NewsSource:
     reliability: int
     enabled: bool = True
     official: bool = False
+    source_type: str = "rss"
+    interval_minutes: int | None = None
+    extract: bool = True
 
     def as_dict(self) -> dict:
         return {
@@ -48,7 +59,31 @@ class NewsSource:
             "reliability": self.reliability,
             "enabled": self.enabled,
             "official": self.official,
+            "type": self.source_type,
+            "interval_minutes": self.interval_minutes,
+            "extract": self.extract,
         }
+
+
+@dataclass
+class SourceFetchOutcome:
+    """The result of one conditional request to one source."""
+
+    source_id: str
+    source_name: str
+    status: str  # "ok" | "not_modified" | "failed" | "rate_limited"
+    articles: list[dict] = field(default_factory=list)
+    http_status: int | None = None
+    error: str = ""
+    etag: str | None = None
+    last_modified: str | None = None
+    response_ms: float = 0.0
+    retry_after_seconds: float | None = None
+    cache_max_age_seconds: float | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status in ("ok", "not_modified")
 
 
 # Reliability is a quality signal, not a claim of objectivity. Official
@@ -81,6 +116,8 @@ class FetchResult:
     errors: list[str] = field(default_factory=list)
     attempted: int = 0
     succeeded: int = 0
+    not_modified: int = 0
+    outcomes: list[SourceFetchOutcome] = field(default_factory=list)
 
     @property
     def failed(self) -> int:
@@ -291,29 +328,200 @@ def parse_feed(payload: object, source: NewsSource, *, now: Optional[datetime] =
     return articles
 
 
-def fetch_source(source: NewsSource, *, timeout: float = 10.0, session=None) -> list[dict]:
-    """Fetch and parse one source. Raises on transport or parse failure."""
-    import requests
+def _header(response: object, name: str) -> str:
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return ""
+    try:
+        value = headers.get(name)
+    except Exception:
+        return ""
+    return str(value) if value is not None else ""
 
-    getter = session.get if session is not None else requests.get
-    response = getter(
-        source.url,
-        timeout=timeout,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
-        },
-    )
-    status = getattr(response, "status_code", 200)
+
+def parse_retry_after(value: object) -> float | None:
+    """Translate a Retry-After header (seconds or HTTP date) into seconds."""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        parsed = parsedate_to_datetime(raw)
+        if parsed is None:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        delta = (parsed - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, delta)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def parse_cache_max_age(value: object) -> float | None:
+    """Read a Cache-Control max-age value, if the response supplies one."""
+    if value is None:
+        return None
+    raw = str(value).lower()
+    if "no-store" in raw or "no-cache" in raw:
+        return 0.0
+    match = re.search(r"(?:s-maxage|max-age)\s*=\s*(\d+)", raw)
+    if not match:
+        return None
+    try:
+        seconds = float(match.group(1))
+    except ValueError:
+        return None
+    return max(0.0, min(seconds, 24 * 60 * 60))
+
+
+def fetch_source(
+    source: NewsSource,
+    *,
+    timeout: float = 10.0,
+    session=None,
+    etag: str | None = None,
+    last_modified: str | None = None,
+) -> SourceFetchOutcome:
+    """Conditionally fetch and parse one source.
+
+    Transport errors, rate limits and malformed feeds are returned as an
+    outcome instead of raising, so one source can never stop the others.
+    """
+    if source.source_type not in ("rss", "atom", "feed"):
+        return SourceFetchOutcome(
+            source.id,
+            source.name,
+            "failed",
+            error=f"{source.source_type} sources are not supported yet",
+        )
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+    }
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+
+    started = time.monotonic()
+    try:
+        import requests
+
+        getter = session.get if session is not None else requests.get
+        response = getter(source.url, timeout=timeout, headers=headers)
+    except Exception as exc:  # noqa: BLE001 - a failed feed is a normal state
+        return SourceFetchOutcome(
+            source.id,
+            source.name,
+            "failed",
+            error=f"{type(exc).__name__}: {exc}",
+            response_ms=(time.monotonic() - started) * 1000.0,
+        )
+
+    elapsed = (time.monotonic() - started) * 1000.0
+    try:
+        status = int(getattr(response, "status_code", 200) or 200)
+    except (TypeError, ValueError):
+        status = 0
+
+    if status == 304:
+        return SourceFetchOutcome(
+            source.id,
+            source.name,
+            "not_modified",
+            http_status=304,
+            etag=_header(response, "ETag") or etag,
+            last_modified=_header(response, "Last-Modified") or last_modified,
+            response_ms=elapsed,
+            cache_max_age_seconds=parse_cache_max_age(_header(response, "Cache-Control")),
+        )
+
+    retry_after = parse_retry_after(_header(response, "Retry-After"))
+    if status == 429:
+        return SourceFetchOutcome(
+            source.id,
+            source.name,
+            "rate_limited",
+            http_status=status,
+            error="HTTP 429 (rate limited)",
+            etag=etag,
+            last_modified=last_modified,
+            response_ms=elapsed,
+            retry_after_seconds=retry_after,
+        )
+    if status in (401, 402, 403, 451):
+        return SourceFetchOutcome(
+            source.id,
+            source.name,
+            "failed",
+            http_status=status,
+            error=f"access restricted (HTTP {status})",
+            etag=etag,
+            last_modified=last_modified,
+            response_ms=elapsed,
+        )
     if status >= 400:
-        raise RuntimeError(f"HTTP {status}")
+        return SourceFetchOutcome(
+            source.id,
+            source.name,
+            "failed",
+            http_status=status,
+            error=f"HTTP {status}",
+            etag=etag,
+            last_modified=last_modified,
+            response_ms=elapsed,
+            retry_after_seconds=retry_after,
+        )
+
     content = getattr(response, "content", None)
     if content is None:
         content = getattr(response, "text", "")
+    if not isinstance(content, (bytes, str)):
+        content = ""
+    size = len(content.encode("utf-8", errors="replace")) if isinstance(content, str) else len(content)
+    if size > MAX_FEED_BYTES:
+        return SourceFetchOutcome(
+            source.id,
+            source.name,
+            "failed",
+            http_status=status,
+            error="feed response too large",
+            etag=etag,
+            last_modified=last_modified,
+            response_ms=elapsed,
+        )
+
     articles = parse_feed(content, source)
     if not articles:
-        raise ValueError("feed contained no usable articles")
-    return articles
+        return SourceFetchOutcome(
+            source.id,
+            source.name,
+            "failed",
+            http_status=status,
+            error="feed contained no usable articles",
+            etag=etag,
+            last_modified=last_modified,
+            response_ms=elapsed,
+        )
+    return SourceFetchOutcome(
+        source.id,
+        source.name,
+        "ok",
+        articles=articles,
+        http_status=status,
+        etag=_header(response, "ETag") or etag,
+        last_modified=_header(response, "Last-Modified") or last_modified,
+        response_ms=elapsed,
+        cache_max_age_seconds=parse_cache_max_age(_header(response, "Cache-Control")),
+    )
 
 
 def fetch_all(
@@ -323,32 +531,62 @@ def fetch_all(
     session=None,
     now: Optional[datetime] = None,
     max_workers: int = 6,
+    state: Optional[dict] = None,
 ) -> FetchResult:
-    """Fetch every source in parallel, keeping failures local to their feed."""
+    """Fetch every source in parallel, keeping failures local to their feed.
+
+    ``state`` maps source id to ``{"etag": ..., "last_modified": ...}`` so
+    unchanged feeds can answer ``304 Not Modified`` instead of resending the
+    whole document.
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     feed_list = list(sources)
+    validators = state if isinstance(state, dict) else {}
     result = FetchResult(attempted=len(feed_list))
     if not feed_list:
         return result
 
     with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(feed_list)))) as pool:
-        futures = {
-            pool.submit(fetch_source, source, timeout=timeout, session=session): source
-            for source in feed_list
-        }
+        futures = {}
+        for source in feed_list:
+            validators_for_source = validators.get(source.id)
+            if not isinstance(validators_for_source, dict):
+                validators_for_source = {}
+            futures[
+                pool.submit(
+                    fetch_source,
+                    source,
+                    timeout=timeout,
+                    session=session,
+                    etag=validators_for_source.get("etag"),
+                    last_modified=validators_for_source.get("last_modified"),
+                )
+            ] = source
+
         for future in as_completed(futures):
             source = futures[future]
             try:
-                articles = future.result()
+                outcome = future.result()
             except Exception as exc:  # noqa: BLE001 - one feed must not break the rest
-                result.errors.append(f"{source.name}: {exc}")
-                continue
-            if now is not None:
-                for article in articles:
-                    article["fetched_at"] = now.astimezone(timezone.utc).isoformat()
-            result.articles.extend(articles)
-            result.succeeded += 1
+                outcome = SourceFetchOutcome(
+                    source.id,
+                    source.name,
+                    "failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            result.outcomes.append(outcome)
+            if outcome.status == "ok":
+                if now is not None:
+                    for article in outcome.articles:
+                        article["fetched_at"] = now.astimezone(timezone.utc).isoformat()
+                result.articles.extend(outcome.articles)
+                result.succeeded += 1
+            elif outcome.status == "not_modified":
+                result.not_modified += 1
+                result.succeeded += 1
+            else:
+                result.errors.append(f"{source.name}: {outcome.error or 'unavailable'}")
     return result
 
 

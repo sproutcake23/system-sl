@@ -62,20 +62,117 @@ def make_article(
     *,
     hours_old: float = 2,
     reliability: int = SOURCE.reliability,
+    source_id: str | None = None,
+    source_name: str | None = None,
+    url: str | None = None,
+    content_status: str | None = None,
 ) -> dict:
     published = NOW - timedelta(hours=hours_old)
-    return {
+    article = {
         "id": identifier,
         "title": title,
-        "url": f"https://example.com/{identifier}",
+        "url": url or f"https://example.com/{identifier}",
         "description": description,
-        "source_id": SOURCE.id,
-        "source_name": SOURCE.name,
+        "source_id": source_id or SOURCE.id,
+        "source_name": source_name or SOURCE.name,
         "category": category,
         "reliability": reliability,
         "published_at": published.isoformat(),
         "fetched_at": NOW.isoformat(),
     }
+    if content_status:
+        article["content_status"] = content_status
+    return article
+
+
+class FakeResponse:
+    """Minimal stand-in for a ``requests`` response."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        content: bytes | str = b"",
+        headers: dict | None = None,
+        text: str | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = dict(headers or {})
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        self.content = content
+        self.text = text if text is not None else content.decode("utf-8", errors="replace")
+        self.closed = False
+
+    def iter_content(self, chunk_size: int = 65536):
+        for start in range(0, len(self.content), max(1, chunk_size)):
+            yield self.content[start : start + chunk_size]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeSession:
+    """URL-routed fake for feed, robots.txt and article requests."""
+
+    def __init__(self, routes: dict | None = None) -> None:
+        self.routes = dict(routes or {})
+        self.calls: list[dict] = []
+
+    def get(self, url: str, **kwargs):
+        self.calls.append({"url": url, **kwargs})
+        route = self.routes.get(url)
+        if route is None:
+            raise ConnectionError(f"no route for {url}")
+        if isinstance(route, Exception):
+            raise route
+        if callable(route):
+            return route(url, **kwargs)
+        return route
+
+
+class AllowAllRobots:
+    def allowed(self, url: str) -> bool:
+        return True
+
+
+class BlockAllRobots:
+    def allowed(self, url: str) -> bool:
+        return False
+
+
+class FakeContentExtractor:
+    """Stand-in ContentExtractor used by briefing tests."""
+
+    def __init__(self, entries: dict | None = None, *, needs: bool = True) -> None:
+        self.entries = dict(entries or {})
+        self.needs = needs
+        self.fetched: list[str] = []
+
+    def cached(self, article_id: str):
+        entry = self.entries.get(article_id)
+        return entry if isinstance(entry, dict) and entry.get("status") == "full" else None
+
+    def should_fetch(self, article, *, source=None):
+        return self.needs and bool(article.get("id"))
+
+    def status_for(self, article):
+        return self.entries.get(str(article.get("id"))) or {
+            "status": "excerpt",
+            "reason": "feed excerpt only",
+        }
+
+    def fetch(self, article, *, source=None):
+        article_id = str(article.get("id"))
+        self.fetched.append(article_id)
+        entry = self.entries.get(article_id) or {
+            "status": "full",
+            "text": "Full article body. " * 40,
+            "fetched_at": NOW.isoformat(),
+        }
+        self.entries[article_id] = entry
+        return entry
+
 
 
 def default_articles() -> list[dict]:
