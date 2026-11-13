@@ -1,7 +1,6 @@
 """Module for managing the background service orchestration engine."""
 
 import logging
-import sys
 
 from PySide6.QtCore import QLockFile, QObject, QThread, QTimer, Signal
 from system_sl.utils import SystemNotification
@@ -98,12 +97,11 @@ class BackgroundServiceController(QObject):
             return  # stopped mid-pass: the result is no longer wanted
         # A --bg process has no window to explain a damaged file, but silently
         # dropping it hides why the task list looks empty. Record it in the log
-        # (and stderr) before the reminder itself.
+        # before the reminder itself.
         issues = pop_issues()
         if issues:
             summary = combine_messages(issues)
             log.warning("Data file problems: %s", summary)
-            print(f"Data file problems: {summary}", file=sys.stderr)
         if len(titles) > 0:
             self.view.display_message(titles)
 

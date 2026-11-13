@@ -22,7 +22,6 @@ from system_sl.core.tasks import load_completed_tasks
 from system_sl.utils import get_tasks_file_path
 
 log = logging.getLogger(__name__)
-log = logging.getLogger(__name__)
 
 
 class Setup:
