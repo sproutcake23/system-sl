@@ -55,6 +55,7 @@ from system_sl.frontend.gui.data_issue_reporter import (
 from system_sl.utils.data_health import DataIssue, record_issue
 from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.worker_threads import new_worker_thread
+from system_sl.utils.i18n import tr
 
 
 # GUI-added tasks no longer carry a user-chosen category — the model assigns one
@@ -474,14 +475,14 @@ class TasksWindow(QWidget):
         current_deadline = task.get("deadline")
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Edit Task")
+        dialog.setWindowTitle(tr("Edit Task"))
         dialog.setModal(True)
         form = QFormLayout(dialog)
 
         title_edit = QLineEdit(title)
-        form.addRow("Title:", title_edit)
+        form.addRow(tr("Title:"), title_edit)
 
-        deadline_check = QCheckBox("Set deadline:")
+        deadline_check = QCheckBox(tr("Set deadline:"))
         deadline_edit = QDateEdit()
         deadline_edit.setCalendarPopup(True)
         deadline_edit.setDisplayFormat("yyyy-MM-dd")
@@ -515,7 +516,7 @@ class TasksWindow(QWidget):
             else None
         )
         if not new_title:
-            self._set_status("Title is required.")
+            self._set_status(tr("Title is required."))
             return
         try:
             edit_task(task_id=task_id, old_title=title, new_title=new_title,
@@ -535,7 +536,7 @@ class TasksWindow(QWidget):
             else None
         )
         if not title:
-            self._set_status("Title is required.")
+            self._set_status(tr("Title is required."))
             return
         try:
             # Category is assigned by the model later; default for now.

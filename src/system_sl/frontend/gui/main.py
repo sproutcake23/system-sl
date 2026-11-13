@@ -52,6 +52,7 @@ from system_sl.utils.notification_settings import (
     load_notifications_enabled,
     save_notifications_enabled,
 )
+from system_sl.utils.i18n import tr
 from system_sl.utils.auto_updater import (
     UpdateCheckThread,
     apply_pending_update,
@@ -341,7 +342,7 @@ class MainWindow(QMainWindow):
         self.about_button.setIcon(get_icon("info"))
         self.about_button.clicked.connect(self.show_about_dialog)
 
-        self.reset_settings_btn = QPushButton("Reset Settings")
+        self.reset_settings_btn = QPushButton(tr("Reset Settings"))
         self.reset_settings_btn.setIcon(get_icon("refresh"))
         self.reset_settings_btn.clicked.connect(self._reset_all_settings)
 
@@ -388,10 +389,12 @@ class MainWindow(QMainWindow):
         """Clear QSettings, JSON settings and stored secrets, after asking."""
         answer = QMessageBox.question(
             self,
-            "Reset all settings?",
-            "This clears the app's settings, chat configuration and stored "
-            "API keys, and forgets the notification sound. Tasks and chat "
-            "history are not deleted. Continue?",
+            tr("Reset all settings?"),
+            tr(
+                "This clears the app's settings, chat configuration and stored "
+                "API keys, and forgets the notification sound. Tasks and chat "
+                "history are not deleted. Continue?"
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -424,9 +427,11 @@ class MainWindow(QMainWindow):
         self.google_sync_toggle.setChecked(False)
         QMessageBox.information(
             self,
-            "Settings reset",
-            "Settings are back to their defaults. Restart the app to apply "
-            "the theme and chat provider changes.",
+            tr("Settings reset"),
+            tr(
+                "Settings are back to their defaults. Restart the app to apply "
+                "the theme and chat provider changes."
+            ),
         )
 
     def open_settings(self, tab: int = AppSettingsDialog.GENERAL_TAB) -> None:

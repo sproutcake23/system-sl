@@ -51,6 +51,7 @@ from PySide6.QtGui import (
 from system_sl.core import add_tasks, load_tasks
 from system_sl.frontend.gui.theme import get_current_theme_tokens
 from system_sl.frontend.gui.icons import get_icon
+from system_sl.utils.i18n import tr
 
 # Lazy-loaded chatbot imports (moved to functions to avoid startup cost)
 # from system_sl.chatbot import ...
@@ -3425,10 +3426,10 @@ class ChatPanel(QWidget):
                 "their text is not resent."
             )
         self.edit_label.setText(
-            "Editing an earlier message — sending replaces it"
-            + (f" and the {later} message(s) after it." if later else ".")
+            tr("Editing an earlier message — sending replaces it")
+            + (tr(f" and the {later} message(s) after it.") if later else ".")
             + note
-            + " Esc to cancel."
+            + tr(" Esc to cancel.")
         )
         self.edit_bar.setVisible(True)
         self.input_box.setFocus()

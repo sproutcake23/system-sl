@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from system_sl.utils.audio_manager import play_sound, get_current_sound
 from system_sl.frontend.gui.theme import get_current_theme_tokens
+from system_sl.utils.i18n import tr
 
 
 _TOAST_WIDTH = 360
@@ -54,7 +55,7 @@ class SystemNotification(QWidget):
         self.container_layout.setSpacing(6)
 
         header_layout = QVBoxLayout()
-        self.header_text = QLabel("THE SYSTEM")
+        self.header_text = QLabel(tr("THE SYSTEM"))
         self.header_text.setObjectName("headerText")
         header_layout.addWidget(self.header_text)
         self.container_layout.addLayout(header_layout)
