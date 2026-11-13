@@ -11,7 +11,7 @@ import re
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).parent
 IS_WINDOWS = os.name == "nt"
@@ -66,6 +66,10 @@ def windows_ocr_files():
 datas = [(str(ROOT / "src/system_sl/assets"), "assets")]
 binaries = []
 hiddenimports = ["pytesseract", "pdf2image", "pdf2image.pdf2image"]
+# system_sl.utils and system_sl.core load their exports lazily through
+# importlib, which PyInstaller's import scanner cannot follow. Bundle every
+# system_sl module so those lookups don't fail only in the frozen app.
+hiddenimports += collect_submodules("system_sl")
 
 
 def wallust_binary():
