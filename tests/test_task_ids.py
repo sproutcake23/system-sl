@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 import system_sl.core.tasks as tasks
 
 
@@ -71,9 +73,62 @@ def test_manual_order_uses_ids_and_notifications_resolve_titles(tmp_path, monkey
 def test_google_sync_deduplicates_by_source_id(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     tasks.add_tasks("task", "Remote task", source_id="google-1")
-    tasks.add_tasks("task", "Remote task renamed", source_id="google-1", deadline="2026-12-01")
+    # A re-sync updates the deadline but reports a duplicate, so the sync
+    # counts it as skipped instead of "imported" on every run.
+    with pytest.raises(ValueError):
+        tasks.add_tasks("task", "Remote task renamed", source_id="google-1", deadline="2026-12-01")
 
     loaded = tasks.load_tasks()
     assert len(loaded) == 1
     assert loaded[0]["source_id"] == "google-1"
     assert loaded[0]["deadline"] == "2026-12-01"
+
+
+def test_title_unescape_runs_once(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    tasks.save_tasks([{"title": "AT&amp;amp;T", "category": "study"}])
+    assert tasks.load_tasks()[0]["title"] == "AT&amp;T"
+    # Now a literal title with an id: further loads must not touch it.
+    assert tasks.load_tasks()[0]["title"] == "AT&amp;T"
+    tasks.add_tasks("study", "Style &lt;div&gt;")
+    assert [t["title"] for t in tasks.load_tasks()] == ["AT&amp;T", "Style &lt;div&gt;"]
+
+
+def test_migration_carries_titles_into_order_and_completed_files(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "task_order.json").write_text(json.dumps({"order": ["AT&amp;T"]}))
+    (tmp_path / "completed_tasks.json").write_text(
+        json.dumps([{"title": "Q&amp;A", "category": "study", "completed_at": "2026-01-01"}])
+    )
+    tasks.save_tasks([{"title": "AT&amp;T", "category": "study"}])
+
+    tasks.load_tasks()
+    order = json.loads((tmp_path / "task_order.json").read_text())["order"]
+    assert order == ["AT&T"]
+    assert tasks.load_completed_tasks()[0]["title"] == "Q&A"
+    # A second migration pass (a new id-less task) leaves them alone.
+    current = tasks.load_tasks()
+    current.append({"title": "Hand added"})
+    tasks.save_tasks(current)
+    tasks.load_tasks()
+    assert tasks.load_completed_tasks()[0]["title"] == "Q&A"
+
+
+def test_resync_backfills_source_id_on_old_synced_task(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    tasks.add_tasks("task", "Remote task")  # synced before source ids existed
+    with pytest.raises(ValueError):
+        tasks.add_tasks("task", "Remote task", source_id="google-1")
+    assert tasks.load_tasks()[0]["source_id"] == "google-1"
+
+
+def test_edit_keeps_or_clears_deadline(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    tasks.add_tasks("study", "Synced", deadline="2026-12-01 09:30")
+    task_id = tasks.load_tasks()[0]["id"]
+
+    tasks.edit_task(None, "Synced (typo fixed)", task_id=task_id)
+    assert tasks.load_tasks()[0]["deadline"] == "2026-12-01 09:30"
+
+    tasks.edit_task(None, "Synced (typo fixed)", new_deadline="", task_id=task_id)
+    assert tasks.load_tasks()[0]["deadline"] is None

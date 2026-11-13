@@ -38,26 +38,64 @@ def _new_task_id() -> str:
     return uuid.uuid4().hex
 
 
+def _needs_migration(tasks: list) -> bool:
+    return any(isinstance(t, dict) and not t.get("id") for t in tasks)
+
+
 def _migrate_tasks(tasks: list) -> bool:
-    """Give every task an id and undo old HTML escaping. Returns True if changed."""
+    """Give every task an id and undo old HTML escaping. Returns True if changed.
+
+    Tasks stored before ids existed were also stored HTML-escaped, so a task
+    without an id is the marker for "unescape this title once". Tasks that
+    already have an id hold their literal title ("Fix &amp; bug" stays as
+    typed) and are never unescaped again.
+    """
     changed = False
+    renamed: dict[str, str] = {}
     for task in tasks:
         if not isinstance(task, dict):
             continue
         if not task.get("id"):
             task["id"] = _new_task_id()
             changed = True
-        title = task.get("title")
-        if isinstance(title, str):
-            unescaped = html.unescape(title)
-            if unescaped != title:
-                task["title"] = unescaped
-                changed = True
+            title = task.get("title")
+            if isinstance(title, str):
+                unescaped = html.unescape(title)
+                if unescaped != title:
+                    task["title"] = unescaped
+                    renamed[title] = unescaped
         # Google-sourced tasks carry the remote id; keep the name stable.
         if task.get("source_id") and not isinstance(task.get("source_id"), str):
             task["source_id"] = str(task["source_id"])
             changed = True
+    if changed:
+        _migrate_side_files(renamed)
     return changed
+
+
+def _migrate_side_files(renamed: dict[str, str]) -> None:
+    """Carry the one-time title unescape into the order and completed files."""
+    if renamed:
+        order_data = load_data(TASK_ORDER_FILE_PATH)
+        if isinstance(order_data, dict) and isinstance(order_data.get("order"), list):
+            order = [renamed.get(e, e) if isinstance(e, str) else e
+                     for e in order_data["order"]]
+            if order != order_data["order"]:
+                save_data(TASK_ORDER_FILE_PATH, {"order": order})
+
+    completed = load_data(COMPLETED_TASKS_FILE_PATH)
+    if isinstance(completed, list):
+        changed = False
+        for entry in completed:
+            # Entries written since ids exist carry the id and a literal title.
+            if isinstance(entry, dict) and not entry.get("id") and not entry.get("literal_title"):
+                title = entry.get("title")
+                if isinstance(title, str):
+                    entry["title"] = html.unescape(title)
+                entry["literal_title"] = True
+                changed = True
+        if changed:
+            save_completed_tasks(completed)
 
 
 def load_tasks():
@@ -82,41 +120,50 @@ def load_tasks():
     if not isinstance(raw, dict):
         # Already a list (current format) or unexpected type
         if isinstance(raw, list):
-            if _migrate_tasks(raw):
-                save_tasks(raw)
+            if _needs_migration(raw):
+                # Migrate under the shared lock and from a fresh read, so the
+                # GUI and the --bg notifier can't assign different ids to the
+                # same task. The lock is reentrant for callers that hold it.
+                with file_lock(TASKS_LOCK_PATH):
+                    fresh = load_data_result(TASKS_FILE_PATH).data
+                    if isinstance(fresh, list):
+                        raw = fresh
+                        if _migrate_tasks(raw):
+                            save_tasks(raw)
             return raw
         return []
 
     # Legacy dict format: {"category": [tasks...]} — migrate to flat list
-    new_data = []
-    migrated = False
-    for category, task_list in raw.items():
-        if not isinstance(task_list, list):
-            continue
-        for task in task_list:
-            if isinstance(task, str):
-                new_data.append(
-                    {
-                        "id": _new_task_id(),
-                        "title": task,
-                        "created_at": datetime.now().isoformat(),
-                        "deadline": None,
-                        "category": category,
-                    }
-                )
-                migrated = True
-            elif isinstance(task, dict):
-                new_data.append(task)
+    with file_lock(TASKS_LOCK_PATH):
+        fresh = load_data_result(TASKS_FILE_PATH).data
+        if isinstance(fresh, list):
+            # Another process converted it meanwhile.
+            return load_tasks()
+        if isinstance(fresh, dict):
+            raw = fresh
+        new_data = []
+        for category, task_list in raw.items():
+            if not isinstance(task_list, list):
+                continue
+            for task in task_list:
+                if isinstance(task, str):
+                    new_data.append(
+                        {
+                            "title": task,
+                            "created_at": datetime.now().isoformat(),
+                            "deadline": None,
+                            "category": category,
+                        }
+                    )
+                elif isinstance(task, dict):
+                    new_data.append(task)
 
-    if migrated or new_data:
         # A dict is always the legacy format; persist the flat-list conversion.
         # (safe_load_json returns None for corruption, so reaching here with a
         # dict means the file really was a legacy dict, not a broken read.)
-        save_tasks(new_data)
-
-    _migrate_tasks(new_data)
-    if new_data:
-        save_tasks(new_data)
+        _migrate_tasks(new_data)
+        if new_data:
+            save_tasks(new_data)
     return new_data
 
 
@@ -180,10 +227,16 @@ def add_tasks(
                     existing["deadline"] = deadline
                     save_tasks(tasks)
                     log.info(f"Updated deadline for '{task_title}' to {deadline}")
-                return task_title
+                # Already imported: the sync counts this as skipped, not new.
+                raise ValueError(f"Task '{task_title}' already exists")
 
         for task in tasks:
             if task.get("title") == task_title:
+                if source_id and not task.get("source_id"):
+                    # A task synced before source ids were stored: remember
+                    # the remote id so a later local rename doesn't duplicate.
+                    task["source_id"] = str(source_id)
+                    save_tasks(tasks)
                 if deadline and task.get("deadline") != deadline:
                     task["deadline"] = deadline
                     save_tasks(tasks)
@@ -393,6 +446,7 @@ def edit_task(
 ) -> str:
     """Edit a task by stable id (preferred) or by title.
 
+    ``new_deadline=None`` leaves the deadline unchanged and ``""`` clears it.
     ``new_category=None`` means "leave the category unchanged"; passing a
     category replaces it. This distinction matters because the edit dialog
     used to send ``None`` for an untouched field and wiped the category.
@@ -422,7 +476,8 @@ def edit_task(
 
         task["title"] = new_title
         if new_deadline is not None:
-            task["deadline"] = new_deadline
+            # "" clears the deadline; None (the default) leaves it unchanged.
+            task["deadline"] = new_deadline or None
         if new_category is not None:
             task["category"] = (
                 new_category.lower().strip()
@@ -478,6 +533,9 @@ def mark_task_completed(
         }
         if real_id:
             completion_entry["id"] = real_id
+        else:
+            # Marks the title as literal for the one-time unescape migration.
+            completion_entry["literal_title"] = True
         if completion_entry not in completed_tasks:
             completed_tasks.append(completion_entry)
 

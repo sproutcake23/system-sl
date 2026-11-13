@@ -530,28 +530,14 @@ class PriorityPipeline:
 
     def run(self, user_vector: np.ndarray) -> dict:
         """Execute full prioritization pipeline."""
-        if not self.tasks_file.exists():
-            return self._empty_result("tasks.json not found")
+        # Read through core.tasks so the one-time id/title migration has run
+        # (under the shared lock) before anything is ranked or keyed.
+        from system_sl.core.tasks import load_tasks
 
         try:
-            with open(self.tasks_file, "r", encoding="utf-8") as f:
-                tasks_data = json.load(f)
+            all_tasks = [t for t in load_tasks() if isinstance(t, dict)]
         except Exception as e:
             return self._empty_result(f"Parse error: {e}")
-
-        # Flatten tasks
-        # NOTE: changes made such that it can read old data format also
-        if isinstance(tasks_data, list):
-            all_tasks = [t for t in tasks_data if isinstance(t, dict)]
-        else:
-            # for backward_compact
-            all_tasks = [
-                task
-                for task_list in tasks_data.values()
-                if isinstance(task_list, list)
-                for task in task_list
-                if isinstance(task, dict)
-            ]
 
         if not all_tasks:
             save_manual_order(all_tasks)
@@ -573,6 +559,7 @@ class PriorityPipeline:
 
             scored_tasks.append(
                 {
+                    "id": task.get("id"),
                     "title": task.get("title", "untitled"),
                     # Tasks are stored with "category" (see core/tasks.py).
                     # Reading "_category" always yielded an empty string.
@@ -600,10 +587,9 @@ class PriorityPipeline:
         manual = load_manual_order()
         if manual:
             pos = {key: i for i, key in enumerate(manual)}
+            # Order files written before ids existed hold titles.
             scored_tasks.sort(
-                key=lambda t: pos.get(
-                    t.get("id") or t.get("title", ""), -1
-                )
+                key=lambda t: pos.get(t.get("id"), pos.get(t.get("title", ""), -1))
             )
         task_title = []
         quadrants = {q: [] for q in self.QUADRANTS}

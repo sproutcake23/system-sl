@@ -191,6 +191,8 @@ class TasksWindow(QWidget):
         root.addLayout(add_row)
 
         self.status_label = QLabel("")
+        # Task titles are stored literally; never let one render as HTML.
+        self.status_label.setTextFormat(Qt.PlainText)
         # Several data problems are listed one per line, with full paths.
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
@@ -487,17 +489,17 @@ class TasksWindow(QWidget):
         deadline_edit.setCalendarPopup(True)
         deadline_edit.setDisplayFormat("yyyy-MM-dd")
         # A task with a deadline opens with it already checked and filled in.
-        deadline_check.setChecked(bool(current_deadline))
-        deadline_edit.setEnabled(bool(current_deadline))
-        if current_deadline:
-            from PySide6.QtCore import QDate
-            parsed = QDate.fromString(current_deadline, "yyyy-MM-dd")
-            deadline_edit.setDate(
-                parsed if parsed.isValid() else QDate.currentDate()
-            )
-        else:
-            from PySide6.QtCore import QDate
-            deadline_edit.setDate(QDate.currentDate())
+        # Google-synced deadlines are "yyyy-MM-dd HH:mm": the date is the
+        # first ten characters and the time is kept when the date changes.
+        from PySide6.QtCore import QDate
+        current_deadline = current_deadline if isinstance(current_deadline, str) else ""
+        deadline_date = current_deadline[:10]
+        deadline_time = current_deadline[10:]
+        parsed = QDate.fromString(deadline_date, "yyyy-MM-dd")
+        has_deadline = parsed.isValid()
+        deadline_check.setChecked(has_deadline)
+        deadline_edit.setEnabled(has_deadline)
+        deadline_edit.setDate(parsed if has_deadline else QDate.currentDate())
         deadline_check.toggled.connect(deadline_edit.setEnabled)
         form.addRow(deadline_check, deadline_edit)
 
@@ -510,11 +512,16 @@ class TasksWindow(QWidget):
             return
 
         new_title = title_edit.text().strip()
-        new_deadline = (
-            deadline_edit.date().toString("yyyy-MM-dd")
-            if deadline_check.isChecked()
-            else None
-        )
+        if deadline_check.isChecked():
+            picked = deadline_edit.date().toString("yyyy-MM-dd")
+            # None leaves an untouched deadline exactly as stored.
+            new_deadline = (
+                None if has_deadline and picked == deadline_date
+                else picked + (deadline_time if has_deadline else "")
+            )
+        else:
+            # "" clears a deadline the Player unticked; None = nothing to do.
+            new_deadline = "" if current_deadline else None
         if not new_title:
             self._set_status(tr("Title is required."))
             return
