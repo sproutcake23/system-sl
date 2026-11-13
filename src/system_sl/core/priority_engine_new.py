@@ -15,13 +15,12 @@
 from __future__ import annotations
 
 import json
-import math
 import logging
 import threading
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List
 
 # ── Import Shared Dependencies to avoid repetition ──────────────────────
 from system_sl.core.vector_converter import Setup, Fusion
@@ -761,7 +760,7 @@ def run_prioritization(display: bool = True, use_thompson: bool = False) -> dict
 
 
 def display_prioritized_tasks(result: dict) -> None:
-    print(f"\n══ ⚔ SYSTEM TASK PRIORITIZATION ══")
+    print("\n══ ⚔ SYSTEM TASK PRIORITIZATION ══")
     print(f"Context : {result.get('context')} - {result.get('context_description')}")
     print(f"Bandit  : {result.get('bandit_confidence'):.1%} confidence\n")
 

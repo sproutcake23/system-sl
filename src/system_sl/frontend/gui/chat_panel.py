@@ -295,7 +295,7 @@ class LLMSettingsPage(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
-        from system_sl.chatbot import load_config, ModelInfo
+        from system_sl.chatbot import load_config
         self._config = load_config()
         self._fetched_models: "list[ModelInfo]" = []
         self._fetch_thread: QThread | None = None
@@ -2715,7 +2715,6 @@ class ChatPanel(QWidget):
         had_selection = saved_cursor.hasSelection()
         sel_start = saved_cursor.selectionStart() if had_selection else -1
         sel_end = saved_cursor.selectionEnd() if had_selection else -1
-        cursor_inside = had_selection
 
         follow_tail = self._is_at_bottom()
         removed = max(0, end - start)
@@ -2780,7 +2779,6 @@ class ChatPanel(QWidget):
         """Write newly completed markdown, then re-render the tail only."""
         tokens = self._stream_tokens or self._get_live_tokens()
         body_color = tokens.get("sys_color_text_main", "#d6e7ff")
-        bg = tokens.get("sys_color_surface", "#2a2a40")
         self._stream_tokens = tokens
 
         if not self._answer_text.strip():

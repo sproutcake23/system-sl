@@ -252,7 +252,6 @@ def test_latest_summary_survives_a_second_drain(tmp_path, monkeypatch):
     """The Tasks status line can name an issue the main monitor drained."""
     from system_sl.frontend.gui import data_issue_reporter as reporter
     from system_sl.utils import data_health
-    from pathlib import Path
 
     issue = data_health.DataIssue("corrupt", tmp_path / "tasks.json")
     data_health.record_issue(issue)

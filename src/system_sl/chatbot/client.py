@@ -1,6 +1,5 @@
 """Chat session management for System-SL."""
 
-import json
 import logging
 from typing import Callable, Iterable, Iterator, List, Optional, Union
 
@@ -21,7 +20,6 @@ from system_sl.chatbot.memory import (
     repair_interrupted_turn,
     rewind_before,
 )
-from system_sl.chatbot.config import ChatConfig, load_config, save_config
 from system_sl.chatbot.usage import TokenUsage, usage_from_message, merge_usage
 
 from langsmith import uuid7

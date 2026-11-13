@@ -5,7 +5,7 @@ import sys
 
 from PySide6.QtCore import QLockFile, QObject, QThread, QTimer, Signal
 from system_sl.utils import SystemNotification
-from system_sl.core.tasks import get_random_task, get_topn_task
+from system_sl.core.tasks import get_topn_task
 from system_sl.core.priority_engine_new import run_prioritization
 from system_sl.utils.data_health import combine_messages, pop_issues
 from system_sl.utils.paths import get_tasks_file_path

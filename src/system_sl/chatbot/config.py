@@ -8,14 +8,17 @@ import json
 import os
 import subprocess
 import requests
-from dataclasses import dataclass, asdict
-from typing import Literal, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 from system_sl.utils import get_tasks_file_path, secure_storage
-from system_sl.chatbot.llm_factory import Provider, ProviderPreset, PRESETS, get_preset, list_presets
+from system_sl.chatbot.llm_factory import (
+    Provider,
+    ProviderPreset as ProviderPreset,
+    list_presets,
+)
 from system_sl.chatbot.model_fetcher import (
     ModelInfo,
-    fetch_models_for_provider,
     save_model_cache,
     load_model_cache,
     clear_model_cache,

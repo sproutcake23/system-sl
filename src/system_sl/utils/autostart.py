@@ -4,7 +4,6 @@ import plistlib
 import shlex
 import sys
 import subprocess
-from pathlib import Path
 
 class CrossPlatformAutostart:
     def __init__(self, app_name="SL-Notifier"):
@@ -50,42 +49,10 @@ class CrossPlatformAutostart:
             return os.path.exists(os.path.join(autostart_dir, f"{self.app_name.lower()}.desktop"))
 
         elif self.os_type == "Darwin":  # macOS
-            label = f"com.{self.app_name.lower()}"
             plist_path = os.path.expanduser(
-                f"~/Library/LaunchAgents/{label}.plist"
+                f"~/Library/LaunchAgents/com.{self.app_name.lower()}.plist"
             )
-            # A real argument list, not a hand-built XML string: paths with
-            # spaces or quotes survive intact.
-            arguments = shlex.split(exec_cmd, posix=True)
-            plist = {
-                "Label": label,
-                "ProgramArguments": arguments,
-                "RunAtLoad": True,
-            }
-            try:
-                os.makedirs(os.path.dirname(plist_path), exist_ok=True)
-                # Boot out an already-loaded agent before replacing it;
-                # bootstrap fails if the label is still registered.
-                subprocess.run(
-                    ["launchctl", "bootout", f"gui/{os.getuid()}", plist_path],
-                    capture_output=True,
-                )
-                with open(plist_path, "wb") as f:
-                    plistlib.dump(plist, f)
-                loaded = subprocess.run(
-                    ["launchctl", "bootstrap", f"gui/{os.getuid()}", plist_path],
-                    capture_output=True,
-                )
-                if loaded.returncode != 0:
-                    print(
-                        "macOS launchctl bootstrap failed: "
-                        + loaded.stderr.decode(errors="replace")
-                    )
-                    return False
-                return True
-            except Exception as e:
-                print(f"macOS LaunchAgent Error: {e}")
-                return False
+            return os.path.exists(plist_path)
 
         return False
 

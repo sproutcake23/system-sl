@@ -10,9 +10,7 @@ It implements spacy md model and
 from __future__ import annotations
 
 import os
-import re
 import math
-from typing import Self
 import numpy as np
 from datetime import datetime
 from pathlib import Path
@@ -102,7 +100,7 @@ class Setup:
 
     # _nlp = None for lazy loading
 
-    def _get_model(self) -> "spacy.language.Language":
+    def _get_model(self):
         """Return the global spacy model, loading it on first call."""
         if Setup._nlp is None:
             Setup._nlp = self._load_spacy_model()
@@ -506,9 +504,8 @@ class Fusion:
         """
         if not self.persona_path.exists():
             raise FileNotFoundError(
-                f"persona.json not found at {
-                    self.persona_path
-                }. Complete onboarding first."
+                f"persona.json not found at {self.persona_path}. "
+                "Complete onboarding first."
             )
 
         if use_cache:
@@ -603,22 +600,17 @@ if __name__ == "__main__":
         fusion_engine = Fusion()
         info = helper.get_vector_info()
 
-        print(
-            f"\n  Persona file   : {
-                '✓ found' if info['persona_exists'] else '✗ MISSING'
-            }"
-        )
-        print(
-            f"  Completed tasks: {
-                '✓ found' if info['completed_tasks_exists'] else '✗ not found'
-            }"
-        )
-        print(f"  Cache          : {'✓ exists' if info['cache_exists'] else '○ none'}")
+        persona = "✓ found" if info["persona_exists"] else "✗ MISSING"
+        completed = "✓ found" if info["completed_tasks_exists"] else "✗ not found"
+        cache = "✓ exists" if info["cache_exists"] else "○ none"
+        weights = info["fusion_weights"]
+        print(f"\n  Persona file   : {persona}")
+        print(f"  Completed tasks: {completed}")
+        print(f"  Cache          : {cache}")
         print(f"  Completed count: {info['completed_task_count']}")
         print(
-            f"  Fusion weights : persona={
-                info['fusion_weights']['persona']:.2f}  decay={
-                info['fusion_weights']['decay']:.2f}"
+            f"  Fusion weights : persona={weights['persona']:.2f}"
+            f"  decay={weights['decay']:.2f}"
         )
 
         if not info["persona_exists"]:

@@ -6,7 +6,6 @@ This avoids importing the full GUI stack (chat, settings, etc.) and only
 loads what's needed for hourly task notifications.
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -18,12 +17,10 @@ if getattr(sys, "frozen", False):
         sys.path.insert(0, str(src_path))
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QTimer
 
 from system_sl.utils import SystemNotification
 from system_sl.services import BackgroundServiceController
 from system_sl.utils.notification_settings import load_notifications_enabled
-from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.autostart_migration import initialize_application_autostart
 from system_sl.utils.auto_updater import apply_pending_update
 from system_sl.utils.worker_threads import shutdown_workers

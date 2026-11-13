@@ -517,8 +517,6 @@ def compact_document_blocks(text: str, keep_chars: int = 400) -> str:
     def replace(match: "re.Match[str]") -> str:
         opening = match.group(1)
         body = match.group(2)
-        name_match = re.search(r'name="([^"]*)"', opening)
-        name = name_match.group(1) if name_match else "document"
         flat = " ".join(body.split())
         head = flat[:keep_chars]
         if len(head) < len(flat):

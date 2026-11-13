@@ -8,10 +8,13 @@ Supports:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Any
+from typing import TYPE_CHECKING, Literal, Any
 
 import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
+
+if TYPE_CHECKING:
+    from system_sl.chatbot.config import ChatConfig
 
 # Optional imports - only loaded when needed
 try:

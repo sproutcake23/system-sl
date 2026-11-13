@@ -4,10 +4,13 @@ Provides a LangGraph agent with tools for task management,
 using a configurable LLM backend (Google Gemini or OpenAI-compatible).
 """
 
-from dataclasses import dataclass, replace
+import logging
+from dataclasses import replace
 from typing import Any, Callable, Optional
 from functools import lru_cache
 import re
+
+logger = logging.getLogger(__name__)
 
 # LangChain imports
 from langchain.agents import create_agent
@@ -30,7 +33,7 @@ from system_sl.utils import (
 
 from system_sl.chatbot.system_prompts import SYSTEM_MENTOR_PROMPT
 from system_sl.chatbot.agent_middleware import make_context_middleware
-from system_sl.chatbot.config import ChatConfig, load_config, validate_config
+from system_sl.chatbot.config import load_config, validate_config
 from system_sl.chatbot.llm_factory import create_llm_from_config, LLMFactoryError
 from system_sl.chatbot.memory import get_checkpointer
 

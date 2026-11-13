@@ -12,7 +12,7 @@ from system_sl.core.onboarding import ONBOARDING_QUESTIONS  # noqa: E402
 
 def test_back_prefills_and_summary_is_saved_from_the_table(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    app = QApplication.instance() or QApplication([])
+    QApplication.instance() or QApplication([])
 
     from system_sl.frontend.gui.popup_windows import OnboardingWindow
 

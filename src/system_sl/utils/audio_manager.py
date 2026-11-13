@@ -87,7 +87,6 @@ def set_sound_setting(file_path: str):
     os.makedirs(user_sounds_dir, exist_ok=True)
     
     # Get the bundled sounds directory for comparison
-    from system_sl.utils.paths import get_system_data_path
     bundled_sounds_dirs = []
     if getattr(sys, "frozen", False):
         bundle_dir = Path(sys._MEIPASS)

@@ -104,7 +104,6 @@ class SystemNotification(QWidget):
         if tokens is None:
             tokens = get_current_theme_tokens()
 
-        bg = tokens.get("sys_color_background", "#060912")
         primary = tokens.get("sys_color_primary", "#00d9ff")
         text_main = tokens.get("sys_color_text_main", "#d6e7ff")
         surface = tokens.get("sys_color_surface", "#0b0f1a")

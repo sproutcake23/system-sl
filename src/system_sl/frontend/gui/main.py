@@ -1,12 +1,10 @@
 import os
 import sys
-import subprocess
 import threading
 
-from dotenv import load_dotenv, set_key
 
 from system_sl.frontend.gui.desktop_entry import install_desktop_entry
-from PySide6.QtCore import QSize, QTimer, QSettings, Qt, Slot, QObject, QThread, Signal
+from PySide6.QtCore import QSize, QTimer, QSettings, Qt, QObject, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -34,7 +32,6 @@ from system_sl import __version__
 from system_sl.utils import (
     CrossPlatformAutostart,
     SystemNotification,
-    get_tasks_file_path,
     GoogleSyncError,
     secure_storage,
 )

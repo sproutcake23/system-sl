@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 sys.path.insert(0, str(Path(__file__).parent))
 

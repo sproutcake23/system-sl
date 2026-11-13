@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QMessageBox,
 )
-from PySide6.QtGui import QRegularExpressionValidator, QColor
+from PySide6.QtGui import QColor
 from system_sl.frontend.gui.icons import get_icon
 from system_sl.core.onboarding import ONBOARDING_QUESTIONS, PersonaStorageHandler
 from system_sl.core.tasks import (
@@ -83,9 +83,7 @@ class ReorderableTaskList(QListWidget):
             super().dropEvent(event)
             return
         moved_text = moved_item.text()
-        moved_title = moved_item.data(Qt.UserRole)
         old_texts = [self.item(i).text() for i in range(self.count())]
-        old_titles = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
         super().dropEvent(event)
         new_texts = [self.item(i).text() for i in range(self.count())]
         new_titles = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
