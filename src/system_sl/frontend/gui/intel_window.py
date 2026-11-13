@@ -14,17 +14,21 @@ from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -40,6 +44,29 @@ SECTION_META = (
     ("tasks", "02", "Relevant to Your Active Quests", "Developments connected to the work currently on your board."),
     ("general", "03", "Beyond Your Horizon", "Important discoveries and industry shifts worth knowing, even outside your path."),
 )
+
+CONTENT_STATUS_META = {
+    "full": (
+        "FULL ARTICLE",
+        "Full article text was extracted and used for this summary.",
+        "intelMeta",
+    ),
+    "excerpt": (
+        "RSS EXCERPT",
+        "Only the feed excerpt was available. Details beyond it may be missing.",
+        "intelMeta",
+    ),
+    "failed": (
+        "EXTRACTION FAILED",
+        "Full-text extraction failed. The summary uses the RSS excerpt.",
+        "intelWarning",
+    ),
+    "blocked": (
+        "ACCESS RESTRICTED",
+        "The publisher restricts access. The summary uses the RSS excerpt.",
+        "intelWarning",
+    ),
+}
 
 
 def _clean(value: object, fallback: str = "") -> str:
@@ -123,6 +150,18 @@ class ArticleCard(QFrame):
         meta = _label(f"{source}  ·  {published}", "intelMeta")
         root.addWidget(meta)
 
+        status = str(self.article.get("content_status") or self.summary.get("content_status") or "")
+        label_text, tooltip, object_name = CONTENT_STATUS_META.get(
+            status, ("", "", "intelMeta")
+        )
+        if label_text:
+            status_label = _label(label_text, object_name, wrap=False)
+            status_label.setToolTip(tooltip)
+            status_label.setSizePolicy(
+                QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred
+            )
+            root.addWidget(status_label)
+
         self._add_block(root, "WHAT HAPPENED", _clean(self.summary.get("what_happened")), "intelBody")
         self._add_block(root, "WHY IT MATTERS", _clean(self.summary.get("why_it_matters")), "intelWhy")
         self._add_block(root, "WHAT YOU CAN LEARN", _clean(self.summary.get("what_can_you_learn")), "intelBody")
@@ -131,6 +170,30 @@ class ArticleCard(QFrame):
         reasons = self.entry.get("explanation") or " · ".join(self.score.get("reasons", [])[:3])
         if reasons:
             root.addWidget(_label(_clean(reasons), "intelReason"))
+
+        story = self.entry.get("story") if isinstance(self.entry.get("story"), dict) else {}
+        coverage = story.get("coverage") if isinstance(story.get("coverage"), list) else []
+        coverage = [item for item in coverage if isinstance(item, dict)]
+        if coverage:
+            publisher_count = len({item.get("source_name") for item in coverage}) + 1
+            root.addWidget(
+                _label(
+                    f"ALSO COVERED BY {publisher_count} PUBLISHERS",
+                    "intelKicker",
+                )
+            )
+            for item in coverage[:6]:
+                name = _clean(item.get("source_name"), "Another source")
+                title = _clean(item.get("title"), "Coverage")
+                button = QPushButton(f"{name} · {title}")
+                button.setObjectName("intelAction")
+                button.setIcon(get_icon("external_link"))
+                button.setToolTip(item.get("url") or "")
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.clicked.connect(
+                    lambda _checked=False, url=item.get("url"): self._open_url(url)
+                )
+                root.addWidget(button)
 
         actions = QHBoxLayout()
         actions.setSpacing(4)
@@ -186,7 +249,10 @@ class ArticleCard(QFrame):
         layout.addWidget(_label(text, object_name))
 
     def _open_article(self) -> None:
-        url = self.article.get("url")
+        self._open_url(self.article.get("url"))
+
+    @staticmethod
+    def _open_url(url: object) -> None:
         if isinstance(url, str) and url.startswith(("http://", "https://")):
             QDesktopServices.openUrl(QUrl(url))
 
@@ -202,6 +268,101 @@ class ArticleCard(QFrame):
             self.quest_requested.emit(title)
 
 
+class SourceEditorDialog(QDialog):
+    """Add a custom RSS/Atom source without editing Python code."""
+
+    def __init__(self, service: BriefingService, parent=None) -> None:
+        super().__init__(parent)
+        self.service = service
+        self.setWindowTitle("Add News Source")
+        self.setMinimumWidth(520)
+
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+        root.addWidget(
+            _label(
+                "Only public RSS or Atom feeds are supported. Full articles are "
+                "fetched later, and only for stories chosen for a briefing.",
+                "intelMeta",
+            )
+        )
+
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Example Engineering Blog")
+        form.addRow("Name", self.name_edit)
+
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("https://example.com/feed.xml")
+        form.addRow("Feed URL", self.url_edit)
+
+        self.homepage_edit = QLineEdit()
+        self.homepage_edit.setPlaceholderText("Optional; inferred from the feed URL")
+        form.addRow("Homepage", self.homepage_edit)
+
+        self.category_combo = QComboBox()
+        self.category_combo.setEditable(True)
+        self.category_combo.addItems(TOPICS)
+        form.addRow("Category", self.category_combo)
+
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["rss", "atom"])
+        form.addRow("Feed type", self.type_combo)
+
+        self.reliability_spin = QSpinBox()
+        self.reliability_spin.setRange(0, 100)
+        self.reliability_spin.setValue(70)
+        self.reliability_spin.setToolTip(
+            "Publisher credibility. This is a stable classification, not a "
+            "measure of whether the feed answered recently."
+        )
+        form.addRow("Reliability", self.reliability_spin)
+
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(0, 7 * 24 * 60)
+        self.interval_spin.setSingleStep(15)
+        self.interval_spin.setSpecialValueText("Use the global default")
+        self.interval_spin.setSuffix(" min")
+        self.interval_spin.setToolTip("0 keeps the global fetch interval from settings.")
+        form.addRow("Update interval", self.interval_spin)
+
+        self.extract_check = QCheckBox("Allow full article extraction for this source")
+        self.extract_check.setChecked(True)
+        form.addRow("", self.extract_check)
+
+        root.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _save(self) -> None:
+        payload = {
+            "name": self.name_edit.text(),
+            "url": self.url_edit.text(),
+            "homepage": self.homepage_edit.text() or None,
+            "category": self.category_combo.currentText(),
+            "type": self.type_combo.currentText(),
+            "reliability": self.reliability_spin.value(),
+            "interval_minutes": self.interval_spin.value() or None,
+            "extract": self.extract_check.isChecked(),
+        }
+        try:
+            self.service.add_source(payload)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid source", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - a bad source must not crash Intel
+            QMessageBox.warning(self, "Could not add source", str(exc))
+            return
+        self.accept()
+
+
 class IntelPreferencesDialog(QDialog):
     """Enable/disable, topics, sources and reset for Daily Intel."""
 
@@ -209,7 +370,7 @@ class IntelPreferencesDialog(QDialog):
         super().__init__(parent)
         self.service = service
         self.setWindowTitle("Daily Intel Preferences")
-        self.setMinimumSize(640, 560)
+        self.setMinimumSize(680, 600)
         self._topic_checks: dict[str, QCheckBox] = {}
         self._source_checks: dict[str, QCheckBox] = {}
 
@@ -236,20 +397,29 @@ class IntelPreferencesDialog(QDialog):
             topics_grid.addWidget(check, index // 2, index % 2)
         root.addLayout(topics_grid)
 
-        root.addWidget(_label("News sources", "settingsHeading"))
+        source_header = QHBoxLayout()
+        source_header.addWidget(_label("News sources", "settingsHeading"))
+        source_header.addStretch(1)
+        add_source_button = QPushButton("Add source")
+        add_source_button.setObjectName("intelAction")
+        add_source_button.setIcon(get_icon("success"))
+        add_source_button.setToolTip("Register another RSS or Atom feed")
+        add_source_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_source_button.clicked.connect(self._add_source)
+        source_header.addWidget(add_source_button)
+        root.addLayout(source_header)
+
+        self.source_summary = _label("", "intelMeta", wrap=False)
+        root.addWidget(self.source_summary)
+
         source_scroll = QScrollArea()
         source_scroll.setWidgetResizable(True)
         source_scroll.setFrameShape(QFrame.Shape.NoFrame)
         source_widget = QWidget()
-        source_layout = QVBoxLayout(source_widget)
-        source_layout.setContentsMargins(0, 0, 0, 0)
-        source_layout.setSpacing(4)
-        for source in self.service.source_catalog():
-            check = QCheckBox(f"{source['name']}  ·  reliability {source['reliability']}")
-            check.setToolTip(source.get("url", ""))
-            self._source_checks[source["id"]] = check
-            source_layout.addWidget(check)
-        source_layout.addStretch(1)
+        self._source_layout = QVBoxLayout(source_widget)
+        self._source_layout.setContentsMargins(0, 0, 0, 0)
+        self._source_layout.setSpacing(4)
+        self._rebuild_sources()
         source_scroll.setWidget(source_widget)
         root.addWidget(source_scroll, stretch=1)
 
@@ -262,6 +432,99 @@ class IntelPreferencesDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+        self._reload()
+
+    def _rebuild_sources(self) -> None:
+        """Repaint the source rows from the current registry and health data."""
+        while self._source_layout.count():
+            item = self._source_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self._source_checks = {}
+        catalog = self.service.source_catalog()
+        unhealthy = 0
+        for source in catalog:
+            health = source.get("health") if isinstance(source.get("health"), dict) else {}
+            availability = str(health.get("availability") or "unknown")
+            if availability == "unavailable":
+                unhealthy += 1
+
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+
+            check = QCheckBox(source.get("name") or source.get("id") or "Source")
+            check.setToolTip(source.get("url", ""))
+            self._source_checks[str(source["id"])] = check
+            row_layout.addWidget(check)
+
+            interval = source.get("interval_minutes")
+            detail = (
+                f"reliability {source.get('reliability')} · "
+                f"{str(source.get('type') or 'rss').upper()} · "
+                f"every {interval} min · {availability}"
+            )
+            rate = health.get("success_rate")
+            if isinstance(rate, (int, float)):
+                detail += f" · {rate:.0%} success"
+            info = _label(detail, "intelMeta", wrap=False)
+            info.setToolTip(
+                "Last success: "
+                + _format_timestamp(health.get("last_success"))
+                + ("\n" + str(health.get("last_error")) if health.get("last_error") else "")
+            )
+            row_layout.addWidget(info, stretch=1)
+
+            remove = QPushButton("Remove")
+            remove.setObjectName("intelAction")
+            remove.setToolTip(f"Remove {source.get('name')} from the source registry")
+            remove.setCursor(Qt.CursorShape.PointingHandCursor)
+            remove.clicked.connect(
+                lambda _checked=False, source_id=str(source["id"]): self._remove_source(
+                    source_id
+                )
+            )
+            row_layout.addWidget(remove)
+
+            self._source_layout.addWidget(row)
+        self._source_layout.addStretch(1)
+
+        if unhealthy:
+            self.source_summary.setText(
+                f"{unhealthy} source{'s' if unhealthy != 1 else ''} temporarily unavailable; "
+                "they will be retried automatically."
+            )
+        else:
+            self.source_summary.setText(
+                f"{len(catalog)} sources registered. Fetching follows each source's own interval."
+            )
+
+    def _add_source(self) -> None:
+        dialog = SourceEditorDialog(self.service, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._rebuild_sources()
+            self._reload()
+
+    def _remove_source(self, source_id: str) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Remove News Source",
+            "Remove this source from Daily Intel?\n"
+            "Articles already saved in your briefing are not deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.service.remove_source(source_id)
+        except Exception as exc:  # noqa: BLE001 - removal must not crash the dialog
+            QMessageBox.warning(self, "Could not remove source", str(exc))
+            return
+        self._rebuild_sources()
         self._reload()
 
     def _reload(self) -> None:

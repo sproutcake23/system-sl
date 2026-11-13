@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from system_sl.intel.briefing import BriefingService, get_intel_service
 
-CHECK_INTERVAL_MS = 30 * 60 * 1000
+CHECK_INTERVAL_MS = 10 * 60 * 1000
 
 
 class _ThreadWorker(QObject):
