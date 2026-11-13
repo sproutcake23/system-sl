@@ -3,7 +3,6 @@
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 
 def test_import_has_no_side_effects(tmp_path):

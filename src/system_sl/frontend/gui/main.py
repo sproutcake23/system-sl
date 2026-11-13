@@ -1,6 +1,8 @@
+import logging
 import os
 import sys
 import threading
+from pathlib import Path
 
 
 from system_sl.frontend.gui.desktop_entry import install_desktop_entry
@@ -33,6 +35,7 @@ from system_sl.utils import (
     CrossPlatformAutostart,
     SystemNotification,
     GoogleSyncError,
+    get_tasks_file_path,
     secure_storage,
 )
 from system_sl.core import GoogleSyncEngine, TasksProvider
@@ -55,6 +58,8 @@ from system_sl.utils.auto_updater import (
     load_auto_update_preference,
     save_auto_update_preference,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _GoogleSyncWorker(QObject):
@@ -336,6 +341,10 @@ class MainWindow(QMainWindow):
         self.about_button.setIcon(get_icon("info"))
         self.about_button.clicked.connect(self.show_about_dialog)
 
+        self.reset_settings_btn = QPushButton("Reset Settings")
+        self.reset_settings_btn.setIcon(get_icon("refresh"))
+        self.reset_settings_btn.clicked.connect(self._reset_all_settings)
+
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setSpacing(SIDEBAR_SPACING)
@@ -352,6 +361,7 @@ class MainWindow(QMainWindow):
                     self.google_sync_toggle,
                     self.install_desktop_btn,
                     self.about_button,
+                    self.reset_settings_btn,
                 ),
             ),
         )
@@ -373,6 +383,51 @@ class MainWindow(QMainWindow):
         self.install_desktop_btn.setVisible(bool(os.environ.get("APPIMAGE")))
 
         return page
+
+    def _reset_all_settings(self) -> None:
+        """Clear QSettings, JSON settings and stored secrets, after asking."""
+        answer = QMessageBox.question(
+            self,
+            "Reset all settings?",
+            "This clears the app's settings, chat configuration and stored "
+            "API keys, and forgets the notification sound. Tasks and chat "
+            "history are not deleted. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        # QSettings (theme, tray, sync toggle, window state).
+        self.settings.clear()
+
+        # JSON settings written by the chat and notification code.
+        for name in ("llm_config.json", "settings.json"):
+            try:
+                Path(get_tasks_file_path(name)).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("could not remove %s", name, exc_info=True)
+
+        # Secrets stored in the keyring / encrypted fallback.
+        for secret in (
+            secure_storage.SECRET_LLM_API_KEY,
+            secure_storage.SECRET_GOOGLE_TOKEN,
+        ):
+            try:
+                secure_storage.delete_secret(secret)
+            except Exception:
+                logger.warning("could not clear %s", secret, exc_info=True)
+
+        # Reflect the defaults without pretending a restart already happened.
+        self.notifications_check.setChecked(load_notifications_enabled())
+        self.auto_update_check.setChecked(load_auto_update_preference())
+        self.google_sync_toggle.setChecked(False)
+        QMessageBox.information(
+            self,
+            "Settings reset",
+            "Settings are back to their defaults. Restart the app to apply "
+            "the theme and chat provider changes.",
+        )
 
     def open_settings(self, tab: int = AppSettingsDialog.GENERAL_TAB) -> None:
         if self._settings_window is None:
