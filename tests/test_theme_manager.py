@@ -93,7 +93,9 @@ def test_success_commits_and_clears_the_failure(manager):
     assert manager.tokens["sys_color_surface"] == "#123456"
     assert manager._failed_fingerprint is None
     assert not manager._retry_timer.isActive()
-    assert manager.status_message == "Using wallpaper: /walls/a.png"
+    # Success isn't an alert: the path moves to the preview caption's tooltip.
+    assert manager.status_message == ""
+    assert manager.palette_source == "Using wallpaper: /walls/a.png"
 
 
 def test_cancelled_extraction_changes_nothing(manager):
@@ -251,13 +253,14 @@ def test_preview_follows_the_palette_and_mode(manager):
 
     manager._mode = "dark"
     preview = ThemePreview(manager)
-    assert preview._dynamic_controls.isHidden()
+    assert preview.isHidden()  # the whole preview is Dynamic-only
 
     manager._apply(dict(DEFAULT_TOKENS, sys_color_primary="#123456"))
     assert preview._swatches["sys_color_primary"].toolTip() == "Accent: #123456"
 
     manager._mode = "dynamic"
     manager.modeChanged.emit("dynamic")
-    assert not preview._dynamic_controls.isHidden()
+    assert not preview.isHidden()
+    assert preview.caption.text() == "Colours from your wallpaper"
     assert preview.detected_button.isHidden()  # no chosen wallpaper yet
     preview.deleteLater()
