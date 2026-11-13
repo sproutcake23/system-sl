@@ -14,8 +14,26 @@ def _silent_qt_message_handler(mode, context, message):
         sys.stderr.flush()
 
 
-DEFAULT_SOUNDS_DIR = get_sounds_dir()
 _initialized = False
+
+
+def default_sounds_dir() -> Path:
+    """Return the sounds directory. Resolved on use: it can create folders."""
+    return get_sounds_dir()
+
+
+def _settings_file() -> str:
+    return get_tasks_file_path("settings.json")
+
+
+def __getattr__(name):
+    # The old module constants, resolved on first use instead of at import,
+    # because resolving them creates the config and sounds folders.
+    if name == "DEFAULT_SOUNDS_DIR":
+        return default_sounds_dir()
+    if name == "SETTINGS_FILE":
+        return _settings_file()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def initialize_audio() -> None:
@@ -28,13 +46,12 @@ def initialize_audio() -> None:
     os.environ["AV_LOG_LEVEL"] = "quiet"
     os.environ["QT_LOGGING_RULES"] = "*=false"
     qInstallMessageHandler(_silent_qt_message_handler)
-    os.makedirs(DEFAULT_SOUNDS_DIR, exist_ok=True)
+    os.makedirs(default_sounds_dir(), exist_ok=True)
     _initialized = True
 
 # The bundled notification cue is default.mp3. There is no default.wav, so the
 # old fallback pointed at a file that never existed and every notification
 # that fell through to it was silently mute.
-SETTINGS_FILE = get_tasks_file_path("settings.json")
 
 _player = None
 _audio_output = None
@@ -50,7 +67,7 @@ def _get_player():
     return _player
 
 def get_current_sound() -> str:
-    data = load_data(SETTINGS_FILE)
+    data = load_data(_settings_file())
     sound_setting = data.get("notification_sound", "default.mp3")
     
     # Resolve filename against sounds directory
@@ -90,7 +107,7 @@ def set_sound_setting(file_path: str):
     If the sound is from the bundled assets, save just the filename.
     If it's a custom sound, copy it to user sounds dir and save the filename.
     """
-    data = load_data(SETTINGS_FILE)
+    data = load_data(_settings_file())
     user_sounds_dir = get_sounds_dir()
     os.makedirs(user_sounds_dir, exist_ok=True)
     
@@ -133,15 +150,16 @@ def set_sound_setting(file_path: str):
         shutil.copy2(file_path, dest)
         data["notification_sound"] = filename
     
-    save_data(SETTINGS_FILE, data)
+    save_data(_settings_file(), data)
 
 def list_available_sounds() -> list[str]:
     """Returns a list of available sound files in the sounds directory."""
     initialize_audio()
     sounds = []
-    if DEFAULT_SOUNDS_DIR.exists():
-        for f in DEFAULT_SOUNDS_DIR.glob("*.mp3"):
+    sounds_dir = default_sounds_dir()
+    if sounds_dir.exists():
+        for f in sounds_dir.glob("*.mp3"):
             sounds.append(str(f))
-        for f in DEFAULT_SOUNDS_DIR.glob("*.wav"):
+        for f in sounds_dir.glob("*.wav"):
             sounds.append(str(f))
     return sounds
