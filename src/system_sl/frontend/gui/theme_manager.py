@@ -24,14 +24,17 @@ from system_sl.frontend.gui.theme import (
     apply_theme,
     get_saved_theme_mode,
     get_tokens_for_mode,
+    migrate_saved_theme_mode,
     normalize_theme_mode,
     set_active_tokens,
 )
+from system_sl.utils.system_theme import qt_color_scheme
 from system_sl.utils.wallpaper_path import WallpaperState, get_wallpaper_state, watch_paths
 from system_sl.utils.wallust_theme import (
-    cached_wallust_tokens,
     cancel_extractions,
     ExtractionResult,
+    cached_tokens_for,
+    cached_wallust_tokens_or_none,
     extract_wallust_tokens,
     find_wallust,
     missing_wallust_message,
@@ -39,8 +42,15 @@ from system_sl.utils.wallust_theme import (
 
 LOG = logging.getLogger(__name__)
 
-WALLPAPER_POLL_MS = 12_000
+# The file watcher catches most wallpaper changes at once; the poll is only a
+# fallback for desktops that change it without touching a watched file. Each
+# poll may run a subprocess, so it is kept slow.
+WALLPAPER_POLL_MS = 60_000
 SYSTEM_POLL_MS = 30_000
+# How often to look for wallust after it was found missing, so installing it
+# takes effect without restarting the app.
+WALLUST_RECHECK_MS = 60_000
+READING_STATUS = "Reading colours from your wallpaper…"
 DEBOUNCE_MS = 450
 # Waits before re-trying a wallpaper whose extraction failed: 15s, 30s, 60s...
 # up to 10 minutes. A transient failure (a timeout, a file mid-write) recovers
@@ -74,6 +84,21 @@ class _ProbeThread(QThread):
         self.stateReady.emit(state)
 
 
+class _SchemeThread(QThread):
+    """Works out the OS light/dark scheme when Qt can't (may run gsettings)."""
+
+    tokensReady = Signal(object)
+
+    def run(self):
+        try:
+            tokens = get_tokens_for_mode("system")
+        except Exception:
+            LOG.exception("Could not detect the system colour scheme")
+            tokens = None
+        if not self.isInterruptionRequested():
+            self.tokensReady.emit(tokens)
+
+
 class _ExtractThread(QThread):
     """Runs wallust off the GUI thread."""
 
@@ -105,6 +130,10 @@ class ThemeManager(QObject):
         super().__init__()
         self._app = app
         self._settings = QSettings("system-sl", "AppConfig")
+        try:
+            migrate_saved_theme_mode(self._settings)
+        except Exception:
+            LOG.warning("Could not migrate the saved theme mode", exc_info=True)
         self._mode = get_saved_theme_mode(self._settings)
         self._tokens = get_tokens_for_mode(self._mode)
         self._started = False
@@ -145,6 +174,11 @@ class ThemeManager(QObject):
         self._scheme_timer.timeout.connect(self._check_system_scheme)
 
         self._scheme_connected = False
+        self._scheme_thread: Optional[_SchemeThread] = None
+
+        self._wallust_timer = QTimer(self)
+        self._wallust_timer.setInterval(WALLUST_RECHECK_MS)
+        self._wallust_timer.timeout.connect(self._recheck_wallust)
 
         self._watcher = QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._on_watch_event)
@@ -170,8 +204,9 @@ class ThemeManager(QObject):
         self._scheme_timer.stop()
         self._debounce.stop()
         self._retry_timer.stop()
+        self._wallust_timer.stop()
         cancel_extractions()
-        for attribute in ("_probe_thread", "_extract_thread"):
+        for attribute in ("_probe_thread", "_extract_thread", "_scheme_thread"):
             thread = getattr(self, attribute, None)
             if thread is None or not thread.isRunning():
                 continue
@@ -252,7 +287,28 @@ class ThemeManager(QObject):
     def _check_system_scheme(self) -> None:
         if self._mode != "system":
             return
-        tokens = get_tokens_for_mode("system")
+        if qt_color_scheme() is not None:
+            # Qt knows the scheme: answering is cheap, stay on this thread.
+            self._on_scheme_tokens(get_tokens_for_mode("system"))
+            return
+        # Qt reports Unknown, so detection falls back to probes that may run
+        # gsettings; keep those off the GUI thread.
+        if self._scheme_thread is not None:
+            return
+        thread = _SchemeThread(self)
+        self._scheme_thread = thread
+        thread.tokensReady.connect(self._on_scheme_tokens)
+        thread.finished.connect(lambda t=thread: self._on_scheme_finished(t))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_scheme_finished(self, thread: _SchemeThread) -> None:
+        if self._scheme_thread is thread:
+            self._scheme_thread = None
+
+    def _on_scheme_tokens(self, tokens: Optional[dict]) -> None:
+        if self._mode != "system" or not tokens:
+            return
         if tokens != self._tokens:
             self._apply(tokens)
 
@@ -265,14 +321,23 @@ class ThemeManager(QObject):
             LOG.warning(missing_wallust_message())
             self._set_status(missing_wallust_message())
             self._apply(dict(self._builtin_tokens()))
+            # Keep looking, so installing wallust works without a restart.
+            self._wallust_timer.start()
             return
 
-        self._set_status("")
-        # Paint the last palette immediately; the probe refreshes it if needed.
-        cached = cached_wallust_tokens()
-        self._last_good_tokens = cached
         self._fingerprint = None
-        self._apply(cached)
+        cached = cached_wallust_tokens_or_none()
+        self._last_good_tokens = cached
+        if cached is not None:
+            # Paint the last palette immediately; the probe refreshes it only
+            # if the wallpaper has changed since.
+            self._set_status("")
+            self._apply(cached)
+        else:
+            # Nothing cached yet: keep the colours already on screen rather
+            # than flashing the built-in palette, and say what is happening.
+            self._set_status(READING_STATUS)
+            self._apply(self._tokens)
 
         self._refresh_watch_paths()
         self._timer.start()
@@ -283,10 +348,19 @@ class ThemeManager(QObject):
 
         return DEFAULT_TOKENS
 
+    def _recheck_wallust(self) -> None:
+        if self._mode != "dynamic":
+            self._wallust_timer.stop()
+            return
+        if find_wallust():
+            self._wallust_timer.stop()
+            self._start_dynamic()
+
     def _stop_dynamic(self) -> None:
         self._timer.stop()
         self._debounce.stop()
         self._retry_timer.stop()
+        self._wallust_timer.stop()
         self._pending_state = None
         self._failed_fingerprint = None
         self._failures = 0
@@ -343,6 +417,20 @@ class ThemeManager(QObject):
             self._set_status(self._palette_status)
             return
 
+        cached = cached_tokens_for(state.image_path or "")
+        if cached is not None:
+            # The disk cache was made from this exact image: use it without
+            # starting wallust, and only restyle if the colours differ.
+            self._fingerprint = state.fingerprint
+            self._last_good_tokens = cached
+            self._failed_fingerprint = None
+            self._failures = 0
+            if cached != self._tokens:
+                self._apply(cached)
+            self._palette_status = self._wallpaper_status()
+            self._set_status(self._palette_status)
+            return
+
         if self._extract_running:
             self._pending_state = state
             return
@@ -350,6 +438,8 @@ class ThemeManager(QObject):
 
     def _start_extract(self, state: WallpaperState) -> None:
         self._extract_running = True
+        if self._last_good_tokens is None:
+            self._set_status(READING_STATUS)
         thread = _ExtractThread(state, self)
         self._extract_thread = thread
         thread.resultReady.connect(self._on_result)
@@ -423,6 +513,12 @@ class ThemeManager(QObject):
         for path in extra:
             if path and os.path.exists(path):
                 desired.add(path)
+                # Editors and wallpaper tools often replace the file (write a
+                # new one, rename it over the old). The watch on the old file
+                # is then lost, but the folder still reports the change.
+                parent = os.path.dirname(path)
+                if parent:
+                    desired.add(parent)
 
         current = set(self._watcher.files()) | set(self._watcher.directories())
         for path in current - desired:

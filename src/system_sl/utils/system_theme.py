@@ -54,6 +54,15 @@ def _qt_scheme() -> Optional[str]:
     return None
 
 
+def qt_color_scheme() -> Optional[str]:
+    """Return Qt's own answer, or None when it reports Unknown.
+
+    Cheap (no subprocess), so it is safe on the GUI thread; the other probes
+    may run gsettings and belong on a worker thread.
+    """
+    return _qt_scheme()
+
+
 def _windows_scheme() -> Optional[str]:
     try:
         import winreg

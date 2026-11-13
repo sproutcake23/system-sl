@@ -13,6 +13,7 @@ a wallpaper change in Dynamic mode) restyles the whole app, not one window.
 """
 
 import base64
+import logging
 
 # --- Light theme ---
 LIGHT_TOKENS = {
@@ -73,6 +74,8 @@ THEME_MODE_LABELS = {
 }
 DEFAULT_THEME_MODE = "system"
 
+log = logging.getLogger(__name__)
+
 _active_tokens = None
 
 
@@ -83,33 +86,48 @@ def _default_tokens() -> dict:
     return dict(DEFAULT_TOKENS)
 
 
-def normalize_theme_mode(mode, dynamic_theming: bool = False) -> str:
+def normalize_theme_mode(mode) -> str:
     """Map legacy values to one of :data:`THEME_MODES`."""
     if mode in THEME_MODES:
         return mode
     if mode == "default":
         return "dark"
-    return "dynamic" if dynamic_theming else DEFAULT_THEME_MODE
+    return DEFAULT_THEME_MODE
 
 
 def get_saved_theme_mode(settings=None) -> str:
-    """Read ``theme_mode``, migrating the old boolean setting if needed."""
+    """Read ``theme_mode``; never writes (see :func:`migrate_saved_theme_mode`).
+
+    Settings saved before ``theme_mode`` existed hold a ``dynamic_theming``
+    boolean instead, which is honoured here.
+    """
     from PySide6.QtCore import QSettings
 
     settings = settings or QSettings("system-sl", "AppConfig")
     raw = settings.value("theme_mode", None, type=str)
     if not raw:
         legacy_dynamic = settings.value("dynamic_theming", False, type=bool)
-        mode = "dynamic" if legacy_dynamic else DEFAULT_THEME_MODE
-        settings.setValue("theme_mode", mode)
-        settings.sync()
-        return mode
+        return "dynamic" if legacy_dynamic else DEFAULT_THEME_MODE
+    return normalize_theme_mode(raw)
 
-    mode = normalize_theme_mode(raw)
-    if mode != raw:
-        settings.setValue("theme_mode", mode)
-        settings.sync()
-    return mode
+
+def migrate_saved_theme_mode(settings=None) -> None:
+    """Rewrite a legacy or unknown saved mode as a current one, once.
+
+    Kept out of :func:`get_saved_theme_mode` so reading the mode has no side
+    effects and works on a read-only config directory.
+    """
+    from PySide6.QtCore import QSettings
+
+    settings = settings or QSettings("system-sl", "AppConfig")
+    raw = settings.value("theme_mode", None, type=str)
+    mode = get_saved_theme_mode(settings)
+    if raw == mode:
+        return
+    settings.setValue("theme_mode", mode)
+    settings.sync()
+    if settings.status() != QSettings.Status.NoError:
+        log.warning("Could not save the migrated theme mode")
 
 
 def get_tokens_for_mode(mode: str = DEFAULT_THEME_MODE) -> dict:
@@ -155,7 +173,57 @@ def apply_theme(app, tokens=None):
     set_active_tokens(tokens)
     # Icons first: restyling repaints every widget, which is what recolours them.
     set_icon_theme(tokens)
+    # The palette covers what the stylesheet does not reach: Qt's own file
+    # and message dialogs, standard icons and some popups, which otherwise
+    # follow the OS (a light file picker over a dark app).
+    app.setPalette(build_palette(tokens))
     app.setStyleSheet(get_stylesheet(tokens))
+
+
+def _qcolor(tokens: dict, key: str):
+    """Return the token as a QColor, falling back to the built-in palette."""
+    from PySide6.QtGui import QColor
+
+    color = QColor(str(tokens.get(key, "")))
+    if not color.isValid():
+        color = QColor(_default_tokens()[key])
+    return color
+
+
+def build_palette(tokens: dict):
+    """Build a QPalette that matches the stylesheet colours."""
+    from PySide6.QtGui import QPalette
+
+    role = QPalette.ColorRole
+    palette = QPalette()
+    roles = {
+        role.Window: "sys_color_background",
+        role.WindowText: "sys_color_text_main",
+        role.Base: "sys_color_surface",
+        role.AlternateBase: "sys_color_surface_raised",
+        role.ToolTipBase: "sys_color_surface_raised",
+        role.ToolTipText: "sys_color_text_main",
+        role.PlaceholderText: "sys_color_text_muted",
+        role.Text: "sys_color_text_main",
+        role.Button: "sys_color_surface_raised",
+        role.ButtonText: "sys_color_text_main",
+        role.BrightText: "sys_color_on_alert",
+        role.Highlight: "sys_color_primary",
+        role.HighlightedText: "sys_color_on_primary",
+        role.Link: "sys_color_primary",
+        role.LinkVisited: "sys_color_primary_light",
+        role.Light: "sys_color_border",
+        role.Midlight: "sys_color_border_muted",
+        role.Mid: "sys_color_border_muted",
+        role.Dark: "sys_color_background",
+        role.Shadow: "sys_color_background",
+    }
+    for palette_role, key in roles.items():
+        palette.setColor(palette_role, _qcolor(tokens, key))
+    disabled = QPalette.ColorGroup.Disabled
+    for palette_role in (role.WindowText, role.Text, role.ButtonText):
+        palette.setColor(disabled, palette_role, _qcolor(tokens, "sys_color_text_muted"))
+    return palette
 
 
 def _checkmark_uri(color: str) -> str:
@@ -365,7 +433,7 @@ QFrame#taskConfirmBar QLabel {{
 
 /* --- Queued messages badge --- */
 QLabel#queueBadge {{
-    color: {t['sys_color_text_muted']};
+    color: {t['sys_color_text_secondary']};
     background: transparent;
     border: none;
     padding: 2px 6px 0px 6px;
@@ -562,8 +630,3 @@ QToolTip {{
 }}
 """
 
-
-# --- BACKWARD COMPATIBILITY ---
-# Any other file still doing `from system_sl.frontend.gui.theme import SOLO_LEVELING_QSS`
-# receives the built-in dark stylesheet.
-SOLO_LEVELING_QSS = get_stylesheet(_default_tokens())

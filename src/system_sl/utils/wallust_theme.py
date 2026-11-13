@@ -39,6 +39,9 @@ from system_sl.utils.theme_gen import (
 LOG = logging.getLogger(__name__)
 
 WALLUST_CONFIG_VERSION = "1"
+# Bump whenever palette_to_tokens() changes how colours are derived, so cached
+# palettes made by the old mapping are not served after an upgrade.
+PALETTE_MAPPING_VERSION = "2"
 WALLUST_BIN_ENV = "SYSTEM_SL_WALLUST"
 WALLUST_TIMEOUT = 25.0
 
@@ -138,6 +141,26 @@ def _ensure_cache_dir() -> Path:
     return directory
 
 
+def _wallust_identity() -> str:
+    """Identify the wallust binary in use by path, size and mtime.
+
+    A different or upgraded wallust can extract different colours from the
+    same image, so it invalidates the cache. Stat only: no subprocess.
+    """
+    binary = find_wallust()
+    if not binary:
+        return "none"
+    try:
+        stat = os.stat(binary)
+    except OSError:
+        return binary
+    return f"{os.path.realpath(binary)}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _cache_version() -> str:
+    return f"{WALLUST_CONFIG_VERSION}.{PALETTE_MAPPING_VERSION}"
+
+
 def _file_fingerprint(path: str) -> str:
     try:
         stat = os.stat(path)
@@ -145,7 +168,7 @@ def _file_fingerprint(path: str) -> str:
         return ""
     raw = (
         f"{os.path.realpath(path)}|{stat.st_mtime_ns}|{stat.st_size}"
-        f"|wallust{WALLUST_CONFIG_VERSION}"
+        f"|wallust{_cache_version()}|{_wallust_identity()}"
     )
     return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
 
@@ -164,7 +187,7 @@ def _read_cache() -> Optional[dict]:
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("version") != WALLUST_CONFIG_VERSION:
+    if payload.get("version") != _cache_version():
         return None
     if not _valid_tokens(payload.get("tokens")):
         return None
@@ -174,12 +197,13 @@ def _read_cache() -> Optional[dict]:
 def _write_cache(fingerprint: str, image_path: str, tokens: Dict[str, str]) -> None:
     global _memory_cache
     payload = {
-        "version": WALLUST_CONFIG_VERSION,
+        "version": _cache_version(),
         "fingerprint": fingerprint,
         "image": image_path,
         "tokens": tokens,
     }
     _memory_cache = payload
+    handle = None
     try:
         directory = _ensure_cache_dir()
         handle = tempfile.NamedTemporaryFile(
@@ -197,8 +221,31 @@ def _write_cache(fingerprint: str, image_path: str, tokens: Dict[str, str]) -> N
         finally:
             handle.close()
         os.replace(handle.name, _cache_file())
-    except OSError as exc:
+        handle = None
+    except (OSError, TypeError, ValueError) as exc:
         LOG.debug("Could not write the wallust token cache: %s", exc)
+    finally:
+        # Anything that stopped before the rename leaves its temp file behind.
+        if handle is not None:
+            try:
+                os.unlink(handle.name)
+            except OSError:
+                pass
+
+
+def _cached_payload() -> Optional[dict]:
+    global _memory_cache
+    if _memory_cache is None:
+        _memory_cache = _read_cache()
+    if _memory_cache and _valid_tokens(_memory_cache.get("tokens")):
+        return _memory_cache
+    return None
+
+
+def cached_wallust_tokens_or_none() -> Optional[Dict[str, str]]:
+    """Return the last generated tokens, or None when nothing is cached."""
+    payload = _cached_payload()
+    return dict(payload["tokens"]) if payload else None
 
 
 def cached_wallust_tokens() -> Dict[str, str]:
@@ -208,21 +255,24 @@ def cached_wallust_tokens() -> Dict[str, str]:
     it in the background. If there is no cache, the built-in dark tokens are a
     safe, readable theme.
     """
-    global _memory_cache
-    if _memory_cache is None:
-        _memory_cache = _read_cache()
-    if _memory_cache and _valid_tokens(_memory_cache.get("tokens")):
-        return dict(_memory_cache["tokens"])
-    return dict(DEFAULT_TOKENS)
+    return cached_wallust_tokens_or_none() or dict(DEFAULT_TOKENS)
 
 
-def cached_wallust_fingerprint() -> str:
-    global _memory_cache
-    if _memory_cache is None:
-        _memory_cache = _read_cache()
-    if _memory_cache:
-        return str(_memory_cache.get("fingerprint") or "")
-    return ""
+def cached_tokens_for(image_path: str) -> Optional[Dict[str, str]]:
+    """Return the cached palette if it was made from this exact image.
+
+    Only stats the file, so the GUI thread can ask before deciding whether a
+    wallust run is needed at all.
+    """
+    payload = _cached_payload()
+    if not payload:
+        return None
+    resolved = resolve_wallpaper_path(image_path)
+    if not resolved:
+        return None
+    if payload.get("fingerprint") != _file_fingerprint(resolved):
+        return None
+    return dict(payload["tokens"])
 
 
 # --------------------------------------------------------------------------
@@ -247,7 +297,9 @@ def _write_private_config(config_dir: Path, target: Path) -> None:
         'palette = "saliencedark"\n'
         "check_contrast = true\n"
         "\n[templates]\n"
-        f"system_sl = {{ template = 'palette.json', target = '{target.as_posix()}' }}\n"
+        # json.dumps gives a valid TOML basic string, so a path holding a
+        # quote or a backslash can't end the string early.
+        f"system_sl = {{ template = 'palette.json', target = {json.dumps(target.as_posix())} }}\n"
     )
     (config_dir / "wallust.toml").write_text(config, encoding="utf-8")
 
@@ -667,7 +719,18 @@ def palette_to_tokens(palette: Dict[str, str]) -> Dict[str, str]:
     text_highlight = _ensure_contrast(
         _with_lightness(primary, max(0.84, _hls(primary)[1])), surface, 4.5
     )
+    # Muted text is only used for disabled controls, which WCAG exempts;
+    # 3:1 keeps them visibly inactive but still legible.
     text_muted = _ensure_contrast(_mix(text_main, background, 0.55), surface, 3.0)
+
+    # Translucent fills, flattened onto the surface they are drawn over, so
+    # the text on them can be checked: button text sits on primary_dim, and
+    # highlighted or selected text sits on primary_hover.
+    dim_fill = _mix(surface, primary, 0.10)
+    hover_fill = _mix(surface, primary, 0.20)
+    primary_light = _ensure_contrast(primary_light, dim_fill, 4.5)
+    text_highlight = _ensure_contrast(text_highlight, hover_fill, 4.5)
+    selection_text = _ensure_contrast(_text_on(border), hover_fill, 4.5)
 
     success = _pick_semantic(palette, ((85, 175),), "#4ade80")
     success = _ensure_contrast(success, surface, 4.5)
@@ -695,5 +758,5 @@ def palette_to_tokens(palette: Dict[str, str]) -> Dict[str, str]:
         "sys_color_alert": alert,
         "sys_color_on_alert": _text_on(alert),
         "sys_color_disabled_surface": "rgba(255, 255, 255, 0.03)",
-        "sys_color_selection_text": _text_on(border),
+        "sys_color_selection_text": selection_text,
     }
