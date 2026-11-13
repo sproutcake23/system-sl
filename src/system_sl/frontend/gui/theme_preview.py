@@ -1,7 +1,7 @@
-"""Settings preview of the active palette, with Dynamic-mode controls.
+"""Settings preview of the Dynamic palette, with its wallpaper controls.
 
-Shows a row of colour swatches for the palette on screen, so the player can
-see what Dynamic picked up. In Dynamic mode it adds:
+Shown only in Dynamic mode: a caption, a row of colour swatches for the
+palette on screen so the player can see what was picked up, and:
 
 * Refresh from wallpaper: look at the wallpaper again now;
 * Choose wallpaper…: take colours from a picked image instead of the
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -40,7 +41,7 @@ SWATCH_SIZE = 22
 
 
 class ThemePreview(QWidget):
-    """Palette swatches plus the Dynamic wallpaper controls."""
+    """Dynamic-mode caption, palette swatches and wallpaper controls."""
 
     def __init__(self, manager, button_height: int | None = None, parent=None):
         super().__init__(parent)
@@ -49,6 +50,10 @@ class ThemePreview(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(6)
+
+        self.caption = QLabel()
+        self.caption.setObjectName("themePreviewCaption")
+        root.addWidget(self.caption)
 
         swatch_row = QHBoxLayout()
         swatch_row.setSpacing(4)
@@ -81,20 +86,17 @@ class ThemePreview(QWidget):
             lambda: self._manager.set_wallpaper_override(None)
         )
 
-        self._dynamic_controls = QWidget()
-        controls = QVBoxLayout(self._dynamic_controls)
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.setSpacing(6)
         for button in (self.refresh_button, self.choose_button, self.detected_button):
             button.setCursor(Qt.PointingHandCursor)
             if button_height:
                 button.setFixedHeight(button_height)
-            controls.addWidget(button, alignment=Qt.AlignmentFlag.AlignLeft)
-        root.addWidget(self._dynamic_controls)
+            root.addWidget(button, alignment=Qt.AlignmentFlag.AlignLeft)
 
         manager.themeChanged.connect(self._paint)
         manager.modeChanged.connect(self._update_controls)
         manager.overrideChanged.connect(lambda _path: self._update_controls())
+        # The source path can change without the colours changing.
+        manager.statusChanged.connect(lambda _msg: self._update_caption())
         self._paint(manager.tokens)
         self._update_controls()
 
@@ -110,9 +112,17 @@ class ThemePreview(QWidget):
             swatch.setToolTip(f"{label}: {value}")
 
     def _update_controls(self, *_args) -> None:
-        dynamic = self._manager.mode == "dynamic"
-        self._dynamic_controls.setVisible(dynamic)
-        self.detected_button.setVisible(dynamic and bool(self._manager.wallpaper_override))
+        self.setVisible(self._manager.mode == "dynamic")
+        self.detected_button.setVisible(bool(self._manager.wallpaper_override))
+        self._update_caption()
+
+    def _update_caption(self) -> None:
+        if self._manager.wallpaper_override:
+            self.caption.setText("Colours from your chosen image")
+        else:
+            self.caption.setText("Colours from your wallpaper")
+        # The full path is still available, just not shouting in red.
+        self.caption.setToolTip(self._manager.palette_source)
 
     def _choose_wallpaper(self) -> None:
         current = self._manager.wallpaper_override

@@ -474,7 +474,7 @@ class ThemeManager(QObject):
             self._failures = 0
             if cached != self._tokens:
                 self._apply(cached)
-            self._palette_status = self._wallpaper_status()
+            self._palette_status = ""
             self._set_status(self._palette_status)
             return
 
@@ -512,7 +512,9 @@ class ThemeManager(QObject):
             self._failures = 0
             self._retry_timer.stop()
             self._apply(result.tokens)
-            self._palette_status = self._wallpaper_status()
+            # Success is shown by the preview caption, not the status line,
+            # which is kept for problems and progress.
+            self._palette_status = ""
         else:
             # Keep whatever is on screen and try this wallpaper again later.
             # Committing the fingerprint here used to pin the built-in navy
@@ -537,13 +539,9 @@ class ThemeManager(QObject):
         if pending is not None and pending.fingerprint != fingerprint:
             self._start_extract(pending)
 
-    def _wallpaper_status(self) -> str:
-        """Describe the wallpaper the palette was taken from.
-
-        Without this the Settings panel shows a blank status in Dynamic mode,
-        which is indistinguishable from Dark mode and leaves the player
-        guessing which wallpaper was picked up.
-        """
+    @property
+    def palette_source(self) -> str:
+        """Describe the wallpaper the Dynamic palette was taken from, or ""."""
         path = self._detected_path
         if not path:
             return ""

@@ -359,6 +359,11 @@ QLabel#themeStatus {{
     font-size: 11px;
 }}
 
+QLabel#themePreviewCaption {{
+    color: {t['sys_color_text_secondary']};
+    font-size: 11px;
+}}
+
 /* --- Checkbox --- */
 QCheckBox {{
     color: {t['sys_color_text_secondary']};
