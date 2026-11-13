@@ -71,6 +71,6 @@ uv run build-sl
 - [Installation](Installation)
 - [Features](Features)
 - [Google Tasks Sync](Google-Tasks-Sync)
-- [CLI Usage](CLI-Usage)
+- [Command-Line Flags](Command-Line-Flags)
 - [Background Service](Background-Service)
 - [Building and Releasing](Building-and-Releasing)
