@@ -492,8 +492,3 @@ class ChatSession:
 def reload_agent() -> None:
     """Reload the agent with current config. Call after config changes."""
     reset_agent_cache()
-
-
-if __name__ == "__main__":
-    session = ChatSession()
-    print(session.run_turn("Hello"))

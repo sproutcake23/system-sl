@@ -1403,58 +1403,54 @@ class ChatPanel(QWidget):
 
         has_config = bool(current_model and config.provider)
 
-        # Track model IDs we've already added to avoid duplicates.
-        # Value is the display text for the richest source.
-        seen_models: dict[str, str] = {}
+        # Each group is a list of (display, model_id, enabled). Groups are
+        # added in priority order with a separator between non-empty ones; a
+        # model already listed by an earlier group is skipped.
+        groups: list[list[tuple[str, str, bool]]] = []
 
-        def add_model(model_id: str, display: str) -> None:
-            """Add a model if not already present, or keep the richer display."""
-            if model_id and model_id not in seen_models:
-                seen_models[model_id] = display
-
+        # 1. Current configured model, or a placeholder when nothing is set.
         if has_config:
-            # 1. Current configured model (first, bold) - highest priority
-            add_model(current_model, f"✦ {current_model}")
+            groups.append([(f"✦ {current_model}", current_model, True)])
         else:
-            # Placeholder when no config
-            self.model_combo.addItem("⚙ Configure LLM in Settings…", "")
-            self.model_combo.model().item(0).setEnabled(False)
+            groups.append([("⚙ Configure LLM in Settings…", "", False)])
 
-        # 2. Separator
-        self.model_combo.insertSeparator(1)
-
-        # 3. Discovered local models — a placeholder while the scan runs,
+        # 2. Discovered local models — a placeholder while the scan runs,
         #    otherwise the models found by the last scan.
         if self._discovery_running:
-            self.model_combo.addItem("🔍 Discovering local models…", "")
-            self.model_combo.model().item(self.model_combo.count() - 1).setEnabled(False)
+            groups.append([("🔍 Discovering local models…", "", False)])
         else:
-            for display, model_id in self._local_models:
-                add_model(model_id, display)
+            groups.append([(d, m, True) for d, m in self._local_models])
 
-        # 4. Cached models from OpenRouter (if any)
-        # provider is only ever "google" or "openai"; the endpoint is what
-        # identifies OpenRouter.
+        # 3. Cached models from OpenRouter (if any). provider is only ever
+        #    "google" or "openai"; the endpoint is what identifies OpenRouter.
         if config.base_url and "openrouter.ai" in config.base_url.lower():
-            cached = get_model_cache("openrouter")
-            if cached:
+            cached = get_model_cache("openrouter") or []
+            groups.append([
+                (f"☁️ {'✨ ' if m.is_free else ''}{m.name} ({m.id})", m.id, True)
+                for m in cached
+            ])
+
+        # 4. Cloud preset models (lowest priority).
+        groups.append([(d, m, True) for d, m in get_preset_models()])
+
+        seen_models: set[str] = set()
+        for group in groups:
+            entries = []
+            for display, model_id, enabled in group:
+                if model_id:
+                    if model_id in seen_models:
+                        continue
+                    seen_models.add(model_id)
+                entries.append((display, model_id, enabled))
+            if not entries:
+                continue
+            if self.model_combo.count():
                 self.model_combo.insertSeparator(self.model_combo.count())
-                for model in cached:
-                    badge = "✨ " if model.is_free else ""
-                    add_model(model.id, f"☁️ {badge}{model.name} ({model.id})")
-
-        # 5. Separator if we have cloud preset models
-        cloud_models = get_preset_models()
-        if cloud_models:
-            self.model_combo.insertSeparator(self.model_combo.count())
-
-        # 6. Cloud preset models (lowest priority)
-        for display, model_id in cloud_models:
-            add_model(model_id, display)
-
-        # Now populate the combo box in priority order
-        for model_id, display in seen_models.items():
-            self.model_combo.addItem(display, model_id)
+            for display, model_id, enabled in entries:
+                self.model_combo.addItem(display, model_id)
+                if not enabled:
+                    last = self.model_combo.count() - 1
+                    self.model_combo.model().item(last).setEnabled(False)
 
         # Select current model
         self.model_combo.blockSignals(False)

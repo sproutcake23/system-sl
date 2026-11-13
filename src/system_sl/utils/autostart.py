@@ -236,8 +236,13 @@ class CrossPlatformAutostart:
 
         elif self.os_type == "Linux":
             desktop_path = os.path.expanduser(f"~/.config/autostart/{self.app_name.lower()}.desktop")
-            if os.path.exists(desktop_path):
+            try:
                 os.remove(desktop_path)
+            except FileNotFoundError:
+                pass  # Already disabled
+            except OSError as e:
+                log.error("Could not remove the autostart entry %s: %s", desktop_path, e)
+                return False
             return True
 
         elif self.os_type == "Darwin":  # macOS

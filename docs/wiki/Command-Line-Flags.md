@@ -1,6 +1,6 @@
-# CLI Usage
+# Command-Line Flags
 
-The SYSTEM is a desktop application. These are the commands and flags for launching it.
+The SYSTEM is a desktop application with no command-line interface of its own. These are the flags you can launch it with.
 
 ## Launching the desktop app
 
@@ -14,7 +14,7 @@ Or, if installed globally:
 system-sl
 ```
 
-On first launch an **LLM Settings** dialog asks for the chatbot provider, model and API key. The settings are saved to `llm_config.json` in the system-sl data directory, and the API key to your system keyring. Change them later under **Settings → LLM**.
+On first launch the optional Player Profile wizard opens, then the main window. Tasks, ranking and reminders work without a chatbot provider; the chat panel asks for a provider, model and API key the first time you send a message. The settings are saved to `llm_config.json` in the system-sl data directory, and the API key to your system keyring. Change them later under **Settings → LLM**.
 
 ## Background notifier mode
 

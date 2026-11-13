@@ -152,8 +152,3 @@ class GoogleSyncEngine:
 
 
 # Example execution block
-if __name__ == "__main__":
-    # Create the sync manager
-    engine = GoogleSyncEngine()
-    
-    engine.execute_sync(TasksProvider(engine.client))

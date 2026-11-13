@@ -428,3 +428,38 @@ def test_theme_change_mid_reply_redraws_when_the_turn_ends(panel):
         widget._thread = None
     widget._redraw_for_theme()
     assert not widget._theme_redraw_pending
+
+
+def test_model_dropdown_separators_divide_the_groups(panel, monkeypatch):
+    widget, _app = panel
+    import system_sl.chatbot as chatbot_pkg
+
+    monkeypatch.setattr(
+        chatbot_pkg, "get_preset_models",
+        lambda: [("Cloud A", "cloud-a"), ("Local dup", "local-1")],
+    )
+    widget._discovery_running = False
+    widget._local_models = [("Local 1", "local-1"), ("Local 2", "local-2")]
+
+    widget._populate_model_list()
+
+    combo = widget.model_combo
+    texts = [combo.itemText(i) for i in range(combo.count())]
+    # Head entry, local group, preset group; "" marks a separator. The
+    # preset entry for local-1 is dropped as a duplicate.
+    assert texts[1:] == ["", "Local 1", "Local 2", "", "Cloud A"]
+    assert texts[0]
+
+
+def test_model_dropdown_skips_separators_for_empty_groups(panel, monkeypatch):
+    widget, _app = panel
+    import system_sl.chatbot as chatbot_pkg
+
+    monkeypatch.setattr(chatbot_pkg, "get_preset_models", lambda: [])
+    widget._discovery_running = False
+    widget._local_models = []
+
+    widget._populate_model_list()
+
+    combo = widget.model_combo
+    assert [combo.itemText(i) for i in range(combo.count())] == [combo.itemText(0)]

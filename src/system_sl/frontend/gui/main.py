@@ -45,7 +45,7 @@ from system_sl.services import BackgroundServiceController
 from system_sl.utils.audio_manager import (
     play_sound,
     set_sound_setting,
-    DEFAULT_SOUNDS_DIR,
+    default_sounds_dir,
 )
 from system_sl.utils.autostart_migration import initialize_application_autostart
 from system_sl.utils.worker_threads import new_worker_thread, shutdown_workers
@@ -773,7 +773,7 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Notification Sound",
-            str(DEFAULT_SOUNDS_DIR),
+            str(default_sounds_dir()),
             "Audio Files (*.wav *.mp3)",
         )
         if file_path:
