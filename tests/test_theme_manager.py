@@ -119,3 +119,83 @@ def test_unopenable_wallpaper_reports_an_error_not_a_bare_path(tmp_path):
     assert not state.ok
     assert state.error != str(tmp_path / "gone.png")
     assert "could not be opened" in state.error
+
+
+def test_cached_palette_for_the_same_image_skips_wallust(manager, monkeypatch):
+    from system_sl.frontend.gui import theme_manager as tm
+    from system_sl.utils.theme_gen import DEFAULT_TOKENS
+
+    palette = dict(DEFAULT_TOKENS, sys_color_surface="#123456")
+    monkeypatch.setattr(tm, "cached_tokens_for", lambda path: palette)
+    started = []
+    monkeypatch.setattr(manager, "_start_extract", lambda state: started.append(state))
+
+    manager._on_state(_state("fp-9"))
+
+    assert started == []
+    assert manager._fingerprint == "fp-9"
+    assert manager.tokens["sys_color_surface"] == "#123456"
+
+
+def test_first_switch_keeps_colours_and_says_it_is_working(manager, monkeypatch):
+    from system_sl.frontend.gui import theme_manager as tm
+
+    monkeypatch.setattr(tm, "find_wallust", lambda: "/usr/bin/wallust")
+    monkeypatch.setattr(tm, "cached_wallust_tokens_or_none", lambda: None)
+    monkeypatch.setattr(manager, "_refresh_watch_paths", lambda extra=(): None)
+    monkeypatch.setattr(manager, "_probe", lambda: None)
+    before = dict(manager.tokens, sys_color_surface="#abcdef")
+    manager._tokens = before
+
+    manager._start_dynamic()
+
+    assert manager.tokens == before
+    assert manager.status_message == tm.READING_STATUS
+
+
+def test_installing_wallust_later_starts_dynamic(manager, monkeypatch):
+    from system_sl.frontend.gui import theme_manager as tm
+
+    found = {"path": None}
+    monkeypatch.setattr(tm, "find_wallust", lambda: found["path"])
+    monkeypatch.setattr(tm, "cached_wallust_tokens_or_none", lambda: None)
+    monkeypatch.setattr(manager, "_refresh_watch_paths", lambda extra=(): None)
+    probes = []
+    monkeypatch.setattr(manager, "_probe", lambda: probes.append(1))
+
+    manager._start_dynamic()
+    assert manager._wallust_timer.isActive()
+
+    found["path"] = "/usr/bin/wallust"
+    manager._recheck_wallust()
+    assert not manager._wallust_timer.isActive()
+    assert probes == [1]
+
+
+def test_unknown_system_scheme_is_probed_off_the_gui_thread(manager, monkeypatch):
+    from system_sl.frontend.gui import theme_manager as tm
+
+    manager._mode = "system"
+    monkeypatch.setattr(tm, "qt_color_scheme", lambda: None)
+    called = []
+    monkeypatch.setattr(tm, "get_tokens_for_mode", lambda mode: called.append(mode))
+    started = []
+
+    class FakeThread:
+        def __init__(self, parent):
+            self.tokensReady = self.finished = self
+
+        def connect(self, slot):
+            pass
+
+        def deleteLater(self):
+            pass
+
+        def start(self):
+            started.append(1)
+
+    monkeypatch.setattr(tm, "_SchemeThread", FakeThread)
+    manager._check_system_scheme()
+
+    assert called == []
+    assert started == [1]
