@@ -15,6 +15,9 @@ from system_sl.utils.logging_setup import configure_logging
 def main() -> int:
     """Run the background notifier or the full GUI, depending on the flags."""
     configure_logging()
+    from system_sl.utils.audio_manager import initialize_audio
+
+    initialize_audio()
     if "--bg" in sys.argv:
         from system_sl.frontend.gui.notifier import main as notifier_main
         return notifier_main()

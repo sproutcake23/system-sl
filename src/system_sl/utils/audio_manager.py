@@ -3,26 +3,33 @@ import sys
 import shutil
 from pathlib import Path
 
-# 1. Force the environment to be quiet before Qt even loads
-os.environ["AV_LOG_LEVEL"] = "quiet"
-os.environ["QT_LOGGING_RULES"] = "*=false"
-
 from PySide6.QtCore import QUrl, QEventLoop, QTimer, QtMsgType, qInstallMessageHandler
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from system_sl.utils.json_client import load_data, save_data
 from system_sl.utils.paths import get_tasks_file_path, get_sounds_dir
 
-# 2. Native Qt Silencer: Drops remaining C-level logs, but keeps critical and
-# fatal ones so a crash (e.g. a platform plugin failing to load) shows why.
 def _silent_qt_message_handler(mode, context, message):
     if mode in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
         sys.stderr.write(f"{message}\n")
         sys.stderr.flush()
-qInstallMessageHandler(_silent_qt_message_handler)
 
 
 DEFAULT_SOUNDS_DIR = get_sounds_dir()
-os.makedirs(DEFAULT_SOUNDS_DIR, exist_ok=True)
+_initialized = False
+
+
+def initialize_audio() -> None:
+    """Apply process-wide audio settings once, not at import time."""
+    global _initialized
+    if _initialized:
+        return
+    # Force Qt Multimedia to be quiet before it loads; keep critical/fatal
+    # messages so a platform-plugin failure still explains itself.
+    os.environ["AV_LOG_LEVEL"] = "quiet"
+    os.environ["QT_LOGGING_RULES"] = "*=false"
+    qInstallMessageHandler(_silent_qt_message_handler)
+    os.makedirs(DEFAULT_SOUNDS_DIR, exist_ok=True)
+    _initialized = True
 
 # The bundled notification cue is default.mp3. There is no default.wav, so the
 # old fallback pointed at a file that never existed and every notification
@@ -34,6 +41,7 @@ _audio_output = None
 
 def _get_player():
     global _player, _audio_output
+    initialize_audio()
     if _player is None:
         _player = QMediaPlayer()
         _audio_output = QAudioOutput()
@@ -129,6 +137,7 @@ def set_sound_setting(file_path: str):
 
 def list_available_sounds() -> list[str]:
     """Returns a list of available sound files in the sounds directory."""
+    initialize_audio()
     sounds = []
     if DEFAULT_SOUNDS_DIR.exists():
         for f in DEFAULT_SOUNDS_DIR.glob("*.mp3"):

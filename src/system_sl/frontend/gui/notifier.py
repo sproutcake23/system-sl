@@ -30,6 +30,9 @@ def main():
     from system_sl.utils.logging_setup import configure_logging
 
     configure_logging()
+    from system_sl.utils.audio_manager import initialize_audio
+
+    initialize_audio()
     # Handle --install-desktop before Qt initialization
     if "--install-desktop" in sys.argv:
         from system_sl.frontend.gui.desktop_entry import install_desktop_entry

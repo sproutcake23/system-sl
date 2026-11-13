@@ -888,6 +888,9 @@ def main():
     from system_sl.utils.logging_setup import configure_logging
 
     configure_logging()
+    from system_sl.utils.audio_manager import initialize_audio
+
+    initialize_audio()
     if "--check-ocr" in sys.argv:
         _run_ocr_check()
     if "--check-gui" in sys.argv:
