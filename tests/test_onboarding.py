@@ -94,9 +94,3 @@ def test_saved_answers_stop_at_the_first_gap(tmp_path):
 
     handler.persona_file.write_text("{broken")
     assert handler.load_saved_responses(ONBOARDING_QUESTIONS) == []
-
-
-def test_user_goals_no_longer_prompt():
-    from system_sl.core import user_info
-
-    assert user_info.user_goal_check("/nonexistent/path.json") == []

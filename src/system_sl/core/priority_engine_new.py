@@ -757,21 +757,3 @@ def display_prioritized_tasks(result: dict) -> None:
             bar = "█" * int(t["pull_normalized"] * 20)
             log.info(f" [{bar:<20}] {t['title'][:40]} (P={t['P_final']:.4f})")
     log.info("\n")
-
-
-if __name__ == "__main__":
-    import sys
-
-    if "--record" in sys.argv:
-        idx = sys.argv.index("--record")
-        if idx + 1 < len(sys.argv):
-            title = sys.argv[idx + 1]
-            try:
-                with open(Setup()._get_file_path("prioritize.json"), "r") as f:
-                    ranked = json.load(f).get("all_tasks_ranked", [])
-                ThompsonSampler().record_feedback(title, ranked)
-                log.info(f"✓ Bandit updated for '{title}'")
-            except Exception as e:
-                log.info(f"✗ Error updating bandit: {e}")
-    else:
-        run_prioritization(use_thompson=False)
