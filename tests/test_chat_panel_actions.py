@@ -376,3 +376,25 @@ def test_turn_usage_is_added_to_the_conversation_total(panel, monkeypatch):
     widget._record_turn_usage(widget._thread_id)
     assert memory_mod.get_conversation(widget._thread_id)["usage"]["input_tokens"] == 1_000_000
     assert "conversation 1M tokens ~$1.00" in widget.usage_label.text()
+
+
+def test_delete_chat_removes_it_and_opens_the_next(panel, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from system_sl.chatbot import memory as memory_mod
+
+    widget, _app = panel
+    keep = memory_mod.create_conversation(model_name="m", title="keep")["id"]
+    doomed = memory_mod.create_conversation(model_name="m", title="doomed")["id"]
+    widget._open_conversation(doomed)
+
+    # Declining keeps it.
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    widget._on_delete_chat()
+    assert memory_mod.get_conversation(doomed) is not None
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    widget._on_delete_chat()
+    assert memory_mod.get_conversation(doomed) is None
+    assert widget._thread_id == keep
+    assert widget.history_combo.findData(doomed) < 0

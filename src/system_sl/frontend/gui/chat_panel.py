@@ -1183,6 +1183,17 @@ class ChatPanel(QWidget):
         self.new_chat_btn.setAccessibleDescription("Start a fresh conversation with a new thread ID")
         self.new_chat_btn.clicked.connect(self._on_new_chat)
         chat_row.addWidget(self.new_chat_btn)
+
+        self.delete_chat_btn = QPushButton()
+        self.delete_chat_btn.setIcon(get_icon("delete_chat"))
+        self.delete_chat_btn.setFixedWidth(36)
+        self.delete_chat_btn.setToolTip("Delete this conversation")
+        self.delete_chat_btn.setAccessibleName("Delete conversation")
+        self.delete_chat_btn.setAccessibleDescription(
+            "Permanently delete the open conversation and its history"
+        )
+        self.delete_chat_btn.clicked.connect(self._on_delete_chat)
+        chat_row.addWidget(self.delete_chat_btn)
         root.addLayout(chat_row)
 
         # --- Transcript ---
@@ -1647,6 +1658,50 @@ class ChatPanel(QWidget):
         self._estimate_context([])
         self._refresh_history_combo()
         self.input_box.setFocus()
+
+    def _on_delete_chat(self) -> None:
+        """Delete the open conversation, after asking, and open another."""
+        if self.is_busy() or not self._thread_id:
+            return
+        from system_sl.chatbot.memory import (
+            delete_conversation,
+            get_conversation,
+            list_conversations,
+        )
+
+        entry = get_conversation(self._thread_id)
+        if entry is None:
+            # An unsaved new chat: nothing is stored, so just start over.
+            self._on_new_chat()
+            return
+
+        title = self._conversation_label(entry)
+        answer = QMessageBox.question(
+            self,
+            "Delete conversation?",
+            f"Delete \"{title}\" and its whole history? This can't be undone.\n\n"
+            "Tasks it added are kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        # Settle anything still tied to this conversation before it goes.
+        self._clear_proposals()
+        self._session = None
+        try:
+            delete_conversation(self._thread_id)
+        except Exception:
+            logger.warning("could not delete conversation %s", self._thread_id, exc_info=True)
+            self._append_alert("could not delete this conversation")
+            return
+
+        remaining = list_conversations()
+        if remaining:
+            self._open_conversation(remaining[0]["id"])
+        else:
+            self._on_new_chat()
 
     def _on_history_changed(self, index: int) -> None:
         """Reopen the conversation picked in the dropdown."""
@@ -3534,6 +3589,7 @@ class ChatPanel(QWidget):
         # Switching conversations mid-reply would orphan the running turn.
         self.history_combo.setEnabled(not busy)
         self.new_chat_btn.setEnabled(not busy)
+        self.delete_chat_btn.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
         self.busy_changed.emit(busy)
 
