@@ -166,6 +166,33 @@ class PersonaStorageHandler:
             return True
         return not self.has_been_asked()
 
+    def load_saved_responses(self, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return the saved answers in question order, for prefilling a re-run.
+
+        Answers are matched by question id. The list stops at the first
+        question with no saved answer, because the wizard treats it as the
+        answers given so far. A profile that is incomplete (for example after
+        the questions changed) still prefills what it has; one that is
+        missing or unreadable gives ``[]``.
+        """
+        try:
+            with open(self.persona_file, "r", encoding="utf-8") as file_pointer:
+                saved = json.load(file_pointer).get("responses") or []
+        except (OSError, ValueError, AttributeError):
+            return []
+        by_id = {
+            r.get("question_id"): r
+            for r in saved
+            if isinstance(r, dict) and isinstance(r.get("answer"), str)
+        }
+        ordered = []
+        for question in questions:
+            response = by_id.get(question["id"])
+            if response is None:
+                break
+            ordered.append(dict(response))
+        return ordered
+
     def ensure_data_directory(self) -> None:
         """Ensures the application data directories are physically allocated on disk."""
         self.data_dir.mkdir(parents=True, exist_ok=True)

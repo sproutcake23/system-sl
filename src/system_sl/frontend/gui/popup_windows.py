@@ -789,7 +789,9 @@ class OnboardingWindow(QWidget):
         )
 
     def _on_begin(self):
-        self.responses.clear()
+        # Re-running onboarding starts from the saved answers, so changing one
+        # answer doesn't mean typing all the others again.
+        self.responses = self.storage.load_saved_responses(self.questions)
         self.current_index = 0
         self._show_question()
         self.stack.setCurrentIndex(1)
