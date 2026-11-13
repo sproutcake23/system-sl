@@ -192,7 +192,8 @@ def _resolve_task_id(title: str, category: str | None = None) -> str:
     """
     wanted = (title or "").strip()
     matches = [
-        t for t in load_tasks()
+        # core_load_tasks: in this module ``load_tasks`` is the chat tool.
+        t for t in core_load_tasks()
         if isinstance(t, dict) and t.get("title") == wanted and t.get("id")
     ]
     if not matches:
