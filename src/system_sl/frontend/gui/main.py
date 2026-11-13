@@ -307,6 +307,12 @@ class MainWindow(QMainWindow):
         )
         self.theme_status.setVisible(bool(self._theme_status_text))
 
+        from system_sl.frontend.gui.theme_preview import ThemePreview
+
+        self.theme_preview = ThemePreview(
+            self.theme_manager, button_height=SIDEBAR_BUTTON_SIZE
+        )
+
         self.profile_button = QPushButton("Edit Player Profile")
         self.profile_button.setIcon(get_icon("profile"))
         self.profile_button.clicked.connect(self._edit_profile_from_settings)
@@ -353,7 +359,7 @@ class MainWindow(QMainWindow):
 
         sections = (
             ("Notifications", (self.notifications_check, self.check_box, self.sound_button)),
-            ("Appearance", (self.theme_combo, self.theme_status)),
+            ("Appearance", (self.theme_combo, self.theme_preview, self.theme_status)),
             ("Player", (self.profile_button,)),
             (
                 "App",

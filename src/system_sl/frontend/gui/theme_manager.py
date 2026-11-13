@@ -29,7 +29,12 @@ from system_sl.frontend.gui.theme import (
     set_active_tokens,
 )
 from system_sl.utils.system_theme import qt_color_scheme
-from system_sl.utils.wallpaper_path import WallpaperState, get_wallpaper_state, watch_paths
+from system_sl.utils.wallpaper_path import (
+    WallpaperState,
+    get_wallpaper_state,
+    state_for_image,
+    watch_paths,
+)
 from system_sl.utils.wallust_theme import (
     cancel_extractions,
     ExtractionResult,
@@ -51,6 +56,8 @@ SYSTEM_POLL_MS = 30_000
 # takes effect without restarting the app.
 WALLUST_RECHECK_MS = 60_000
 READING_STATUS = "Reading colours from your wallpaper…"
+# QSettings key for a wallpaper the player picked by hand in Settings.
+WALLPAPER_OVERRIDE_KEY = "dynamic_wallpaper_override"
 DEBOUNCE_MS = 450
 # Waits before re-trying a wallpaper whose extraction failed: 15s, 30s, 60s...
 # up to 10 minutes. A transient failure (a timeout, a file mid-write) recovers
@@ -125,6 +132,8 @@ class _ExtractThread(QThread):
 class ThemeManager(QObject):
     themeChanged = Signal(dict)
     statusChanged = Signal(str)
+    modeChanged = Signal(str)
+    overrideChanged = Signal(str)  # "" when the detected wallpaper is used
 
     def __init__(self, app: QApplication):
         super().__init__()
@@ -232,6 +241,37 @@ class ThemeManager(QObject):
     def status_message(self) -> str:
         return self._status_message
 
+    @property
+    def wallpaper_override(self) -> str:
+        """The image picked by hand in Settings, or "" to use detection."""
+        value = self._settings.value(WALLPAPER_OVERRIDE_KEY, "", type=str)
+        return value or ""
+
+    def set_wallpaper_override(self, path: str | None) -> None:
+        """Use ``path`` for Dynamic colours instead of the detected wallpaper.
+
+        ``None`` or "" goes back to detection. Useful on desktops where the
+        wallpaper can't be detected, or to try a palette from another image.
+        """
+        path = path or ""
+        if path:
+            self._settings.setValue(WALLPAPER_OVERRIDE_KEY, path)
+        else:
+            self._settings.remove(WALLPAPER_OVERRIDE_KEY)
+        self._settings.sync()
+        self.overrideChanged.emit(path)
+        self.refresh_wallpaper()
+
+    def refresh_wallpaper(self) -> None:
+        """Look at the wallpaper again now, forgetting any failure backoff."""
+        if self._mode != "dynamic":
+            return
+        self._fingerprint = None
+        self._failed_fingerprint = None
+        self._failures = 0
+        self._retry_timer.stop()
+        self._probe()
+
     def _set_status(self, message: str) -> None:
         self._status_message = message
         self.statusChanged.emit(message)
@@ -264,6 +304,7 @@ class ThemeManager(QObject):
                 self._scheme_timer.start()
             self._set_status("")
             self._apply(get_tokens_for_mode(mode))
+        self.modeChanged.emit(mode)
 
     # ------------------------------------------------------------------
     # System mode
@@ -371,6 +412,12 @@ class ThemeManager(QObject):
 
     def _probe(self) -> None:
         if self._mode != "dynamic" or self._probe_running:
+            return
+        override = self.wallpaper_override
+        if override:
+            # A chosen file needs only a stat, not the desktop probes.
+            self._probe_running = True
+            self._on_state(state_for_image(override))
             return
         self._probe_running = True
         thread = _ProbeThread(self)
@@ -500,6 +547,8 @@ class ThemeManager(QObject):
         path = self._detected_path
         if not path:
             return ""
+        if self.wallpaper_override:
+            return f"Using your chosen wallpaper: {path}"
         return f"Using wallpaper: {path}"
 
     def _on_watch_event(self, _path: str) -> None:
