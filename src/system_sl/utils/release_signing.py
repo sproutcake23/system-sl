@@ -15,9 +15,13 @@ docs/wiki/Building-and-Releasing.md.
 
 from __future__ import annotations
 
-# Ed25519 public key (PEM) matching the RELEASE_SIGNING_KEY secret. Empty
-# until a key has been generated; updates are refused while it is empty.
-RELEASE_PUBLIC_KEY_PEM = ""
+# Ed25519 public key (PEM) matching the RELEASE_SIGNING_KEY secret. Updates
+# are refused if this is empty.
+RELEASE_PUBLIC_KEY_PEM = """\
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAwKhFUM9WKBAtPXGVz9kWYDgreB3Cj4D1PQvQ3RiOaVI=
+-----END PUBLIC KEY-----
+"""
 
 SIGNATURE_SUFFIX = ".sig"
 

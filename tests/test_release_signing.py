@@ -2,7 +2,10 @@
 
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 
 import system_sl.utils.release_signing as rs
 from system_sl.utils.auto_updater import find_signature_asset, signature_failure
@@ -67,3 +70,35 @@ def test_signature_asset_is_found_next_to_the_checksums():
     assert find_signature_asset(assets, checksums) is signature
     assert find_signature_asset(assets[:2], checksums) is None
     assert find_signature_asset(assets, None) is None
+
+
+def test_the_app_ships_a_valid_release_key():
+    """A build without the key could never update, so it must not be released."""
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+    assert rs.RELEASE_PUBLIC_KEY_PEM.strip(), "RELEASE_PUBLIC_KEY_PEM is empty"
+    key = load_pem_public_key(rs.RELEASE_PUBLIC_KEY_PEM.encode("ascii"))
+    assert isinstance(key, Ed25519PublicKey)
+
+
+def test_the_built_in_key_matches_the_local_signing_key(tmp_path):
+    """When the maintainer's key file is present, it must match the app's key.
+
+    Signs with the same openssl command the release workflow uses.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    path = os.path.expanduser("~/system-sl-release.pem")
+    if not os.path.exists(path) or shutil.which("openssl") is None:
+        pytest.skip("no local signing key")
+    data = tmp_path / "SHA256SUMS.txt"
+    data.write_bytes(CHECKSUMS)
+    sig = tmp_path / "SHA256SUMS.txt.sig"
+    subprocess.run(
+        ["openssl", "pkeyutl", "-sign", "-inkey", path, "-rawin",
+         "-in", str(data), "-out", str(sig)],
+        capture_output=True, check=True,
+    )
+    rs.verify_checksums_signature(CHECKSUMS, sig.read_bytes())
