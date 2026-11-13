@@ -964,8 +964,8 @@ class BatchProposalDialog(QDialog):
         self._decided = False
 
         tokens = get_current_theme_tokens()
-        self._duplicate_tint = QColor(tokens.get("sys_color_alert", "#ff6b8a"))
-        self._duplicate_tint.setAlpha(70)
+        self._duplicate_tint = self._tint_for(tokens)
+        self._duplicate_rows: list[int] = []
 
         self._original_tasks = tasks
         self._existing_titles = {str(task.get("title", "")) for task in load_tasks()}
@@ -976,10 +976,8 @@ class BatchProposalDialog(QDialog):
 
         # Header label
         header = QLabel(f"Review {len(tasks)} task(s) extracted from document:")
-        header.setStyleSheet(
-            "font-weight: bold; font-size: 13px; "
-            f"color: {tokens.get('sys_color_text_main', '#d6e7ff')};"
-        )
+        self._header = header
+        self._style_header(tokens)
         root.addWidget(header)
 
         # Table widget
@@ -1029,6 +1027,7 @@ class BatchProposalDialog(QDialog):
 
             # Highlight duplicates
             if title in self._existing_titles:
+                self._duplicate_rows.append(row)
                 for col in range(4):
                     item = self.table.item(row, col)
                     if item:
@@ -1069,6 +1068,29 @@ class BatchProposalDialog(QDialog):
         btn_row.addWidget(self.cancel_btn)
 
         root.addLayout(btn_row)
+
+    @staticmethod
+    def _tint_for(tokens: dict) -> QColor:
+        tint = QColor(tokens.get("sys_color_alert", "#ff6b8a"))
+        tint.setAlpha(70)
+        return tint
+
+    def _style_header(self, tokens: dict) -> None:
+        self._header.setStyleSheet(
+            "font-weight: bold; font-size: 13px; "
+            f"color: {tokens.get('sys_color_text_main', '#d6e7ff')};"
+        )
+
+    def refresh_theme(self, tokens: dict | None = None) -> None:
+        """Recolour the header and the duplicate-row tint for a new palette."""
+        tokens = tokens or get_current_theme_tokens()
+        self._style_header(tokens)
+        self._duplicate_tint = self._tint_for(tokens)
+        for row in self._duplicate_rows:
+            for col in range(self.table.columnCount()):
+                item = self.table.item(row, col)
+                if item:
+                    item.setBackground(self._duplicate_tint)
 
     def _select_all(self) -> None:
         for row in range(self.table.rowCount()):
