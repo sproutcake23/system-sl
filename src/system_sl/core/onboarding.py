@@ -11,7 +11,6 @@
 
 import json
 import os
-from abc import ABC, abstractmethod
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -340,7 +339,7 @@ class SoloLevelingConsoleUI:
         print("""
     "The System has acknowledged your potential."
         """)
-        print(f"📊 Your Attribute Distribution:")
+        print("📊 Your Attribute Distribution:")
         print(f"   🔴 Core Attributes:       {high_priority_count} (High Priority)")
         print(f"   🟡 Secondary Attributes:  {medium_priority_count} (Medium Priority)")
         print(f"   🟢 Support Attributes:    {low_priority_count} (Low Priority)")

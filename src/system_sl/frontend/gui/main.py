@@ -1,11 +1,13 @@
+import logging
+import json
 import os
 import sys
-import subprocess
+import threading
+from pathlib import Path
 
-from dotenv import load_dotenv, set_key
 
 from system_sl.frontend.gui.desktop_entry import install_desktop_entry
-from PySide6.QtCore import QSize, QTimer, QSettings, Qt, Slot, QObject, QThread, Signal
+from PySide6.QtCore import QSize, QTimer, QSettings, Qt, QObject, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -33,8 +35,8 @@ from system_sl import __version__
 from system_sl.utils import (
     CrossPlatformAutostart,
     SystemNotification,
-    get_tasks_file_path,
     GoogleSyncError,
+    get_tasks_file_path,
     secure_storage,
 )
 from system_sl.core import GoogleSyncEngine, TasksProvider
@@ -46,11 +48,12 @@ from system_sl.utils.audio_manager import (
     DEFAULT_SOUNDS_DIR,
 )
 from system_sl.utils.autostart_migration import initialize_application_autostart
-from system_sl.utils.worker_threads import shutdown_workers
+from system_sl.utils.worker_threads import new_worker_thread, shutdown_workers
 from system_sl.utils.notification_settings import (
     load_notifications_enabled,
     save_notifications_enabled,
 )
+from system_sl.utils.i18n import tr
 from system_sl.utils.auto_updater import (
     UpdateCheckThread,
     apply_pending_update,
@@ -58,17 +61,29 @@ from system_sl.utils.auto_updater import (
     save_auto_update_preference,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class _GoogleSyncWorker(QObject):
     """Runs the Google Tasks sync off the UI thread, since sign-in can wait on the browser."""
+
     finished = Signal(int, int)
     failed = Signal(str)
 
+    def __init__(self, cancel_event: threading.Event):
+        super().__init__()
+        self.cancel_event = cancel_event
+
     def run(self):
+        from system_sl.utils.google_api import GoogleSyncCancelled
+
         try:
-            engine = GoogleSyncEngine()
+            engine = GoogleSyncEngine(cancel_event=self.cancel_event)
             imported, skipped = engine.execute_sync(TasksProvider(engine.client))
             self.finished.emit(imported, skipped)
+        except GoogleSyncCancelled:
+            # Shutdown or a deliberate cancel: no error dialog.
+            return
         except GoogleSyncError as e:
             self.failed.emit(str(e))
         except Exception as e:
@@ -115,6 +130,7 @@ class MainWindow(QMainWindow):
         self.update_thread = None
         self._sync_thread = None
         self._sync_worker = None
+        self._sync_cancel = threading.Event()
         self._allow_exit = False
         self.close_to_tray_enabled = self.settings.value(
             "close_to_tray", False, type=bool
@@ -327,6 +343,10 @@ class MainWindow(QMainWindow):
         self.about_button.setIcon(get_icon("info"))
         self.about_button.clicked.connect(self.show_about_dialog)
 
+        self.reset_settings_btn = QPushButton(tr("Reset Settings"))
+        self.reset_settings_btn.setIcon(get_icon("refresh"))
+        self.reset_settings_btn.clicked.connect(self._reset_all_settings)
+
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setSpacing(SIDEBAR_SPACING)
@@ -343,6 +363,7 @@ class MainWindow(QMainWindow):
                     self.google_sync_toggle,
                     self.install_desktop_btn,
                     self.about_button,
+                    self.reset_settings_btn,
                 ),
             ),
         )
@@ -364,6 +385,73 @@ class MainWindow(QMainWindow):
         self.install_desktop_btn.setVisible(bool(os.environ.get("APPIMAGE")))
 
         return page
+
+    def _reset_all_settings(self) -> None:
+        """Clear QSettings, JSON settings and stored secrets, after asking."""
+        answer = QMessageBox.question(
+            self,
+            tr("Reset all settings?"),
+            tr(
+                "This clears the app's settings, chat configuration and stored "
+                "API keys, and forgets the notification sound. Tasks and chat "
+                "history are not deleted. Continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        # QSettings (theme, tray, sync toggle, window state).
+        self.settings.clear()
+
+        # JSON settings written by the chat and notification code. A staged
+        # AppImage update is recorded in settings.json too; that is app state,
+        # not a preference, so it survives the reset.
+        settings_path = Path(get_tasks_file_path("settings.json"))
+        try:
+            staged = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            staged = {}
+        staged = {
+            k: v for k, v in (staged if isinstance(staged, dict) else {}).items()
+            if k.startswith("pending_appimage_")
+        }
+        for name in ("llm_config.json", "settings.json"):
+            try:
+                Path(get_tasks_file_path(name)).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("could not remove %s", name, exc_info=True)
+        if staged:
+            try:
+                settings_path.write_text(json.dumps(staged, indent=2), encoding="utf-8")
+            except OSError:
+                logger.warning("could not keep the staged update", exc_info=True)
+
+        # Secrets stored in the keyring / encrypted fallback.
+        for secret in (
+            secure_storage.SECRET_LLM_API_KEY,
+            secure_storage.SECRET_GOOGLE_TOKEN,
+        ):
+            try:
+                secure_storage.delete_secret(secret)
+            except Exception:
+                logger.warning("could not clear %s", secret, exc_info=True)
+
+        # Reflect the defaults without pretending a restart already happened.
+        self.notifications_check.setChecked(load_notifications_enabled())
+        self.auto_update_check.setChecked(load_auto_update_preference())
+        self.google_sync_toggle.setChecked(False)
+        self.close_to_tray_enabled = False
+        self.close_to_tray_toggle.setChecked(False)
+        QMessageBox.information(
+            self,
+            tr("Settings reset"),
+            tr(
+                "Settings are back to their defaults. Restart the app to apply "
+                "the theme and chat provider changes."
+            ),
+        )
 
     def open_settings(self, tab: int = AppSettingsDialog.GENERAL_TAB) -> None:
         if self._settings_window is None:
@@ -555,7 +643,18 @@ class MainWindow(QMainWindow):
             self.tasks_window.hide()
         self.hide()
         self._stop_notifier()
+        # Cancel a sign-in waiting on the browser before waiting for workers.
+        self._sync_cancel.set()
         shutdown_workers()
+        # The SQLite checkpointer is process-wide and shared with the chat
+        # worker; close it only once that worker has stopped. If the reply
+        # outlived ChatPanel.shutdown's bounded wait, leave it open: process
+        # exit closes the connection, and closing it now would make the
+        # still-running worker fail on a closed database.
+        from system_sl.chatbot.memory import close_checkpointer
+
+        if self.chat_panel.worker_stopped():
+            close_checkpointer()
 
     def open_tasks_window(self):
         if self.tasks_window is None:
@@ -627,22 +726,28 @@ class MainWindow(QMainWindow):
 
     def sync_google_tasks(self):
         if self._sync_thread is not None:
+            # A second click while syncing cancels it, so a sign-in the
+            # Player abandoned in the browser doesn't hold the button for the
+            # full sign-in timeout.
+            self._sync_cancel.set()
+            self.google_button.setEnabled(False)
+            self._set_sidebar_button_label(self.google_button, "Cancelling...")
             return
-        self.google_button.setEnabled(False)
-        self._set_sidebar_button_label(self.google_button, "Syncing...")
+        self._set_sidebar_button_label(self.google_button, "Syncing... (cancel)")
 
-        self._sync_thread = QThread(self)
-        self._sync_worker = _GoogleSyncWorker()
-        self._sync_worker.moveToThread(self._sync_thread)
-        self._sync_thread.started.connect(self._sync_worker.run)
+        # An unparented, tracked thread: quitting cannot destroy it mid-sync,
+        # and cancelling the sign-in lets it end promptly (see _shutdown_for_quit).
+        self._sync_cancel = threading.Event()
+        self._sync_worker = _GoogleSyncWorker(self._sync_cancel)
+        self._sync_thread = new_worker_thread(self._sync_worker)
         self._sync_worker.finished.connect(self._on_google_sync_finished)
         self._sync_worker.failed.connect(self._on_google_sync_failed)
-        self._sync_worker.finished.connect(self._sync_thread.quit)
-        self._sync_worker.failed.connect(self._sync_thread.quit)
         self._sync_thread.finished.connect(self._cleanup_google_sync)
         self._sync_thread.start()
 
     def _on_google_sync_finished(self, imported: int, skipped: int):
+        if self._sync_cancel.is_set():
+            return
         if imported == 0 and skipped == 0:
             text = "No upcoming Google Tasks found."
         else:
@@ -652,13 +757,15 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Google Sync", text)
 
     def _on_google_sync_failed(self, error: str):
+        if self._sync_cancel.is_set():
+            return  # the Player cancelled; nothing to report
         QMessageBox.warning(self, "Google Sync Failed", error)
 
     def _cleanup_google_sync(self):
         self.google_button.setEnabled(True)
         self._set_sidebar_button_label(self.google_button, "Google")
-        self._sync_worker.deleteLater()
-        self._sync_thread.deleteLater()
+        # The thread and worker are owned by the worker-thread tracker until
+        # they have really finished; dropping them here is enough.
         self._sync_worker = None
         self._sync_thread = None
 
@@ -870,6 +977,12 @@ def _run_gui_check():
 
 
 def main():
+    from system_sl.utils.logging_setup import configure_logging
+
+    configure_logging()
+    from system_sl.utils.audio_manager import initialize_audio
+
+    initialize_audio()
     if "--check-ocr" in sys.argv:
         _run_ocr_check()
     if "--check-gui" in sys.argv:

@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Sequence
 
@@ -34,6 +35,7 @@ from langchain_core.messages import (
 from langsmith import uuid7
 
 from system_sl.utils.atomic_json import atomic_write_json, load_json_or_default
+from system_sl.utils.file_lock import file_lock
 from system_sl.utils.paths import get_tasks_file_path
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,19 @@ def note_body(text: str) -> str:
 
 _INDEX_VERSION = 1
 _TITLE_LIMIT = 60
+
+# The index is read-modify-write from the GUI and the background process.
+# Atomic writes prevent torn files; this lock prevents a lost update between
+# the read and the write.
+_INDEX_LOCK = threading.RLock()
+_INDEX_LOCK_PATH = CONVERSATION_INDEX_FILENAME + ".lock"
+
+
+@contextmanager
+def _index_transaction():
+    """Hold the conversation index across a read-modify-write."""
+    with _INDEX_LOCK, file_lock(get_tasks_file_path(_INDEX_LOCK_PATH)):
+        yield
 
 # =============================================================================
 # CHECKPOINTER
@@ -424,31 +439,76 @@ def active_conversation_id() -> str | None:
     return load_conversation_index()["active"]
 
 
-def create_conversation(model_name: str = "", title: str = "") -> dict:
+def create_conversation(
+    model_name: str = "", title: str = "", thread_id: str | None = None
+) -> dict:
     """Create a conversation, make it active, and return its entry."""
-    index = load_conversation_index()
-    entry = {
-        "id": new_thread_id(),
-        "title": title or "",
-        "created": _now(),
-        "updated": _now(),
-        "last_model": model_name or "",
-    }
-    index["conversations"].append(entry)
-    index["active"] = entry["id"]
-    save_conversation_index(index)
+    with _index_transaction():
+        index = load_conversation_index()
+        entry = {
+            "id": thread_id or new_thread_id(),
+            "title": title or "",
+            "created": _now(),
+            "updated": _now(),
+            "last_model": model_name or "",
+        }
+        index["conversations"].append(entry)
+        index["active"] = entry["id"]
+        save_conversation_index(index)
+    return entry
+
+
+def ensure_conversation(
+    thread_id: str,
+    *,
+    model_name: str = "",
+    title: str = "",
+    touch: bool = True,
+) -> dict | None:
+    """Return a conversation entry, creating it when it is still only local.
+
+    ``New chat`` hands out a thread id without writing an index entry, so an
+    unused conversation never appears in history. The first sent message calls
+    this to persist it.
+    """
+    with _index_transaction():
+        index = load_conversation_index()
+        entry = next(
+            (e for e in index["conversations"] if e["id"] == thread_id), None
+        )
+        if entry is None:
+            entry = create_conversation(
+                model_name=model_name, title=title, thread_id=thread_id
+            )
+            return entry
+        changed = False
+        if model_name and entry.get("last_model") != model_name:
+            entry["last_model"] = model_name
+            changed = True
+        if title and not entry.get("title"):
+            entry["title"] = title
+            changed = True
+        if touch:
+            entry["updated"] = _now()
+            changed = True
+        if changed:
+            index["active"] = thread_id
+            save_conversation_index(index)
     return entry
 
 
 def select_conversation(thread_id: str) -> dict | None:
     """Mark ``thread_id`` as the active conversation."""
-    index = load_conversation_index()
-    entry = next((e for e in index["conversations"] if e["id"] == thread_id), None)
-    if entry is None:
-        return None
-    if index["active"] != thread_id:
-        index["active"] = thread_id
-        save_conversation_index(index)
+    with _index_transaction():
+        index = load_conversation_index()
+        entry = next(
+            (e for e in index["conversations"] if e["id"] == thread_id), None
+        )
+        if entry is None:
+            return None
+        if index["active"] != thread_id:
+            index["active"] = thread_id
+            save_conversation_index(index)
     return entry
 
 
@@ -461,27 +521,30 @@ def update_conversation(
     touch: bool = True,
 ) -> dict | None:
     """Update a conversation's title/model and bump its ``updated`` stamp."""
-    index = load_conversation_index()
-    entry = next((e for e in index["conversations"] if e["id"] == thread_id), None)
-    if entry is None:
-        return None
+    with _index_transaction():
+        index = load_conversation_index()
+        entry = next(
+            (e for e in index["conversations"] if e["id"] == thread_id), None
+        )
+        if entry is None:
+            return None
 
-    changed = False
-    if title is not None and entry.get("title") != title:
-        entry["title"] = title
-        changed = True
-    if title_if_empty and not entry.get("title"):
-        entry["title"] = title_if_empty
-        changed = True
-    if last_model is not None and entry.get("last_model") != last_model:
-        entry["last_model"] = last_model
-        changed = True
-    if touch:
-        entry["updated"] = _now()
-        changed = True
+        changed = False
+        if title is not None and entry.get("title") != title:
+            entry["title"] = title
+            changed = True
+        if title_if_empty and not entry.get("title"):
+            entry["title"] = title_if_empty
+            changed = True
+        if last_model is not None and entry.get("last_model") != last_model:
+            entry["last_model"] = last_model
+            changed = True
+        if touch:
+            entry["updated"] = _now()
+            changed = True
 
-    if changed:
-        save_conversation_index(index)
+        if changed:
+            save_conversation_index(index)
     return entry
 
 
@@ -497,14 +560,15 @@ def ensure_active_conversation(model_name: str = "") -> dict:
 
 def delete_conversation(thread_id: str) -> None:
     """Drop a conversation from the index and delete its checkpoints."""
-    index = load_conversation_index()
-    remaining = [e for e in index["conversations"] if e["id"] != thread_id]
-    if len(remaining) == len(index["conversations"]):
-        return
-    index["conversations"] = remaining
-    if index["active"] == thread_id:
-        index["active"] = remaining[0]["id"] if remaining else None
-    save_conversation_index(index)
+    with _index_transaction():
+        index = load_conversation_index()
+        remaining = [e for e in index["conversations"] if e["id"] != thread_id]
+        if len(remaining) == len(index["conversations"]):
+            return
+        index["conversations"] = remaining
+        if index["active"] == thread_id:
+            index["active"] = remaining[0]["id"] if remaining else None
+        save_conversation_index(index)
     try:
         get_checkpointer().delete_thread(thread_id)
     except Exception:

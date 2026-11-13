@@ -118,6 +118,9 @@ class DataIssue:
 
 _issues: deque[DataIssue] = deque(maxlen=50)
 _lock = threading.Lock()
+# Summary of the most recent drain, so a window that did not take the issues
+# from the queue can still explain them in its status line.
+_last_summary: str = ""
 
 
 def record_issue(issue: DataIssue) -> None:
@@ -138,6 +141,30 @@ def pop_issues() -> list[DataIssue]:
         issues = list(_issues)
         _issues.clear()
     return issues
+
+
+def latest_summary() -> str:
+    """The combined message from the most recent drain ("" if none)."""
+    with _lock:
+        return _last_summary
+
+
+def take_latest_summary() -> str:
+    """Return the most recent drain's summary and forget it.
+
+    A status line shows it once; keeping it meant the Tasks window repeated a
+    problem on every refresh for the rest of the session, even once fixed.
+    """
+    global _last_summary
+    with _lock:
+        summary, _last_summary = _last_summary, ""
+    return summary
+
+
+def set_latest_summary(summary: str) -> None:
+    with _lock:
+        global _last_summary
+        _last_summary = summary
 
 
 def combine_messages(issues: list[DataIssue]) -> str:

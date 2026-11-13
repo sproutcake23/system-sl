@@ -1,7 +1,5 @@
 import os
-import sys
 import subprocess
-from system_sl.utils.autostart import CrossPlatformAutostart # Assuming you saved the new code here
 from system_sl.utils.install_cleanup import cleanup_previous_installs
 
 def run_legacy_cleanup():
@@ -58,7 +56,6 @@ def initialize_application_autostart():
     cleanup_previous_installs()
 
     # Step 2: Initialize the new architecture
-    autostart = CrossPlatformAutostart("SL-Notifier")
     
     # Optional: If your app requires autostart to be forced 'on' by default
     # for all users upon receiving this update, uncomment the lines below:

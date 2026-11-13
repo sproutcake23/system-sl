@@ -1,11 +1,13 @@
 """Module for managing the background service orchestration engine."""
 
 import logging
+import sys
 
 from PySide6.QtCore import QLockFile, QObject, QThread, QTimer, Signal
 from system_sl.utils import SystemNotification
-from system_sl.core.tasks import get_random_task, get_topn_task
+from system_sl.core.tasks import get_topn_task
 from system_sl.core.priority_engine_new import run_prioritization
+from system_sl.utils.data_health import combine_messages, pop_issues
 from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.notification_settings import load_notifications_enabled
 from system_sl.utils.worker_threads import new_worker_thread
@@ -94,6 +96,14 @@ class BackgroundServiceController(QObject):
     def _on_tasks_ready(self, titles: list) -> None:
         if self._stopped:
             return  # stopped mid-pass: the result is no longer wanted
+        # A --bg process has no window to explain a damaged file, but silently
+        # dropping it hides why the task list looks empty. Record it in the log
+        # (and stderr) before the reminder itself.
+        issues = pop_issues()
+        if issues:
+            summary = combine_messages(issues)
+            log.warning("Data file problems: %s", summary)
+            print(f"Data file problems: {summary}", file=sys.stderr)
         if len(titles) > 0:
             self.view.display_message(titles)
 

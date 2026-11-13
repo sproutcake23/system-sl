@@ -15,13 +15,12 @@
 from __future__ import annotations
 
 import json
-import math
 import logging
 import threading
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List
 
 # ── Import Shared Dependencies to avoid repetition ──────────────────────
 from system_sl.core.vector_converter import Setup, Fusion
@@ -29,7 +28,6 @@ from system_sl.utils.atomic_json import atomic_write_json, safe_load_json
 from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.file_lock import file_lock
 
-logging.basicConfig(level=logging.INFO, format="[priority_engine] %(message)s")
 log = logging.getLogger(__name__)
 
 
@@ -373,7 +371,7 @@ class ThompsonSampler(BaseWeightOptimizer):
                     k: data.get(k, v.copy()) for k, v in self._DEFAULT_STATE.items()
                 }
             except Exception:
-                pass
+                log.debug("could not read the bandit state", exc_info=True)
         return {k: v.copy() for k, v in self._DEFAULT_STATE.items()}
 
     def _save_state(self) -> None:
@@ -532,28 +530,14 @@ class PriorityPipeline:
 
     def run(self, user_vector: np.ndarray) -> dict:
         """Execute full prioritization pipeline."""
-        if not self.tasks_file.exists():
-            return self._empty_result("tasks.json not found")
+        # Read through core.tasks so the one-time id/title migration has run
+        # (under the shared lock) before anything is ranked or keyed.
+        from system_sl.core.tasks import load_tasks
 
         try:
-            with open(self.tasks_file, "r", encoding="utf-8") as f:
-                tasks_data = json.load(f)
+            all_tasks = [t for t in load_tasks() if isinstance(t, dict)]
         except Exception as e:
             return self._empty_result(f"Parse error: {e}")
-
-        # Flatten tasks
-        # NOTE: changes made such that it can read old data format also
-        if isinstance(tasks_data, list):
-            all_tasks = [t for t in tasks_data if isinstance(t, dict)]
-        else:
-            # for backward_compact
-            all_tasks = [
-                task
-                for task_list in tasks_data.values()
-                if isinstance(task_list, list)
-                for task in task_list
-                if isinstance(task, dict)
-            ]
 
         if not all_tasks:
             save_manual_order(all_tasks)
@@ -575,6 +559,7 @@ class PriorityPipeline:
 
             scored_tasks.append(
                 {
+                    "id": task.get("id"),
                     "title": task.get("title", "untitled"),
                     # Tasks are stored with "category" (see core/tasks.py).
                     # Reading "_category" always yielded an empty string.
@@ -601,8 +586,11 @@ class PriorityPipeline:
         # read back and used to sort the ranked list.
         manual = load_manual_order()
         if manual:
-            pos = {title: i for i, title in enumerate(manual)}
-            scored_tasks.sort(key=lambda t: pos.get(t.get("title", ""), -1))
+            pos = {key: i for i, key in enumerate(manual)}
+            # Order files written before ids existed hold titles.
+            scored_tasks.sort(
+                key=lambda t: pos.get(t.get("id"), pos.get(t.get("title", ""), -1))
+            )
         task_title = []
         quadrants = {q: [] for q in self.QUADRANTS}
         for task in scored_tasks:
@@ -680,8 +668,18 @@ def load_manual_order() -> list:
 
 # NOTE: Changed and removed the category thing
 def save_manual_order(tasks: list) -> None:
-    """Persist the manual task order atomically under the shared task lock."""
-    order = [t.get("title", "") for t in tasks if isinstance(t, dict)]
+    """Persist the manual task order atomically under the shared task lock.
+
+    Stable ids are preferred; titles are kept only for order files written
+    before tasks had ids.
+    """
+    order = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        key = task.get("id") or task.get("title")
+        if key:
+            order.append(key)
     file = Path(get_tasks_file_path("task_order.json"))
     with file_lock(get_tasks_file_path("tasks.lock")):
         atomic_write_json(file, {"order": order})
@@ -747,18 +745,18 @@ def run_prioritization(display: bool = True, use_thompson: bool = False) -> dict
 
 
 def display_prioritized_tasks(result: dict) -> None:
-    print(f"\n══ ⚔ SYSTEM TASK PRIORITIZATION ══")
-    print(f"Context : {result.get('context')} - {result.get('context_description')}")
-    print(f"Bandit  : {result.get('bandit_confidence'):.1%} confidence\n")
+    log.info("\n══ ⚔ SYSTEM TASK PRIORITIZATION ══")
+    log.info(f"Context : {result.get('context')} - {result.get('context_description')}")
+    log.info(f"Bandit  : {result.get('bandit_confidence'):.1%} confidence\n")
 
     for q_key, data in result.get("quadrants", {}).items():
         if not data["tasks"]:
             continue
-        print(f"── {data['icon']} {data['name']} ──")
+        log.info(f"── {data['icon']} {data['name']} ──")
         for t in data["tasks"]:
             bar = "█" * int(t["pull_normalized"] * 20)
-            print(f" [{bar:<20}] {t['title'][:40]} (P={t['P_final']:.4f})")
-    print("\n")
+            log.info(f" [{bar:<20}] {t['title'][:40]} (P={t['P_final']:.4f})")
+    log.info("\n")
 
 
 if __name__ == "__main__":
@@ -772,8 +770,8 @@ if __name__ == "__main__":
                 with open(Setup()._get_file_path("prioritize.json"), "r") as f:
                     ranked = json.load(f).get("all_tasks_ranked", [])
                 ThompsonSampler().record_feedback(title, ranked)
-                print(f"✓ Bandit updated for '{title}'")
+                log.info(f"✓ Bandit updated for '{title}'")
             except Exception as e:
-                print(f"✗ Error updating bandit: {e}")
+                log.info(f"✗ Error updating bandit: {e}")
     else:
         run_prioritization(use_thompson=False)

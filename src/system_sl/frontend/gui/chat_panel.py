@@ -51,6 +51,7 @@ from PySide6.QtGui import (
 from system_sl.core import add_tasks, load_tasks
 from system_sl.frontend.gui.theme import get_current_theme_tokens
 from system_sl.frontend.gui.icons import get_icon
+from system_sl.utils.i18n import tr
 
 # Lazy-loaded chatbot imports (moved to functions to avoid startup cost)
 # from system_sl.chatbot import ...
@@ -295,7 +296,7 @@ class LLMSettingsPage(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
-        from system_sl.chatbot import load_config, ModelInfo
+        from system_sl.chatbot import load_config
         self._config = load_config()
         self._fetched_models: "list[ModelInfo]" = []
         self._fetch_thread: QThread | None = None
@@ -900,6 +901,7 @@ class SettingsDialog(QDialog):
 class _ChatWorker(QObject):
     reasoning = Signal(str)
     chunk = Signal(str)
+    usage = Signal(dict)
     finished = Signal(str)
     failed = Signal(str)
     cancelled = Signal()
@@ -977,6 +979,9 @@ class _ChatWorker(QObject):
                     return
                 if kind == "reasoning":
                     self.reasoning.emit(delta)
+                elif kind == "usage":
+                    if isinstance(delta, dict):
+                        self.usage.emit(delta)
                 else:
                     collected.append(delta)
                     self.chunk.emit(delta)
@@ -1001,6 +1006,10 @@ class _ChatWorker(QObject):
         if thread.isInterruptionRequested():
             self.cancelled.emit()
             return
+
+        # The provider's counts are authoritative; emit them once more here so
+        # the blocking fallback path is covered too.
+        self.usage.emit(self.session.last_usage.as_dict())
 
         # Attachment text is compacted by the panel once the turn is over,
         # whatever the outcome (see ChatPanel._cleanup_thread).
@@ -1068,6 +1077,10 @@ class ChatPanel(QWidget):
         self._answer_start: int | None = None # doc position of the [SYSTEM] line
         self._last_rendered_html: str = ""
         self._stream_tokens: dict = {}        # theme captured once per turn
+        # Incremental streaming: text before this character is already on
+        # screen and never rewritten; the rest is the in-progress tail.
+        self._answer_committed_chars: int = 0
+        self._stream_tail_start: int | None = None
 
         # Four-dot loading indicator beside the label while the model works.
         # One bright dot travels left to right through a fixed-width field.
@@ -1183,6 +1196,16 @@ class ChatPanel(QWidget):
             self._on_transcript_context_menu
         )
         root.addWidget(self.transcript, stretch=1)
+
+        # Token/cost line for the last reply. It stays out of the transcript
+        # itself so quoting or copying a message never includes it.
+        self.usage_label = QLabel("")
+        self.usage_label.setObjectName("usageLabel")
+        self.usage_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.usage_label.setVisible(False)
+        self.usage_label.setAccessibleName("Token usage")
+        self.usage_label.setToolTip("Tokens and estimated cost of the last reply")
+        root.addWidget(self.usage_label)
 
         # Store raw error details for alert detail links
 
@@ -1566,6 +1589,12 @@ class ChatPanel(QWidget):
             )
             if entry["id"] == self._thread_id:
                 selected = index
+        if selected < 0 and self._thread_id:
+            # A new chat has no index entry until its first message. Without a
+            # row of its own, the combo would show (and "select") the most
+            # recent conversation, which then could not be picked to reopen.
+            self.history_combo.insertItem(0, "New conversation", self._thread_id)
+            selected = 0
         if selected >= 0:
             self.history_combo.setCurrentIndex(selected)
         self.history_combo.blockSignals(False)
@@ -1575,14 +1604,27 @@ class ChatPanel(QWidget):
         if self.is_busy():
             return
         from system_sl.chatbot import load_config
-        from system_sl.chatbot.memory import create_conversation
+        from system_sl.chatbot.memory import new_thread_id
 
         try:
             model = self._current_model or load_config().system_model
         except Exception:
             model = self._current_model
-        entry = create_conversation(model_name=model)
-        self._open_conversation(entry["id"])
+
+        # Hand out a thread id without writing an index entry: a new chat that
+        # is never used must not leave an empty "New conversation" behind. The
+        # entry is created by the first sent message (see _send_now).
+        self._thread_id = new_thread_id()
+        self._current_model = model
+        self._session = None
+        self._reset_stream_state()
+        self._cancel_edit(clear_input=False)
+        self._turn_user_id = None
+        self._last_failed_user_id = None
+        self._clear_quotes()
+        self._render_transcript([])
+        self._refresh_history_combo()
+        self.input_box.setFocus()
 
     def _on_history_changed(self, index: int) -> None:
         """Reopen the conversation picked in the dropdown."""
@@ -1656,7 +1698,19 @@ class ChatPanel(QWidget):
         self._messages = Transcript.from_history(messages)
         self._stream_message_id = None
         self.transcript.clear()
-        for message in self._messages:
+
+        # A very long conversation would build thousands of rich-text blocks
+        # on every reopen. Render the newest slice; the model still holds the
+        # full history, and the note says where the view starts.
+        limit = 200
+        shown = list(self._messages)
+        hidden = max(0, len(shown) - limit)
+        if hidden:
+            self._append_system_note(
+                f"… {hidden} earlier message(s) hidden — the conversation is unchanged"
+            )
+            shown = shown[-limit:]
+        for message in shown:
             self._render_message(message)
         self._scroll_to_bottom()
 
@@ -2322,10 +2376,13 @@ class ChatPanel(QWidget):
         text_color: str,
         escape: bool = True,
         message_id: str | None = None,
+        timestamp: str = "",
     ) -> None:
         """Insert an escaped chat bubble (one line per newline)."""
         safe = html.escape(text).replace("\n", "<br>") if escape else text.replace("\n", "<br>")
-        self._insert_bubble_html(safe, align_right, bg_color, text_color, message_id)
+        self._insert_bubble_html(
+            safe, align_right, bg_color, text_color, message_id, timestamp=timestamp
+        )
 
     def _insert_bubble_html(
         self,
@@ -2363,20 +2420,34 @@ class ChatPanel(QWidget):
         # Set char format on cursor, then insert HTML
         cursor.setCharFormat(char_fmt)
         
-        # Prepend timestamp if available
+        cursor.insertHtml(body_html)
+
+        # Qt's rich text ignores float/float-based corner tricks and the
+        # ``title`` attribute on a span, so the timestamp gets its own small,
+        # dim block. A char-format tooltip is the one hover hint Qt honours.
         if timestamp:
             short_time, full_time = self._format_timestamp(timestamp)
             if short_time:
-                # Timestamp shown as a small, dim element at the corner of the bubble
-                ts_color = tokens.get("sys_color_text_secondary", "#9ab8e5") if (tokens := self._get_live_tokens()) else "#9ab8e5"
-                timestamp_html = (
-                    f'<span style="font-size:10px; color:{ts_color}; float:{"right" if align_right else "left"}; '
-                    f'margin-{"left" if align_right else "right"}:8px;" '
-                    f'title="{html.escape(full_time)}">{html.escape(short_time)}</span>'
+                ts_color = self._get_live_tokens().get(
+                    "sys_color_text_secondary", "#9ab8e5"
                 )
-                body_html = timestamp_html + body_html
-        
-        cursor.insertHtml(body_html)
+                cursor.insertBlock()
+                ts_block = QTextBlockFormat()
+                ts_block.setAlignment(
+                    Qt.AlignmentFlag.AlignRight
+                    if align_right
+                    else Qt.AlignmentFlag.AlignLeft
+                )
+                ts_block.setTopMargin(0)
+                ts_block.setBottomMargin(4)
+                cursor.setBlockFormat(ts_block)
+                ts_fmt = QTextCharFormat()
+                ts_fmt.setForeground(QColor(ts_color))
+                ts_fmt.setFontPointSize(10)
+                if full_time:
+                    ts_fmt.setToolTip(full_time)
+                cursor.setCharFormat(ts_fmt)
+                cursor.insertText(short_time)
 
         self._tag_blocks(start, message_id)
 
@@ -2430,7 +2501,7 @@ class ChatPanel(QWidget):
             code_content = match.group(1)
             return (
                 f'<pre style="background:#1e1e2e; color:#d6e7ff; padding:8px 12px; '
-                f'border-radius:6px; overflow-x:auto; font-family:\'JetBrains Mono\',\'Fira Code\',\'Consolas\',monospace; '
+                f'overflow-x:auto; font-family:\'JetBrains Mono\',\'Fira Code\',\'Consolas\',monospace; '
                 f'font-size:12px; line-height:1.5; margin:4px 0;">{code_content}</pre>'
             )
         
@@ -2442,7 +2513,7 @@ class ChatPanel(QWidget):
         # Enhance inline code: <code>...</code>
         inline_code_style = (
             f'background:rgba(128,128,128,0.2); color:{text_color}; '
-            f'padding:1px 4px; border-radius:3px; font-family:monospace; font-size:12px;'
+            f'padding:1px 4px; font-family:monospace; font-size:12px;'
         )
         html = re.sub(
             r'<code>(.*?)</code>',
@@ -2557,6 +2628,8 @@ class ChatPanel(QWidget):
         self._answer_start = None
         self._last_rendered_html = ""
         self._stream_tokens = {}
+        self._answer_committed_chars = 0
+        self._stream_tail_start = None
         self._stream_message_id = None
         self._dots_frame = 0
         self._md_timer.stop()
@@ -2564,139 +2637,248 @@ class ChatPanel(QWidget):
         self.reasoning_view.clear()
         self.reasoning_view.setVisible(False)
 
-    def _replace_answer_region(self, rendered_html: str) -> None:
-        """Rewrite the streaming answer block with freshly rendered HTML.
+    @staticmethod
+    def _stable_answer_boundary(text: str) -> int:
+        """Character offset just after the last completed markdown block.
 
-        Preserves the user's text selection and cursor position.
+        A block is complete once a blank line outside a code fence follows it.
+        Everything after that offset is still growing and is re-rendered; the
+        completed part is written to the document once and never rewritten.
         """
-        if self._answer_start is None:
-            return
+        boundary = 0
+        position = 0
+        in_fence = False
+        for line in text.splitlines(keepends=True):
+            stripped = line.strip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = not in_fence
+            elif not in_fence and not stripped:
+                boundary = position + len(line)
+            position += len(line)
+        return boundary
 
-        # Save the user's selection and cursor position
-        saved_cursor = self.transcript.textCursor()
-        has_selection = saved_cursor.hasSelection()
-        selection_start = saved_cursor.selectionStart() if has_selection else -1
-        selection_end = saved_cursor.selectionEnd() if has_selection else -1
-        cursor_position = saved_cursor.position()
+    @staticmethod
+    def _markdown_body(text: str) -> str:
+        """Render markdown to the fragment Qt would insert (no wrapper)."""
+        fragment = QTextDocumentFragment.fromMarkdown(
+            _preserve_line_breaks(text)
+        ).toHtml()
+        body = fragment.split("<body>", 1)[-1].rsplit("</body>", 1)[0]
+        return (
+            body.replace("<!--StartFragment-->", "")
+            .replace("<!--EndFragment-->", "")
+            .strip()
+        )
 
-        # Capture the scroll state before the rewrite.
-        follow_tail = self._is_at_bottom()
+    def _answer_region_end(self) -> int:
+        """Document position where the streaming answer stops.
 
-        # Anything appended while the answer streamed (an alert, a note) sits
-        # below the answer block and would be erased by the rewrite.
+        Normally that is the end of the document; while a note or alert was
+        appended during the turn it is the start of the first such message,
+        which must not be swallowed by the answer rewrite.
+        """
         trailing = (
             self._messages.after(self._stream_message_id)
             if self._stream_message_id
             else []
         )
+        if trailing:
+            doc = self.transcript.document()
+            block = doc.firstBlock()
+            wanted = trailing[0].id
+            while block.isValid():
+                data = block.userData()
+                if isinstance(data, _MessageBlockData) and data.message_id == wanted:
+                    # End of the previous block: deleting up to the trailing
+                    # block's start would also remove the separator and
+                    # merge that message into the answer.
+                    return max(0, block.position() - 1)
+                block = block.next()
+        return self.transcript.document().characterCount() - 1
 
-        doc = self.transcript.document()
-        end = doc.characterCount() - 1
-        if end <= self._answer_start:
+    def _stream_char_format(self, bg: str, body_color: str) -> QTextCharFormat:
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(bg))
+        fmt.setForeground(QColor(body_color))
+        fmt.setFontFamily("Segoe UI, Helvetica Neue, DejaVu Sans, sans-serif")
+        fmt.setFontPointSize(13)
+        return fmt
+
+    def _replace_answer_region(self, committed_html: str, tail_html: str) -> None:
+        """Append completed markdown once, then replace only the tail.
+
+        The completed markdown is inserted once. The tail (the paragraph the
+        model is still writing) is deleted and re-rendered, so a long reply
+        does not pay for a full-document rewrite on every token. The user's
+        selection is preserved when it lies inside the answer, and the view
+        follows the tail only if it was already at the bottom.
+        """
+        if self._stream_tail_start is None:
             return
 
+        doc = self.transcript.document()
+        start = min(self._stream_tail_start, doc.characterCount() - 1)
+        end = self._answer_region_end()
+        if end < start:
+            end = start
+
+        # Selection inside the answer is shifted by the length difference, so
+        # reading a growing reply does not lose the highlighted words.
+        saved_cursor = self.transcript.textCursor()
+        had_selection = saved_cursor.hasSelection()
+        sel_start = saved_cursor.selectionStart() if had_selection else -1
+        sel_end = saved_cursor.selectionEnd() if had_selection else -1
+
+        follow_tail = self._is_at_bottom()
+        removed = max(0, end - start)
+        if removed:
+            cursor = QTextCursor(doc)
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+
+        fmt = self._stream_char_format(
+            self._stream_tokens.get("sys_color_surface", "#2a2a40"),
+            self._stream_tokens.get("sys_color_text_main", "#d6e7ff"),
+        )
+
         cursor = QTextCursor(doc)
-        cursor.setPosition(self._answer_start)
-        cursor.setPosition(end, QTextCursor.KeepAnchor)
-        cursor.removeSelectedText()
+        cursor.setPosition(start)
+        cursor.setCharFormat(fmt)
+        if committed_html:
+            cursor.insertHtml(committed_html)
+            start = cursor.position()
 
-        # Reset block format to avoid inheriting list formatting
-        block = doc.findBlock(self._answer_start)
-        text_list = block.textList()
-        if text_list is not None:
-            text_list.remove(block)
+        if tail_html:
+            block = doc.findBlock(start)
+            # A tail needs a block of its own; otherwise it would be appended
+            # to the paragraph that was just completed (``start`` is then in
+            # the middle or at the end of that paragraph's block).
+            if (
+                not block.isValid()
+                or start > block.position()
+                or (block.position() == start and block.text())
+            ):
+                block_fmt = QTextBlockFormat()
+                block_fmt.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                block_fmt.setTopMargin(4)
+                block_fmt.setBottomMargin(4)
+                block_fmt.setLeftMargin(8)
+                block_fmt.setRightMargin(8)
+                cursor.setBlockFormat(block_fmt)
+                cursor.insertBlock()
+                start = cursor.block().position()
+            cursor.setCharFormat(fmt)
+            cursor.insertHtml(tail_html)
 
-        cursor = QTextCursor(doc)
-        cursor.setPosition(self._answer_start)
-        cursor.setBlockFormat(QTextBlockFormat())
-        cursor.insertHtml(rendered_html)
+        self._stream_tail_start = start
+        new_end = cursor.position()
+        self._tag_blocks(self._answer_start or start, self._stream_message_id, new_end)
 
-        # Deleting the region dropped its tags; reattach the message id, then
-        # redraw the messages that followed the answer.
-        self._tag_blocks(self._answer_start, self._stream_message_id)
-        for message in trailing:
-            self._render_message(message)
-
-        # Restore selection if it was within the preserved region (before answer)
-        if has_selection and selection_start < self._answer_start:
-            restore_cursor = QTextCursor(doc)
-            restore_cursor.setPosition(selection_start)
-            restore_cursor.setPosition(selection_end, QTextCursor.KeepAnchor)
-            self.transcript.setTextCursor(restore_cursor)
+        if had_selection:
+            # Never yank the view to the tail while the Player is reading or
+            # has text selected. A selection inside the rewritten region is
+            # shifted by the length difference; one outside it is untouched.
+            if sel_start >= start:
+                restore = QTextCursor(doc)
+                if sel_start >= end:
+                    pos_start = sel_start - removed + (new_end - start)
+                    pos_end = sel_end - removed + (new_end - start)
+                else:
+                    pos_start, pos_end = sel_start, sel_end
+                restore.setPosition(max(0, pos_start))
+                restore.setPosition(max(0, pos_end), QTextCursor.KeepAnchor)
+                self.transcript.setTextCursor(restore)
         elif follow_tail:
             self.transcript.moveCursor(QTextCursor.MoveOperation.End)
             self.transcript.ensureCursorVisible()
 
-    def _render_answer(self) -> None:
-        """Re-render the streamed answer, skipping no-op rewrites."""
+    def _render_answer(self, final: bool = False) -> None:
+        """Write newly completed markdown, then re-render the tail only.
+
+        ``final`` re-renders the whole answer once from its full text. The
+        incremental pass splits at blank lines, which is right for the live
+        view but can't know about loose lists or indented code spanning a
+        blank line, and the reply may differ from what streamed; the finished
+        answer is always rendered from the complete markdown.
+        """
         tokens = self._stream_tokens or self._get_live_tokens()
         body_color = tokens.get("sys_color_text_main", "#d6e7ff")
-        bg = tokens.get("sys_color_surface", "#2a2a40")
-        
+        self._stream_tokens = tokens
+        if final and self._answer_start is not None:
+            self._stream_tail_start = self._answer_start
+            self._answer_committed_chars = 0
+            self._last_rendered_html = ""
+
         if not self._answer_text.strip():
-            rendered = self._empty_answer_html(bg, body_color)
+            committed_html = " "
+            tail_html = ""
         else:
-            fragment = QTextDocumentFragment.fromMarkdown(_preserve_line_breaks(self._answer_text)).toHtml()
-            body = fragment.split("<body>", 1)[-1].rsplit("</body>", 1)[0]
-            body = (
-                body.replace("<!--StartFragment-->", "")
-                .replace("<!--EndFragment-->", "")
-                .strip()
+            boundary = (
+                len(self._answer_text)
+                if final
+                else self._stable_answer_boundary(self._answer_text)
             )
-            if not body:
-                rendered = self._empty_answer_html(bg, body_color)
-            else:
-                body = _colorize_markdown_html(body, body_color)
-                rendered = self._wrap_answer_html(body, bg, body_color)
+            if boundary < self._answer_committed_chars:
+                boundary = self._answer_committed_chars
+            committed = self._answer_text[self._answer_committed_chars:boundary]
+            tail = self._answer_text[boundary:]
+
+            committed_html = ""
+            if committed:
+                body = self._markdown_body(committed)
+                if body:
+                    committed_html = _colorize_markdown_html(body, body_color)
+            tail_html = ""
+            if tail:
+                body = self._markdown_body(tail)
+                if body:
+                    tail_html = _colorize_markdown_html(body, body_color)
 
         if self._answer_stopped:
-            # UI-only badge after the message; the reply text stays clean.
             alert = tokens.get("sys_color_alert", "#ff6b8a")
             on_alert = tokens.get("sys_color_on_alert", "#ffffff")
-            rendered += (
+            tail_html += (
                 '<div style="margin-top:4px;">'
                 f'<span style="background:{alert}; color:{on_alert};'
-                ' border-radius:8px; padding:1px 8px; font-size:11px;">'
+                ' padding:1px 8px; font-size:11px;">'
                 "stopped</span></div>"
             )
 
-        if rendered == self._last_rendered_html:
+        signature = (committed_html, tail_html)
+        if signature == self._last_rendered_html:
             return
-        self._last_rendered_html = rendered
-        self._replace_answer_region(rendered)
-
-    def _empty_answer_html(self, bg: str, body_color: str) -> str:
-        """HTML for an empty answer bubble."""
-        return (
-            f'<div style="background:{bg}; color:{body_color}; border-radius:12px; '
-            f'padding:6px 12px; max-width:75%; text-align:left; word-wrap:break-word;">'
-            f'<span style="color:{body_color}"> </span></div>'
-        )
-
-    def _wrap_answer_html(self, body: str, bg: str, body_color: str) -> str:
-        """Wrap rendered markdown in a left-aligned bubble div."""
-        return (
-            f'<div style="background:{bg}; color:{body_color}; border-radius:12px; '
-            f'padding:6px 12px; max-width:75%; text-align:left; word-wrap:break-word;">'
-            f'{body}</div>'
-        )
+        self._last_rendered_html = signature
+        self._replace_answer_region(committed_html, tail_html)
+        if self._answer_text.strip():
+            boundary = (
+                len(self._answer_text)
+                if final
+                else self._stable_answer_boundary(self._answer_text)
+            )
+            self._answer_committed_chars = max(
+                self._answer_committed_chars, boundary
+            )
 
     def _start_answer_line(self) -> None:
-        """Insert an empty left-aligned block for the streaming SYSTEM answer and start dots."""
+        """Insert the answer block and start the loading dots."""
         self._stream_tokens = self._get_live_tokens()
         tokens = self._stream_tokens
-        
-        # Insert an empty left-aligned block for the answer
+
         cursor = QTextCursor(self.transcript.document())
         cursor.movePosition(QTextCursor.MoveOperation.End)
-        
+
         block_fmt = QTextBlockFormat()
         block_fmt.setAlignment(Qt.AlignmentFlag.AlignLeft)
         block_fmt.setTopMargin(4)
         block_fmt.setBottomMargin(4)
+        block_fmt.setLeftMargin(8)
+        block_fmt.setRightMargin(8)
         cursor.insertBlock(block_fmt)
-        
+
         self._answer_start = cursor.block().position()
+        self._stream_tail_start = self._answer_start
+        self._answer_committed_chars = 0
         self._last_rendered_html = ""
         self._answer_open = True
 
@@ -2709,10 +2891,12 @@ class ChatPanel(QWidget):
         self._dots_bright = tokens.get("sys_color_primary", "#00d9ff")
         self._dots_dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
 
-        # Insert loading dots in the answer block
-        fmt = QTextCharFormat()
-        fmt.setForeground(QColor(self._dots_dim))
-        cursor.insertText(" " + _DOT_CHAR * _DOT_COUNT, fmt)
+        # Loading dots live in the answer block until the first token arrives.
+        cursor.setCharFormat(self._stream_char_format(
+            tokens.get("sys_color_surface", "#2a2a40"),
+            tokens.get("sys_color_text_main", "#d6e7ff"),
+        ))
+        cursor.insertText(" " + _DOT_CHAR * _DOT_COUNT)
 
         self._tag_blocks(self._answer_start, self._stream_message_id)
 
@@ -2852,7 +3036,7 @@ class ChatPanel(QWidget):
             self._messages.set_flag(
                 self._stream_message_id, stopped=True, streaming=False
             )
-        self._render_answer()
+        self._render_answer(final=True)
         self._answer_open = False
 
     # ----- Task Confirmation -----
@@ -3267,10 +3451,21 @@ class ChatPanel(QWidget):
         self._attachments = [Path(p) for p in (message.attachments or []) if Path(p).exists()]
         self._update_attach_chips()
         later = len([m for m in self._messages.after(message.id) if m.role == USER])
+        note = ""
+        # A reopened conversation only kept the document names; the text was
+        # compacted out of the stored history. Editing and resending cannot
+        # recover it, so say so instead of silently dropping the context.
+        if message.documents and not self._attachments:
+            count = len(message.documents)
+            note = (
+                f" {count} attached document(s) are only names now; "
+                "their text is not resent."
+            )
         self.edit_label.setText(
-            "Editing an earlier message — sending replaces it"
-            + (f" and the {later} message(s) after it." if later else ".")
-            + " Esc to cancel."
+            tr("Editing an earlier message — sending replaces it")
+            + (tr(f" and the {later} message(s) after it.") if later else ".")
+            + note
+            + tr(" Esc to cancel.")
         )
         self.edit_bar.setVisible(True)
         self.input_box.setFocus()
@@ -3408,7 +3603,10 @@ class ChatPanel(QWidget):
             register_active_llm,
             _set_current_llm_clients,
         )
-        from system_sl.chatbot.memory import title_from_message, update_conversation
+        from system_sl.chatbot.memory import (
+            ensure_conversation,
+            title_from_message,
+        )
 
         model = self._current_model or load_config().system_model
         session = self._get_session()
@@ -3438,14 +3636,19 @@ class ChatPanel(QWidget):
         # Title the conversation from its first message and remember which
         # model is answering; both are read by the history dropdown. The title
         # comes from what the Player typed, not from the quotes above it.
-        update_conversation(
+        # The conversation may still be local-only (New chat was never used);
+        # the first message is what makes it appear in history.
+        ensure_conversation(
             self._thread_id,
-            title_if_empty=title_from_message(player_message.body or text),
-            last_model=model,
+            model_name=model,
+            title=title_from_message(player_message.body or text),
         )
         self._refresh_history_combo()
 
         self._render_message(player_message)
+        # The previous reply's usage no longer describes this turn.
+        self.usage_label.clear()
+        self.usage_label.setVisible(False)
         # Sending is a deliberate action: bring the new message into view.
         self._scroll_to_bottom()
         self._reset_stream_state()
@@ -3470,6 +3673,7 @@ class ChatPanel(QWidget):
         self._thread.started.connect(self._worker.run)
         self._worker.reasoning.connect(self._on_reasoning)
         self._worker.chunk.connect(self._on_chunk)
+        self._worker.usage.connect(self._on_usage)
         self._worker.finished.connect(self._on_reply)
         self._worker.failed.connect(self._on_failure)
         self._worker.cancelled.connect(self._on_cancelled)
@@ -3538,12 +3742,34 @@ class ChatPanel(QWidget):
             self._messages.set_text(self._stream_message_id, self._answer_text)
             self._messages.set_flag(self._stream_message_id, streaming=False)
 
-        self._render_answer()
+        self._render_answer(final=True)
         self._answer_open = False
         self.reasoning_view.clear()
         self.reasoning_view.setVisible(False)
         self._reasoning_shown = False
         self._stop_dots()
+
+    def _on_usage(self, usage: dict) -> None:
+        """Show the token count and estimated cost of the reply that ended."""
+        from system_sl.chatbot.usage import TokenUsage, format_usage
+
+        if not isinstance(usage, dict) or not usage:
+            return
+        tokens = self._stream_tokens or self._get_live_tokens()
+        colour = tokens.get("sys_color_text_secondary", "#9ab8e5")
+        line = format_usage(
+            TokenUsage(
+                input_tokens=int(usage.get("input_tokens") or 0),
+                output_tokens=int(usage.get("output_tokens") or 0),
+                total_tokens=int(usage.get("total_tokens") or 0),
+            ),
+            self._current_model,
+        )
+        if not line:
+            return
+        self.usage_label.setStyleSheet(f"color: {colour}; font-size: 11px;")
+        self.usage_label.setText(line)
+        self.usage_label.setVisible(True)
 
     @staticmethod
     def _friendly_error(message: str) -> tuple[str, str | None]:
@@ -3561,7 +3787,7 @@ class ChatPanel(QWidget):
         self._last_failed_user_id = self._turn_user_id
         self._md_timer.stop()
         self._stop_dots()
-        self._render_answer()  # clears the loading dots if no token ever arrived
+        self._render_answer(final=True)  # clears the loading dots if no token ever arrived
         if self._stream_message_id:
             self._messages.set_flag(
                 self._stream_message_id, error=message, streaming=False
@@ -3671,12 +3897,21 @@ class ChatPanel(QWidget):
                     "will not be recorded",
                     wait_ms,
                 )
+                self._worker_outlived_shutdown = True
                 return
             # thread.finished is queued and will not be delivered after quit,
             # so finish the turn here: repair, then flush the outcomes.
             self._cleanup_thread()
         else:
             self._flush_pending_confirmations()
+
+    def worker_stopped(self) -> bool:
+        """False when a reply worker is still running after ``shutdown``.
+
+        The checkpointer must then stay open: the worker may still write
+        through it, and closing the connection underneath it raises.
+        """
+        return not getattr(self, "_worker_outlived_shutdown", False)
 
     def closeEvent(self, event) -> None:
         self.shutdown()

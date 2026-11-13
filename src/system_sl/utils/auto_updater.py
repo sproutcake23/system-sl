@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,6 +15,8 @@ import requests
 from PySide6.QtCore import QThread, Signal
 
 from system_sl.utils.host_env import host_env
+
+logger = logging.getLogger(__name__)
 
 
 GITHUB_REPO = "sproutcake23/System-SL"
@@ -31,11 +34,12 @@ def get_current_version() -> str:
         from importlib.metadata import version
         return version("system-sl")
     except Exception:
-        pass
+        logger.debug("package metadata is unavailable", exc_info=True)
     try:
         from system_sl import __version__
         return __version__
     except Exception:
+        logger.debug("could not read __version__", exc_info=True)
         return "0.0.0"
 
 

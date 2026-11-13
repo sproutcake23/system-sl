@@ -7,11 +7,17 @@ Supports:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Literal, Optional, Any
+from typing import TYPE_CHECKING, Literal, Any
+
+logger = logging.getLogger(__name__)
 
 import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
+
+if TYPE_CHECKING:
+    from system_sl.chatbot.config import ChatConfig
 
 # Optional imports - only loaded when needed
 try:
@@ -104,7 +110,7 @@ def cancel_current_stream() -> bool:
             _current_llm_client.close()
             closed = True
         except Exception:
-            pass
+            logger.debug("could not close the LLM client", exc_info=True)
     if _current_llm_async_client is not None:
         try:
             # OpenAI-compatible: httpx.AsyncClient has aclose()
@@ -114,7 +120,7 @@ def cancel_current_stream() -> bool:
             asyncio.run(_current_llm_async_client.aclose())
             closed = True
         except Exception:
-            pass
+            logger.debug("could not close the async LLM client", exc_info=True)
     _clear_current_llm_clients()
     return closed
 
@@ -336,6 +342,12 @@ def create_llm(
             options["temperature"] = temperature
         if max_tokens:
             options["max_tokens"] = max_tokens
+        # langchain_openai only requests usage on streamed replies for the
+        # default OpenAI URL; with a custom base_url (OpenRouter, local
+        # servers) streams carried no usage, so no tokens or cost were shown.
+        options.setdefault("stream_usage", True)
+        if "stream_usage" in kwargs:
+            options.pop("stream_usage")
         return ReasoningChatOpenAI(
             model=model,
             **options,

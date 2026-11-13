@@ -30,6 +30,8 @@ import base64
 import hashlib
 import json
 import logging
+
+logger = logging.getLogger(__name__)
 import os
 from pathlib import Path
 from typing import Callable, Optional
@@ -87,7 +89,7 @@ def _notify_fallback_used() -> None:
             _fallback_warning_callback()
         except Exception:
             # Callback must not crash the storage layer.
-            pass
+            logger.debug("fallback warning callback failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -145,26 +147,27 @@ def _fallback_set(name: str, value: str) -> None:
                     _fallback_fernet().decrypt(_FALLBACK_FILE.read_bytes()).decode("utf-8")
                 )
             except Exception:
+                logger.debug("could not read the encrypted fallback", exc_info=True)
                 data = {}
         data[name] = value
         _FALLBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
         _FALLBACK_FILE.write_bytes(fernet.encrypt(json.dumps(data).encode("utf-8")))
         _FALLBACK_FILE.chmod(0o600)
     except Exception:
-        pass
+        logger.debug("could not write the encrypted fallback", exc_info=True)
 
 
 def _fallback_delete(name: str) -> None:
-    _notify_fallback_used()
     try:
         if not _FALLBACK_FILE.is_file():
             return
+        _notify_fallback_used()
         fernet = _fallback_fernet()
         data = json.loads(fernet.decrypt(_FALLBACK_FILE.read_bytes()).decode("utf-8"))
         data.pop(name, None)
         _FALLBACK_FILE.write_bytes(fernet.encrypt(json.dumps(data).encode("utf-8")))
     except Exception:
-        pass
+        logger.debug("could not delete the encrypted fallback", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +195,7 @@ def _keyring_available() -> bool:
         try:
             kr.delete_password(test_service, test_key)
         except Exception:
-            pass
+            logger.debug("could not remove the keyring probe", exc_info=True)
         return got == test_value
     except Exception:
         return False
@@ -229,7 +232,7 @@ def set_secret(name: str, value: str) -> None:
             keyring.set_password(SERVICE_NAME, name, value)
             return
     except Exception:
-        pass
+        logger.debug("keyring write failed; using the fallback", exc_info=True)
     _fallback_set(name, value)
 
 
@@ -241,7 +244,7 @@ def get_secret(name: str) -> Optional[str]:
             if value is not None:
                 return value
     except Exception:
-        pass
+        logger.debug("keyring read failed; using the fallback", exc_info=True)
     return _fallback_get(name)
 
 
@@ -252,10 +255,11 @@ def delete_secret(name: str) -> None:
             try:
                 keyring.delete_password(SERVICE_NAME, name)
             except keyring.errors.PasswordDeleteError:
-                pass
-            return
+                logger.debug("secret %s was not in the keyring", name)
     except Exception:
-        pass
+        logger.debug("keyring delete failed; using the fallback", exc_info=True)
+    # Always clear the encrypted fallback too: get_secret falls back to it
+    # when the keyring has nothing, so a copy left there would come back.
     _fallback_delete(name)
 
 

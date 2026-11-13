@@ -1,6 +1,7 @@
 import html
 import logging
 import random
+import uuid
 from datetime import datetime
 
 from system_sl.utils import get_tasks_file_path
@@ -22,14 +23,79 @@ TASKS_LOCK_PATH = get_tasks_file_path("tasks.lock")
 
 
 def sanitize_title(title: str) -> str:
-    """Strip HTML/JS from a task title so it can never inject into rich text.
+    """Return a task title as the Player wrote it.
 
-    Qt rich text renders any HTML it is given, so titles that ever reach
-    ``setHtml()`` / markdown rendering must be escaped first.
+    Titles are stored literally: escaping at rest turned "AT&T" into
+    "AT&amp;T", which then could not be matched, edited or completed. Any
+    window that renders a title as rich text escapes it at that point.
     """
     if not isinstance(title, str):
         return ""
-    return html.escape(title.strip())
+    return title.strip()
+
+
+def _new_task_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _needs_migration(tasks: list) -> bool:
+    return any(isinstance(t, dict) and not t.get("id") for t in tasks)
+
+
+def _migrate_tasks(tasks: list) -> bool:
+    """Give every task an id and undo old HTML escaping. Returns True if changed.
+
+    Tasks stored before ids existed were also stored HTML-escaped, so a task
+    without an id is the marker for "unescape this title once". Tasks that
+    already have an id hold their literal title ("Fix &amp; bug" stays as
+    typed) and are never unescaped again.
+    """
+    changed = False
+    renamed: dict[str, str] = {}
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if not task.get("id"):
+            task["id"] = _new_task_id()
+            changed = True
+            title = task.get("title")
+            if isinstance(title, str):
+                unescaped = html.unescape(title)
+                if unescaped != title:
+                    task["title"] = unescaped
+                    renamed[title] = unescaped
+        # Google-sourced tasks carry the remote id; keep the name stable.
+        if task.get("source_id") and not isinstance(task.get("source_id"), str):
+            task["source_id"] = str(task["source_id"])
+            changed = True
+    if changed:
+        _migrate_side_files(renamed)
+    return changed
+
+
+def _migrate_side_files(renamed: dict[str, str]) -> None:
+    """Carry the one-time title unescape into the order and completed files."""
+    if renamed:
+        order_data = load_data(TASK_ORDER_FILE_PATH)
+        if isinstance(order_data, dict) and isinstance(order_data.get("order"), list):
+            order = [renamed.get(e, e) if isinstance(e, str) else e
+                     for e in order_data["order"]]
+            if order != order_data["order"]:
+                save_data(TASK_ORDER_FILE_PATH, {"order": order})
+
+    completed = load_data(COMPLETED_TASKS_FILE_PATH)
+    if isinstance(completed, list):
+        changed = False
+        for entry in completed:
+            # Entries written since ids exist carry the id and a literal title.
+            if isinstance(entry, dict) and not entry.get("id") and not entry.get("literal_title"):
+                title = entry.get("title")
+                if isinstance(title, str):
+                    entry["title"] = html.unescape(title)
+                entry["literal_title"] = True
+                changed = True
+        if changed:
+            save_completed_tasks(completed)
 
 
 def load_tasks():
@@ -53,34 +119,51 @@ def load_tasks():
 
     if not isinstance(raw, dict):
         # Already a list (current format) or unexpected type
-        return raw if isinstance(raw, list) else []
+        if isinstance(raw, list):
+            if _needs_migration(raw):
+                # Migrate under the shared lock and from a fresh read, so the
+                # GUI and the --bg notifier can't assign different ids to the
+                # same task. The lock is reentrant for callers that hold it.
+                with file_lock(TASKS_LOCK_PATH):
+                    fresh = load_data_result(TASKS_FILE_PATH).data
+                    if isinstance(fresh, list):
+                        raw = fresh
+                        if _migrate_tasks(raw):
+                            save_tasks(raw)
+            return raw
+        return []
 
     # Legacy dict format: {"category": [tasks...]} — migrate to flat list
-    new_data = []
-    migrated = False
-    for category, task_list in raw.items():
-        if not isinstance(task_list, list):
-            continue
-        for task in task_list:
-            if isinstance(task, str):
-                new_data.append(
-                    {
-                        "title": task,
-                        "created_at": datetime.now().isoformat(),
-                        "deadline": None,
-                        "category": category,
-                    }
-                )
-                migrated = True
-            elif isinstance(task, dict):
-                new_data.append(task)
+    with file_lock(TASKS_LOCK_PATH):
+        fresh = load_data_result(TASKS_FILE_PATH).data
+        if isinstance(fresh, list):
+            # Another process converted it meanwhile.
+            return load_tasks()
+        if isinstance(fresh, dict):
+            raw = fresh
+        new_data = []
+        for category, task_list in raw.items():
+            if not isinstance(task_list, list):
+                continue
+            for task in task_list:
+                if isinstance(task, str):
+                    new_data.append(
+                        {
+                            "title": task,
+                            "created_at": datetime.now().isoformat(),
+                            "deadline": None,
+                            "category": category,
+                        }
+                    )
+                elif isinstance(task, dict):
+                    new_data.append(task)
 
-    if migrated or new_data:
         # A dict is always the legacy format; persist the flat-list conversion.
         # (safe_load_json returns None for corruption, so reaching here with a
         # dict means the file really was a legacy dict, not a broken read.)
-        save_tasks(new_data)
-
+        _migrate_tasks(new_data)
+        if new_data:
+            save_tasks(new_data)
     return new_data
 
 
@@ -96,16 +179,36 @@ def save_tasks(tasks: dict|list):
     save_data(TASKS_FILE_PATH, tasks)
 
 
-def add_tasks(task_type: str = "none",task_title: str = "none",  deadline: str = None):
-    """Registers a new task inside a specific category pool while enforcing validation rules and avoiding duplicates.
+def _find_task(tasks: list, key: str):
+    """Find a task by stable id, falling back to its title for old callers."""
+    if not key:
+        return None
+    for task in tasks:
+        if isinstance(task, dict) and task.get("id") == key:
+            return task
+    for task in tasks:
+        if isinstance(task, dict) and task.get("title") == key:
+            return task
+    return None
+
+
+def add_tasks(
+    task_type: str = "none",
+    task_title: str = "none",
+    deadline: str = None,
+    source_id: str | None = None,
+):
+    """Register a task, or update the deadline of an existing one.
 
     Args:
-        task_type (str): The bucket name representing the task category.
-        task_title (str): Summary description of the item to add.
-        deadline (str, optional): Targeted deadline timestamp. Defaults to None.
+        task_type: Category bucket.
+        task_title: Task text.
+        deadline: Optional deadline.
+        source_id: Stable id from an external source (Google Tasks). A task
+            with the same source id is updated instead of duplicated.
 
     Returns:
-        str: The sanitized task title string that was successfully saved.
+        str: The title that was saved.
     """
     if not isinstance(task_title, str) or not task_title.strip():
         raise ValueError("Task title must be a non-empty string")
@@ -115,13 +218,30 @@ def add_tasks(task_type: str = "none",task_title: str = "none",  deadline: str =
     with file_lock(TASKS_LOCK_PATH):
         tasks = load_tasks()
 
+        if source_id:
+            existing = next(
+                (t for t in tasks if t.get("source_id") == source_id), None
+            )
+            if existing is not None:
+                if deadline and existing.get("deadline") != deadline:
+                    existing["deadline"] = deadline
+                    save_tasks(tasks)
+                    log.info(f"Updated deadline for '{task_title}' to {deadline}")
+                # Already imported: the sync counts this as skipped, not new.
+                raise ValueError(f"Task '{task_title}' already exists")
+
         for task in tasks:
-            if task["title"] == task_title:
+            if task.get("title") == task_title:
+                if source_id and not task.get("source_id"):
+                    # A task synced before source ids were stored: remember
+                    # the remote id so a later local rename doesn't duplicate.
+                    task["source_id"] = str(source_id)
+                    save_tasks(tasks)
                 if deadline and task.get("deadline") != deadline:
                     task["deadline"] = deadline
                     save_tasks(tasks)
 
-                    print(f"Updated deadline for '{task_title}' to {deadline}")
+                    log.info(f"Updated deadline for '{task_title}' to {deadline}")
                     return task_title
 
                 raise ValueError(f"Task '{task_title}' already exists")
@@ -132,58 +252,64 @@ def add_tasks(task_type: str = "none",task_title: str = "none",  deadline: str =
             task_type = "None"
 
         new_task = {
+            "id": _new_task_id(),
             "title": task_title,
             "created_at": datetime.now().isoformat(),
             "deadline": deadline,
             "category": task_type,
         }
+        if source_id:
+            new_task["source_id"] = str(source_id)
 
         tasks.append(new_task)
         save_tasks(tasks)
     return task_title
 
 
-def remove_tasks(task_title: str, task_type: str = "none"):
-    """Evicts a target task from active tracking files, popping the category if left empty.
-
-    Args:
-        task_type (str): The category container where the task resides.
-        task_title (str): The exact text name of the task item to clean up.
+def remove_tasks(
+    task_title: str | None = None,
+    task_type: str = "none",
+    *,
+    task_id: str | None = None,
+):
+    """Remove a task by stable id (preferred) or by title.
 
     Returns:
-        str: The title string of the successfully removed task.
+        str: The removed task's title.
     """
-    if not isinstance(task_title, str) or not task_title.strip():
-        raise ValueError("Task title must be a non-empty string")
-
-    task_title = sanitize_title(task_title)
+    key = task_id or task_title
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("Task id or title must be a non-empty string")
 
     with file_lock(TASKS_LOCK_PATH):
         tasks = load_tasks()
+        task = _find_task(tasks, key)
+        if task is None:
+            raise ValueError(f"Task '{key}' not found")
 
-        original_count = len(tasks)
-
-        tasks = [t for t in tasks if t["title"] != task_title]
-
-        if len(tasks) == original_count:
-            raise ValueError(f"Task '{task_title}' not found")
-
+        removed_title = task.get("title", "")
+        removed_id = task.get("id")
+        tasks = [t for t in tasks if t is not task]
         save_tasks(tasks)
-        _remove_from_task_order(task_title)
-    return task_title
+        _remove_from_task_order(removed_id, removed_title)
+    return removed_title
 
 
-def _remove_from_task_order(task_title: str) -> None:
-    """Strips a task title from the persisted manual ordering file.
+def _remove_from_task_order(task_id: str | None, task_title: str) -> None:
+    """Drop a task from the persisted manual ordering file.
 
-    Args:
-        task_title (str): The exact title to remove from the order list.
+    The order file is being migrated from titles to ids, so entries matching
+    either are removed.
     """
     order_data = load_data(TASK_ORDER_FILE_PATH)
     if not isinstance(order_data, dict) or "order" not in order_data:
         return
     current_order = order_data["order"]
-    filtered = [t for t in current_order if t != task_title]
+    filtered = [
+        entry
+        for entry in current_order
+        if entry != task_id and entry != task_title
+    ]
     if len(filtered) != len(current_order):
         save_data(TASK_ORDER_FILE_PATH, {"order": filtered})
 
@@ -206,10 +332,15 @@ def get_random_task():
 def save_manual_order(tasks: list) -> None:
     """Persist the manual task order atomically.
 
-    Args:
-        tasks: List of task dicts (each must have a "title" key).
+    Ids are preferred; titles remain accepted while the order file migrates.
     """
-    order = [t.get("title", "") for t in tasks if isinstance(t, dict)]
+    order = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        key = task.get("id") or task.get("title")
+        if key:
+            order.append(key)
     with file_lock(TASKS_LOCK_PATH):
         save_data(TASK_ORDER_FILE_PATH, {"order": order})
 
@@ -225,7 +356,16 @@ def get_topn_task():
     """
     with file_lock(TASKS_LOCK_PATH):
         active_tasks = load_tasks()
-        active_titles = {t["title"] for t in active_tasks if isinstance(t, dict)}
+        by_id = {
+            t["id"]: t["title"]
+            for t in active_tasks
+            if isinstance(t, dict) and t.get("id")
+        }
+        by_title = {
+            t["title"]
+            for t in active_tasks
+            if isinstance(t, dict) and t.get("title")
+        }
 
         order_data = load_data(TASK_ORDER_FILE_PATH)
         if (
@@ -236,13 +376,19 @@ def get_topn_task():
             # Pure fallback: use the stored task order in memory. Writing here
             # meant a read-only call (the notifier asks for the top tasks)
             # created and rewrote the user's ordering as a side effect.
-            ntasks = [t["title"] for t in active_tasks if isinstance(t, dict)]
+            entries = [t["title"] for t in active_tasks if isinstance(t, dict)]
         else:
-            ntasks = order_data["order"]
+            entries = order_data["order"]
 
-    ntasks = [t for t in ntasks if t in active_titles and t.strip()]
+    resolved = []
+    for entry in entries:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        title = by_id.get(entry) or (entry if entry in by_title else None)
+        if title and title not in resolved:
+            resolved.append(title)
 
-    return ntasks[:3]
+    return resolved[:3]
 
 
 def load_completed_tasks():
@@ -290,82 +436,106 @@ def save_completed_tasks(tasks: dict):
     save_data(COMPLETED_TASKS_FILE_PATH, tasks)
 
 
-def edit_task(old_title: str, new_title: str, new_deadline: str = None, new_category: str = "none") -> str:
-    """Edit an existing task's title, deadline, and/or category.
+def edit_task(
+    old_title: str | None,
+    new_title: str,
+    new_deadline: str = None,
+    new_category: str | None = None,
+    *,
+    task_id: str | None = None,
+) -> str:
+    """Edit a task by stable id (preferred) or by title.
 
-    Args:
-        old_title: The current title of the task to edit.
-        new_title: The new title for the task.
-        new_deadline: Optional new deadline.
-        new_category: Optional new category.
+    ``new_deadline=None`` leaves the deadline unchanged and ``""`` clears it.
+    ``new_category=None`` means "leave the category unchanged"; passing a
+    category replaces it. This distinction matters because the edit dialog
+    used to send ``None`` for an untouched field and wiped the category.
 
     Returns:
-        str: The new (sanitized) task title.
-
-    Raises:
-        ValueError: If the old task is not found or the new title is empty.
+        str: The new task title.
     """
-    if not isinstance(old_title, str) or not old_title.strip():
-        raise ValueError("Old task title must be a non-empty string")
+    key = task_id or old_title
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("Task id or title must be a non-empty string")
     if not isinstance(new_title, str) or not new_title.strip():
         raise ValueError("New task title must be a non-empty string")
 
-    old_title = sanitize_title(old_title)
     new_title = sanitize_title(new_title)
 
     with file_lock(TASKS_LOCK_PATH):
         tasks = load_tasks()
+        task = _find_task(tasks, key)
+        if task is None:
+            raise ValueError(f"Task '{key}' not found")
 
-        found = False
-        for task in tasks:
-            if task["title"] == old_title:
-                found = True
-                # If the title changed, check for duplicates against the new title
-                if new_title != old_title:
-                    for other in tasks:
-                        if other is not task and other["title"] == new_title:
-                            raise ValueError(f"Task '{new_title}' already exists")
-                task["title"] = new_title
-                if new_deadline is not None:
-                    task["deadline"] = new_deadline
-                task["category"] = new_category.lower().strip() if isinstance(new_category, str) else "none"
-                break
+        old_title = task.get("title", "")
+        if new_title != old_title:
+            for other in tasks:
+                if other is not task and other.get("title") == new_title:
+                    raise ValueError(f"Task '{new_title}' already exists")
 
-        if not found:
-            raise ValueError(f"Task '{old_title}' not found")
+        task["title"] = new_title
+        if new_deadline is not None:
+            # "" clears the deadline; None (the default) leaves it unchanged.
+            task["deadline"] = new_deadline or None
+        if new_category is not None:
+            task["category"] = (
+                new_category.lower().strip()
+                if isinstance(new_category, str)
+                else "none"
+            )
 
         save_tasks(tasks)
-        # Rebuild manual order to reflect any title change
+        # The order file may still hold the old title; ids are stable.
         order_data = load_data(TASK_ORDER_FILE_PATH)
         if isinstance(order_data, dict) and "order" in order_data:
             order = [
-                new_title if t == old_title else t for t in order_data["order"]
+                new_title if entry == old_title else entry
+                for entry in order_data["order"]
             ]
             save_data(TASK_ORDER_FILE_PATH, {"order": order})
 
     return new_title
 
 
-def mark_task_completed(task_title: str, task_type: str = "none"):
-    """Extracts a task out of active runtime arrays and logs it as completed inside history archives.
-
-    Args:
-        task_type: Original classification bucket tracking the item.
-        task_title: Unique text identity of the task being checked off.
+def mark_task_completed(
+    task_title: str | None = None,
+    task_type: str = "none",
+    *,
+    task_id: str | None = None,
+):
+    """Move a task to completed history, keeping its real category.
 
     Returns:
-        str: The title of the validated task moved to historical logs.
+        str: The title of the task moved to history.
     """
-    removed_title = remove_tasks(task_title, task_type)
+    key = task_id or task_title
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("Task id or title must be a non-empty string")
+
+    with file_lock(TASKS_LOCK_PATH):
+        task = _find_task(load_tasks(), key)
+        if task is None:
+            raise ValueError(f"Task '{key}' not found")
+        real_title = task.get("title", "")
+        real_category = task.get("category") or task_type
+        real_id = task.get("id")
+
+    removed_title = remove_tasks(task_id=real_id) if real_id else remove_tasks(real_title)
 
     with file_lock(TASKS_LOCK_PATH):
         completed_tasks = load_completed_tasks()
 
         completion_entry = {
-            "title": task_title,
+            "title": removed_title,
             "completed_at": datetime.now().strftime("%Y-%m-%d"),
-            "category": task_type,
+            "category": real_category,
         }
+        if real_id:
+            completion_entry["id"] = real_id
+        else:
+            # Marks the title as literal for the one-time unescape migration.
+            completion_entry["literal_title"] = True
         if completion_entry not in completed_tasks:
             completed_tasks.append(completion_entry)
 
@@ -374,4 +544,4 @@ def mark_task_completed(task_title: str, task_type: str = "none"):
 
 
 if __name__ == "__main__":
-    print(get_topn_task())
+    log.info("%s", get_topn_task())

@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QMessageBox,
 )
-from PySide6.QtGui import QRegularExpressionValidator, QColor
+from PySide6.QtGui import QColor
 from system_sl.frontend.gui.icons import get_icon
 from system_sl.core.onboarding import ONBOARDING_QUESTIONS, PersonaStorageHandler
 from system_sl.core.tasks import (
@@ -48,10 +48,14 @@ from system_sl.core.priority_engine_new import (
     save_manual_order,
 )  # we are importing run_prioritization from api section(priority_engine_new)
 from system_sl.frontend.gui.theme import get_current_theme_tokens
-from system_sl.frontend.gui.data_issue_reporter import drain_data_issues
+from system_sl.frontend.gui.data_issue_reporter import (
+    drain_data_issues,
+    latest_data_issue_summary,
+)
 from system_sl.utils.data_health import DataIssue, record_issue
 from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.worker_threads import new_worker_thread
+from system_sl.utils.i18n import tr
 
 
 # GUI-added tasks no longer carry a user-chosen category — the model assigns one
@@ -80,9 +84,7 @@ class ReorderableTaskList(QListWidget):
             super().dropEvent(event)
             return
         moved_text = moved_item.text()
-        moved_title = moved_item.data(Qt.UserRole)
         old_texts = [self.item(i).text() for i in range(self.count())]
-        old_titles = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
         super().dropEvent(event)
         new_texts = [self.item(i).text() for i in range(self.count())]
         new_titles = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
@@ -189,6 +191,8 @@ class TasksWindow(QWidget):
         root.addLayout(add_row)
 
         self.status_label = QLabel("")
+        # Task titles are stored literally; never let one render as HTML.
+        self.status_label.setTextFormat(Qt.PlainText)
         # Several data problems are listed one per line, with full paths.
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
@@ -220,10 +224,16 @@ class TasksWindow(QWidget):
         drains the queue and explains them once instead of letting a corrupt
         file look like an empty task list.
         """
-        # Every problem found since the last drain is listed, one per line,
-        # instead of each overwriting the previous one. Dialogs are shown once
-        # per event, shared with the main window's monitor.
-        summary = drain_data_issues(self)
+        # The main window's monitor usually drains the queue first. Use the
+        # summary it stored so this status line still names the problem;
+        # only drain here when nothing has claimed the queue yet.
+        from system_sl.utils.data_health import has_issues
+
+        # New issues first; drain_data_issues also stores the summary, which
+        # is taken right away so it is not shown again on the next refresh.
+        if has_issues():
+            drain_data_issues(self)
+        summary = latest_data_issue_summary()
         if summary:
             self._status_message = summary
         self._apply_status()
@@ -351,10 +361,13 @@ class TasksWindow(QWidget):
             self._status_message = f"Could not load tasks: {e}"
             return []
 
-        position = {title: i for i, title in enumerate(load_manual_order())}
+        order = load_manual_order()
+        position = {key: i for i, key in enumerate(order)}
         return sorted(
             stored,
-            key=lambda t: position.get(t.get("title", ""), len(position)),
+            key=lambda t: position.get(
+                t.get("id") or t.get("title", ""), len(position)
+            ),
         )
 
     def _render(self, tasks):
@@ -375,12 +388,11 @@ class TasksWindow(QWidget):
             if p_score is not None:
                 display += f" [P={p_score:.3f}]"
             item = QListWidgetItem(display)
-            # Keep (category, title) so complete/remove still address the right
-            # task even though the category is no longer shown.
-            # NOTE: removed the category thing
-            item.setData(Qt.UserRole, title)
+            # Key by the stable task id: titles can be edited or duplicated.
+            key = task.get("id") or title
+            item.setData(Qt.UserRole, key)
             self.tasks_list_widget.addItem(item)
-            self._text_to_task[title] = task
+            self._text_to_task[key] = task
 
     def _on_reordered(self, moved_text, old_rank, new_rank, new_texts, new_titles):
         # BUG: REMEBER TO DEAL WITH THIS FUNCTION CAREFULLY
@@ -390,8 +402,8 @@ class TasksWindow(QWidget):
             self._text_to_task[t] for t in new_titles if t in self._text_to_task
         ]
         # The moved item is now at new_rank in the new order
-        moved_title = new_titles[new_rank - 1] if 0 <= new_rank - 1 < len(new_titles) else None
-        moved = self._text_to_task.get(moved_title)
+        moved_key = new_titles[new_rank - 1] if 0 <= new_rank - 1 < len(new_titles) else None
+        moved = self._text_to_task.get(moved_key)
 
         if moved is None or len(new_order_dicts) != len(new_titles):
             # Safe deferred rendering
@@ -423,11 +435,13 @@ class TasksWindow(QWidget):
         return item.data(Qt.UserRole)
 
     def _on_complete(self):
-        title = self._selected()
-        if title is None:
+        task_id = self._selected()
+        if task_id is None:
             return
+        task = self._text_to_task.get(task_id) or {}
+        title = task.get("title", "")
         try:
-            mark_task_completed(task_title=title)  # Removed the category thing
+            mark_task_completed(task_id=task_id)
             self._set_status(f"Completed: {title}")
         except ValueError as e:
             self._set_status(str(e))
@@ -436,11 +450,13 @@ class TasksWindow(QWidget):
         self._refresh_list()
 
     def _on_remove(self):
-        title = self._selected()
-        if title is None:
+        task_id = self._selected()
+        if task_id is None:
             return
+        task = self._text_to_task.get(task_id) or {}
+        title = task.get("title", "")
         try:
-            remove_tasks(task_title=title)
+            remove_tasks(task_id=task_id)
             self._set_status(f"Removed: {title}")
         except ValueError as e:
             self._set_status(str(e))
@@ -450,33 +466,42 @@ class TasksWindow(QWidget):
 
     def _on_edit(self):
         """Open a dialog to edit the selected task's title and deadline."""
-        title = self._selected()
-        if title is None:
+        task_id = self._selected()
+        if task_id is None:
             return
 
-        task = self._text_to_task.get(title)
+        task = self._text_to_task.get(task_id)
         if task is None:
             self._set_status("Could not find task data.")
             return
+        title = task.get("title", "")
 
         current_deadline = task.get("deadline")
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Edit Task")
+        dialog.setWindowTitle(tr("Edit Task"))
         dialog.setModal(True)
         form = QFormLayout(dialog)
 
         title_edit = QLineEdit(title)
-        form.addRow("Title:", title_edit)
+        form.addRow(tr("Title:"), title_edit)
 
-        deadline_check = QCheckBox("Set deadline:")
+        deadline_check = QCheckBox(tr("Set deadline:"))
         deadline_edit = QDateEdit()
         deadline_edit.setCalendarPopup(True)
         deadline_edit.setDisplayFormat("yyyy-MM-dd")
-        deadline_edit.setEnabled(bool(current_deadline))
-        if current_deadline:
-            from PySide6.QtCore import QDate
-            deadline_edit.setDate(QDate.fromString(current_deadline, "yyyy-MM-dd"))
+        # A task with a deadline opens with it already checked and filled in.
+        # Google-synced deadlines are "yyyy-MM-dd HH:mm": the date is the
+        # first ten characters and the time is kept when the date changes.
+        from PySide6.QtCore import QDate
+        current_deadline = current_deadline if isinstance(current_deadline, str) else ""
+        deadline_date = current_deadline[:10]
+        deadline_time = current_deadline[10:]
+        parsed = QDate.fromString(deadline_date, "yyyy-MM-dd")
+        has_deadline = parsed.isValid()
+        deadline_check.setChecked(has_deadline)
+        deadline_edit.setEnabled(has_deadline)
+        deadline_edit.setDate(parsed if has_deadline else QDate.currentDate())
         deadline_check.toggled.connect(deadline_edit.setEnabled)
         form.addRow(deadline_check, deadline_edit)
 
@@ -489,16 +514,22 @@ class TasksWindow(QWidget):
             return
 
         new_title = title_edit.text().strip()
-        new_deadline = (
-            deadline_edit.date().toString("yyyy-MM-dd")
-            if deadline_check.isChecked()
-            else None
-        )
+        if deadline_check.isChecked():
+            picked = deadline_edit.date().toString("yyyy-MM-dd")
+            # None leaves an untouched deadline exactly as stored.
+            new_deadline = (
+                None if has_deadline and picked == deadline_date
+                else picked + (deadline_time if has_deadline else "")
+            )
+        else:
+            # "" clears a deadline the Player unticked; None = nothing to do.
+            new_deadline = "" if current_deadline else None
         if not new_title:
-            self._set_status("Title is required.")
+            self._set_status(tr("Title is required."))
             return
         try:
-            edit_task(title, new_title, new_deadline)
+            edit_task(task_id=task_id, old_title=title, new_title=new_title,
+                      new_deadline=new_deadline)
             self._set_status(f"Edited: {new_title}")
         except ValueError as e:
             self._set_status(str(e))
@@ -514,7 +545,7 @@ class TasksWindow(QWidget):
             else None
         )
         if not title:
-            self._set_status("Title is required.")
+            self._set_status(tr("Title is required."))
             return
         try:
             # Category is assigned by the model later; default for now.
@@ -636,8 +667,9 @@ class OnboardingWindow(QWidget):
 
         impact_row = QHBoxLayout()
         self.impact_buttons = []
-        for label in ["Low (1)", "Medium (2)", "High (3)"]:
+        for i, label in enumerate(["Low (1)", "Medium (2)", "High (3)"]):
             btn = QPushButton(label)
+            btn.setProperty("impact", i + 1)
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
             btn.toggled.connect(self._validate_input)
@@ -651,13 +683,22 @@ class OnboardingWindow(QWidget):
 
         layout.addStretch(1)
 
+        button_row = QHBoxLayout()
+        self.back_button = QPushButton()
+        self.back_button.setIcon(get_icon("back"))
+        self.back_button.setText("Back")
+        self.back_button.setMinimumHeight(36)
+        self.back_button.clicked.connect(self._on_back)
         self.next_button = QPushButton()
         self.next_button.setIcon(get_icon("next"))
         self.next_button.setText("Next")
         self.next_button.setEnabled(False)
         self.next_button.setMinimumHeight(36)
         self.next_button.clicked.connect(self._on_next)
-        layout.addWidget(self.next_button)
+        button_row.addWidget(self.back_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self.next_button)
+        layout.addLayout(button_row)
 
         return page
 
@@ -675,23 +716,48 @@ class OnboardingWindow(QWidget):
         self.completion_subtitle.setStyleSheet("font-size: 14px; margin-bottom: 20px;")
         layout.addWidget(self.completion_subtitle)
 
+        summary_label = QLabel("Review and edit your answers before saving:")
+        summary_label.setStyleSheet("font-size: 13px;")
+        layout.addWidget(summary_label)
+
+        # The summary is editable: the Player can correct a keyword or change
+        # an impact rating before the profile is written.
+        self.summary_table = QTableWidget(0, 3)
+        self.summary_table.setHorizontalHeaderLabels(
+            ["Category", "Answer", "Impact (1-3)"]
+        )
+        self.summary_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self.summary_table.verticalHeader().setVisible(False)
+        self.summary_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.AllEditTriggers
+        )
+        layout.addWidget(self.summary_table, 1)
+
         self.stats_label = QLabel()
         self.stats_label.setStyleSheet("font-size: 14px;")
         layout.addWidget(self.stats_label)
+
+        completion_buttons = QHBoxLayout()
+        completion_back = QPushButton()
+        completion_back.setIcon(get_icon("back"))
+        completion_back.setText("Back")
+        completion_back.clicked.connect(self._on_completion_back)
+        finish_btn = QPushButton()
+        finish_btn.setIcon(get_icon("finish"))
+        finish_btn.setText("Save Profile")
+        finish_btn.setMinimumHeight(36)
+        finish_btn.clicked.connect(self._on_finish)
+        completion_buttons.addWidget(completion_back)
+        completion_buttons.addStretch(1)
+        completion_buttons.addWidget(finish_btn)
+        layout.addLayout(completion_buttons)
 
         self.path_label = QLabel()
         self.path_label.setStyleSheet("font-size: 12px; margin-top: 10px;")
         self.path_label.setWordWrap(True)
         layout.addWidget(self.path_label)
-
-        layout.addStretch(1)
-
-        finish_btn = QPushButton()
-        finish_btn.setIcon(get_icon("finish"))
-        finish_btn.setText("Begin Journey")
-        finish_btn.setMinimumHeight(36)
-        finish_btn.clicked.connect(self._on_finish)
-        layout.addWidget(finish_btn)
 
         return page
 
@@ -740,12 +806,21 @@ class OnboardingWindow(QWidget):
         self.quest_label.setText(f"QUEST {q['id']}/{n} - {q['category']}")
         self.question_label.setText(q["question"])
         self.hint_label.setText(f"Example: {q['hint']}")
-        self.answer_input.clear()
+        existing = (
+            self.responses[self.current_index]
+            if self.current_index < len(self.responses)
+            else None
+        )
+        self.answer_input.setText((existing or {}).get("answer", ""))
         self.impact_group.setExclusive(False)
         for btn in self.impact_buttons:
-            btn.setChecked(False)
+            btn.setChecked(
+                bool(existing) and btn.property("impact") == existing.get("impact")
+            )
         self.impact_group.setExclusive(True)
+        self.back_button.setVisible(self.current_index > 0)
         self.next_button.setEnabled(False)
+        self._validate_input()
         if self.current_index == n - 1:
             self.next_button.setText("Finish")
         else:
@@ -764,35 +839,101 @@ class OnboardingWindow(QWidget):
         impact = self.impact_group.checkedId()
         q = self.questions[self.current_index]
 
-        self.responses.append(
-            {
-                "question_id": q["id"],
-                "category": q["category"],
-                "question": q["question"],
-                "answer": answer,
-                "impact": impact,
-            }
-        )
+        response = {
+            "question_id": q["id"],
+            "category": q["category"],
+            "question": q["question"],
+            "answer": answer,
+            "impact": impact,
+        }
+        if self.current_index < len(self.responses):
+            self.responses[self.current_index] = response
+        else:
+            self.responses.append(response)
 
         if self.current_index < len(self.questions) - 1:
             self.current_index += 1
             self._show_question()
         else:
-            stats = {
-                "high_count": sum(1 for r in self.responses if r["impact"] == 3),
-                "medium_count": sum(1 for r in self.responses if r["impact"] == 2),
-                "low_count": sum(1 for r in self.responses if r["impact"] == 1),
-            }
-            self.storage.write_persona_profile(self.responses, stats)
-            self.stats_label.setText(
-                f"Core Attributes:      {stats['high_count']} (High Priority)\n"
-                f"Secondary Attributes: {stats['medium_count']} (Medium Priority)\n"
-                f"Support Attributes:   {stats['low_count']} (Low Priority)"
+            self._show_completion()
+
+    def _on_back(self):
+        if self.current_index > 0:
+            self.current_index -= 1
+            self._show_question()
+
+    def _show_completion(self):
+        """Show every answer in an editable table; nothing is saved yet."""
+        self.summary_table.setRowCount(len(self.questions))
+        for row, q in enumerate(self.questions):
+            existing = (
+                self.responses[row]
+                if row < len(self.responses)
+                else {}
             )
-            self.path_label.setText(f"Profile saved to: {self.storage.persona_file}")
-            self.stack.setCurrentIndex(2)
+            category = QTableWidgetItem(q["category"])
+            category.setFlags(category.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            answer = QTableWidgetItem(str(existing.get("answer", "")))
+            impact = QTableWidgetItem(
+                str(existing.get("impact", ""))
+            )
+            self.summary_table.setItem(row, 0, category)
+            self.summary_table.setItem(row, 1, answer)
+            self.summary_table.setItem(row, 2, impact)
+
+        high = sum(1 for r in self.responses if r.get("impact") == 3)
+        medium = sum(1 for r in self.responses if r.get("impact") == 2)
+        low = sum(1 for r in self.responses if r.get("impact") == 1)
+        self.stats_label.setText(
+            f"Core Attributes:      {high} (High Priority)\n"
+            f"Secondary Attributes: {medium} (Medium Priority)\n"
+            f"Support Attributes:   {low} (Low Priority)"
+        )
+        self.path_label.setText(
+            f"Profile will be saved to: {self.storage.persona_file}"
+        )
+        self.stack.setCurrentIndex(2)
+
+    def _on_completion_back(self):
+        self.current_index = len(self.questions) - 1
+        self._show_question()
+        self.stack.setCurrentIndex(1)
 
     def _on_finish(self):
+        responses = []
+        for row, q in enumerate(self.questions):
+            answer_item = self.summary_table.item(row, 1)
+            impact_item = self.summary_table.item(row, 2)
+            answer = (answer_item.text() if answer_item else "").strip().lower()
+            try:
+                impact = int((impact_item.text() if impact_item else "").strip())
+            except (TypeError, ValueError):
+                impact = 0
+            if not answer or len(answer) < 3 or impact not in (1, 2, 3):
+                QMessageBox.warning(
+                    self,
+                    "Incomplete profile",
+                    f"Please give question {q['id']} an answer of at least 3 "
+                    "characters and an impact of 1, 2 or 3.",
+                )
+                return
+            responses.append(
+                {
+                    "question_id": q["id"],
+                    "category": q["category"],
+                    "question": q["question"],
+                    "answer": answer,
+                    "impact": impact,
+                }
+            )
+
+        self.responses = responses
+        stats = {
+            "high_count": sum(1 for r in responses if r["impact"] == 3),
+            "medium_count": sum(1 for r in responses if r["impact"] == 2),
+            "low_count": sum(1 for r in responses if r["impact"] == 1),
+        }
+        self.storage.write_persona_profile(responses, stats)
         self._done = True
         self.onboarding_complete.emit(True)
         self.close()

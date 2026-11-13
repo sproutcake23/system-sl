@@ -10,9 +10,7 @@ It implements spacy md model and
 from __future__ import annotations
 
 import os
-import re
 import math
-from typing import Self
 import numpy as np
 from datetime import datetime
 from pathlib import Path
@@ -23,8 +21,7 @@ import json
 from system_sl.core.tasks import load_completed_tasks
 from system_sl.utils import get_tasks_file_path
 
-
-logging.basicConfig(level=logging.INFO, format="[user_vector] %(message)s")
+log = logging.getLogger(__name__)
 log = logging.getLogger(__name__)
 
 
@@ -102,7 +99,7 @@ class Setup:
 
     # _nlp = None for lazy loading
 
-    def _get_model(self) -> "spacy.language.Language":
+    def _get_model(self):
         """Return the global spacy model, loading it on first call."""
         if Setup._nlp is None:
             Setup._nlp = self._load_spacy_model()
@@ -192,7 +189,7 @@ class Decay_stradegy:
         self._LAMBDA = (
             math.log(2) / self.DECAY_HALF_LIFE_DAYS
         )  # Remembering old days physical chemistry
-        # skip contributions below this (> 86 days old)
+        # With a 3-day half-life, weight 0.05 is reached at about 13 days.
         self._MIN_DECAY_WEIGHT = 0.05
 
     # def _read_completion_entry(self, entry: dict) -> tuple[str, datetime] | None:
@@ -274,7 +271,7 @@ class Decay_stradegy:
         -------
         float  in range (0.0, 1.0]
         1.0 = completed today
-        0.5 = completed 30 days ago
+        0.5 = completed one half-life (3 days) ago
         0.0 → (asymptote, never exactly zero)
         """
         days_since = max(0, (datetime.now() - completion_date).days)
@@ -455,7 +452,7 @@ class Helper:
                     cache = json.load(f)
                 info["built_at"] = cache.get("built_at")
             except Exception:
-                pass
+                log.debug("could not read the vector cache", exc_info=True)
 
         if self.persona_path.exists():
             try:
@@ -470,7 +467,7 @@ class Helper:
                     for r in persona.get("responses", [])
                 ]
             except Exception:
-                pass
+                log.debug("could not read persona.json", exc_info=True)
 
         if self.completed_path.exists():
             try:
@@ -483,7 +480,7 @@ class Helper:
                 pw, dw = decay_strategy._build_fusion_weights(count, 1.0)
                 info["fusion_weights"] = {"persona": pw, "decay": dw}
             except Exception:
-                pass
+                log.debug("could not read completed_tasks.json", exc_info=True)
 
         return info
 
@@ -506,9 +503,8 @@ class Fusion:
         """
         if not self.persona_path.exists():
             raise FileNotFoundError(
-                f"persona.json not found at {
-                    self.persona_path
-                }. Complete onboarding first."
+                f"persona.json not found at {self.persona_path}. "
+                "Complete onboarding first."
             )
 
         if use_cache:
@@ -529,7 +525,7 @@ class Fusion:
                 completed_tasks = load_completed_tasks()
 
             except Exception as e:
-                print(f"Error {e}")
+                log.error("Error %s", e)
         else:
             log.info("No completed_tasks.json found — using persona only")
 
@@ -594,50 +590,45 @@ class Fusion:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("\n" + "═" * 60)
-    print("  USER VECTOR BUILDER — Standalone Debug Mode")
-    print("═" * 60)
+    log.info("\n" + "═" * 60)
+    log.info("  USER VECTOR BUILDER — Standalone Debug Mode")
+    log.info("═" * 60)
 
     try:
         helper = Helper()
         fusion_engine = Fusion()
         info = helper.get_vector_info()
 
-        print(
-            f"\n  Persona file   : {
-                '✓ found' if info['persona_exists'] else '✗ MISSING'
-            }"
-        )
-        print(
-            f"  Completed tasks: {
-                '✓ found' if info['completed_tasks_exists'] else '✗ not found'
-            }"
-        )
-        print(f"  Cache          : {'✓ exists' if info['cache_exists'] else '○ none'}")
-        print(f"  Completed count: {info['completed_task_count']}")
-        print(
-            f"  Fusion weights : persona={
-                info['fusion_weights']['persona']:.2f}  decay={
-                info['fusion_weights']['decay']:.2f}"
+        persona = "✓ found" if info["persona_exists"] else "✗ MISSING"
+        completed = "✓ found" if info["completed_tasks_exists"] else "✗ not found"
+        cache = "✓ exists" if info["cache_exists"] else "○ none"
+        weights = info["fusion_weights"]
+        log.info(f"\n  Persona file   : {persona}")
+        log.info(f"  Completed tasks: {completed}")
+        log.info(f"  Cache          : {cache}")
+        log.info(f"  Completed count: {info['completed_task_count']}")
+        log.info(
+            f"  Fusion weights : persona={weights['persona']:.2f}"
+            f"  decay={weights['decay']:.2f}"
         )
 
         if not info["persona_exists"]:
-            print("\n  ✗ Cannot build vector — run onboarding first.")
+            log.info("\n  ✗ Cannot build vector — run onboarding first.")
         else:
-            print("\n  Building vector (may take a few seconds on first run)...")
+            log.info("\n  Building vector (may take a few seconds on first run)...")
             vec = fusion_engine.build_user_vector(use_cache=False)
-            print(f"\n  Vector shape : {vec.shape}")
-            print(f"  Vector norm  : {np.linalg.norm(vec):.6f}  (should be ~1.0)")
-            print(f"  Non-zero dims: {np.count_nonzero(vec)}")
-            print(f"  Top 5 values : {sorted(vec, reverse=True)[:5]}")
-            print("\n  ✓ Vector built successfully.")
+            log.info(f"\n  Vector shape : {vec.shape}")
+            log.info(f"  Vector norm  : {np.linalg.norm(vec):.6f}  (should be ~1.0)")
+            log.info(f"  Non-zero dims: {np.count_nonzero(vec)}")
+            log.info(f"  Top 5 values : {sorted(vec, reverse=True)[:5]}")
+            log.info("\n  ✓ Vector built successfully.")
 
     except FileNotFoundError as e:
-        print(f"\n  ✗ {e}")
+        log.info(f"\n  ✗ {e}")
     except RuntimeError as e:
-        print(e)
+        log.error("%s", e)
     except Exception as e:
-        print(f"\n  ✗ Unexpected error: {e}")
+        log.info(f"\n  ✗ Unexpected error: {e}")
         raise
 
 # TODO: IMplement temporal decay maths here and also doing caching for optimization

@@ -66,10 +66,22 @@ class FakeChatModel(BaseChatModel):
     ) -> Iterator[ChatGenerationChunk]:
         reply = self._next_reply(messages)
         self._guard()
-        for token in str(reply.content).split(" "):
-            chunk = ChatGenerationChunk(message=AIMessageChunk(content=token + " "))
+        chunks = [
+            ChatGenerationChunk(message=AIMessageChunk(content=token + " "))
+            for token in str(reply.content).split(" ")
+        ]
+        # Real providers attach usage to the final chunk (or to the message
+        # when there is no text); mirror that so callers can be tested.
+        if chunks and reply.usage_metadata:
+            chunks[-1] = ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content=chunks[-1].message.content,
+                    usage_metadata=reply.usage_metadata,
+                )
+            )
+        for chunk in chunks:
             if run_manager:
-                run_manager.on_llm_new_token(token + " ")
+                run_manager.on_llm_new_token(str(chunk.message.content))
             yield chunk
         # Tool calls stream as chunks too, like a real provider's.
         if reply.tool_calls:
