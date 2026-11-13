@@ -160,3 +160,57 @@ def test_chat_tools_can_remove_and_complete_tasks(tmp_path, monkeypatch):
 
     assert tasks.load_tasks() == []
     assert [c["title"] for c in tasks.load_completed_tasks()] == ["Read chapter"]
+
+
+def _unreadable(monkeypatch, path):
+    """Make reads of ``path`` fail as if permission were denied."""
+    import system_sl.utils.atomic_json as atomic_json
+
+    real_open = open
+
+    def fake_open(file, *args, **kwargs):
+        if str(file) == str(path):
+            raise PermissionError(13, "Permission denied", str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(atomic_json, "open", fake_open, raising=False)
+
+
+def test_unreadable_task_file_is_not_overwritten(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    tasks.add_tasks("study", "Keep me")
+    before = (tmp_path / "tasks.json").read_text()
+    _unreadable(monkeypatch, tmp_path / "tasks.json")
+
+    with pytest.raises(OSError):
+        tasks.add_tasks("study", "New task")
+
+    assert (tmp_path / "tasks.json").read_text() == before
+
+
+def test_unreadable_history_blocks_completion(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    tasks.add_tasks("study", "Finish me")
+    (tmp_path / "completed_tasks.json").write_text("[]")
+    _unreadable(monkeypatch, tmp_path / "completed_tasks.json")
+
+    with pytest.raises(OSError):
+        tasks.mark_task_completed("Finish me")
+
+    assert [t["title"] for t in tasks.load_tasks()] == ["Finish me"]
+
+
+def test_completion_writes_history_before_removing(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    tasks.add_tasks("study", "Crash midway")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("crash")
+
+    monkeypatch.setattr(tasks, "remove_tasks", boom)
+    with pytest.raises(RuntimeError):
+        tasks.mark_task_completed("Crash midway")
+
+    # The task is in both files, not lost from both.
+    assert [t["title"] for t in tasks.load_tasks()] == ["Crash midway"]
+    assert [t["title"] for t in tasks.load_completed_tasks()] == ["Crash midway"]
