@@ -1060,6 +1060,8 @@ class ChatPanel(QWidget):
 
         self._messages = Transcript()
         self._stream_message_id: str | None = None
+        # Set when the palette changed mid-reply; redrawn when the turn ends.
+        self._theme_redraw_pending = False
 
         # Quotes waiting to go into the next message. Each chip above the
         # input can be removed before sending.
@@ -1771,7 +1773,13 @@ class ChatPanel(QWidget):
         from system_sl.chatbot.transcript import Transcript
 
         self._messages = Transcript.from_history(messages)
+        self._redraw_transcript()
+        self._scroll_to_bottom()
+
+    def _redraw_transcript(self) -> None:
+        """Draw every message in the model again, in the current colours."""
         self._stream_message_id = None
+        self._theme_redraw_pending = False
         self.transcript.clear()
 
         # A very long conversation would build thousands of rich-text blocks
@@ -1787,7 +1795,17 @@ class ChatPanel(QWidget):
             shown = shown[-limit:]
         for message in shown:
             self._render_message(message)
-        self._scroll_to_bottom()
+
+    def _redraw_for_theme(self) -> None:
+        """Redraw the transcript after a palette change, keeping the scroll."""
+        bar = self.transcript.verticalScrollBar()
+        at_bottom = self._is_at_bottom()
+        position = bar.value()
+        self._redraw_transcript()
+        if at_bottom:
+            self._scroll_to_bottom()
+        else:
+            bar.setValue(min(position, bar.maximum()))
 
     def _render_message(self, message: "ChatMessage") -> None:
         """Draw one message into the transcript view."""
@@ -2318,12 +2336,24 @@ class ChatPanel(QWidget):
         return get_current_theme_tokens()
 
     def refresh_theme(self, tokens: dict | None = None) -> None:
-        """Refresh colours captured at construction time.
+        """Recolour the panel and the transcript for a new palette.
 
-        Transcript bubbles already on screen keep their colour, but the loading
-        dots and the reasoning panel pick up the new palette.
+        Bubbles bake their colours in when drawn, so the transcript is redrawn
+        from the message model; otherwise switching Light/Dark (or to a very
+        different wallpaper palette) left old bubbles unreadable. A reply that
+        is still streaming holds positions in the document, so the redraw
+        waits until the turn ends; that also repaints the part of the reply
+        streamed in the old colours.
         """
         tokens = tokens or self._get_live_tokens()
+        if self.is_busy():
+            self._theme_redraw_pending = True
+        else:
+            self._redraw_for_theme()
+        from system_sl.frontend.gui.popup_windows import BatchProposalDialog
+
+        for dialog in self.findChildren(BatchProposalDialog):
+            dialog.refresh_theme(tokens)
         self._dots_bright = tokens.get("sys_color_primary", "#00d9ff")
         self._dots_dim = tokens.get("sys_color_text_secondary", "#9ab8e5")
         if self.reasoning_view.isVisible():
@@ -4022,6 +4052,8 @@ class ChatPanel(QWidget):
         for append, text in notes:
             append(text)
         self._flush_pending_confirmations()
+        if self._theme_redraw_pending:
+            self._redraw_for_theme()
         self.stop_button.setToolTip("Interrupt the reply")
         self._set_busy(False)
         self.input_box.setFocus()

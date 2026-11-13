@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Optional
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, QSettings, QThread, QTimer, Signal
@@ -30,9 +31,9 @@ from system_sl.utils.wallpaper_path import WallpaperState, get_wallpaper_state, 
 from system_sl.utils.wallust_theme import (
     cached_wallust_tokens,
     cancel_extractions,
+    ExtractionResult,
+    extract_wallust_tokens,
     find_wallust,
-    generate_wallust_tokens,
-    last_error,
     missing_wallust_message,
 )
 
@@ -41,6 +42,18 @@ LOG = logging.getLogger(__name__)
 WALLPAPER_POLL_MS = 12_000
 SYSTEM_POLL_MS = 30_000
 DEBOUNCE_MS = 450
+# Waits before re-trying a wallpaper whose extraction failed: 15s, 30s, 60s...
+# up to 10 minutes. A transient failure (a timeout, a file mid-write) recovers
+# quickly; a wallpaper wallust can never read is not hammered every poll.
+RETRY_BASE_MS = 15_000
+RETRY_MAX_MS = 600_000
+
+
+def retry_delay_ms(failures: int) -> int:
+    """Return the wait after ``failures`` failed extractions in a row."""
+    if failures < 1:
+        return 0
+    return min(RETRY_BASE_MS * 2 ** (failures - 1), RETRY_MAX_MS)
 
 
 class _ProbeThread(QThread):
@@ -64,7 +77,8 @@ class _ProbeThread(QThread):
 class _ExtractThread(QThread):
     """Runs wallust off the GUI thread."""
 
-    tokensReady = Signal(str, object)
+    # (fingerprint, ExtractionResult)
+    resultReady = Signal(str, object)
 
     def __init__(self, state: WallpaperState, parent=None):
         super().__init__(parent)
@@ -74,13 +88,13 @@ class _ExtractThread(QThread):
         if self.isInterruptionRequested():
             return
         try:
-            tokens = generate_wallust_tokens(self._state.image_path or "")
-        except Exception:
+            result = extract_wallust_tokens(self._state.image_path or "")
+        except Exception as exc:
             LOG.exception("Could not generate wallust tokens")
-            tokens = None
+            result = ExtractionResult(error=f"Palette extraction crashed: {exc}")
         if self.isInterruptionRequested():
             return
-        self.tokensReady.emit(self._state.fingerprint, tokens)
+        self.resultReady.emit(self._state.fingerprint, result)
 
 
 class ThemeManager(QObject):
@@ -107,6 +121,11 @@ class ThemeManager(QObject):
         self._probe_running = False
         self._extract_running = False
         self._pending_state: Optional[WallpaperState] = None
+        # The wallpaper whose extraction last failed, how many times in a row,
+        # and when it may be tried again (time.monotonic()).
+        self._failed_fingerprint: Optional[str] = None
+        self._failures = 0
+        self._retry_at = 0.0
 
         self._timer = QTimer(self)
         self._timer.setInterval(WALLPAPER_POLL_MS)
@@ -116,6 +135,10 @@ class ThemeManager(QObject):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(DEBOUNCE_MS)
         self._debounce.timeout.connect(self._probe)
+
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._probe)
 
         self._scheme_timer = QTimer(self)
         self._scheme_timer.setInterval(SYSTEM_POLL_MS)
@@ -146,6 +169,7 @@ class ThemeManager(QObject):
         self._timer.stop()
         self._scheme_timer.stop()
         self._debounce.stop()
+        self._retry_timer.stop()
         cancel_extractions()
         for attribute in ("_probe_thread", "_extract_thread"):
             thread = getattr(self, attribute, None)
@@ -262,7 +286,10 @@ class ThemeManager(QObject):
     def _stop_dynamic(self) -> None:
         self._timer.stop()
         self._debounce.stop()
+        self._retry_timer.stop()
         self._pending_state = None
+        self._failed_fingerprint = None
+        self._failures = 0
         if self._watcher.files() or self._watcher.directories():
             paths = self._watcher.files() + self._watcher.directories()
             if paths:
@@ -307,6 +334,14 @@ class ThemeManager(QObject):
             # extraction reported instead of leaving that error showing.
             self._set_status(self._palette_status)
             return
+        if (
+            state.fingerprint == self._failed_fingerprint
+            # Half a second of slack: the retry timer can fire a little early.
+            and time.monotonic() + 0.5 < self._retry_at
+        ):
+            # This wallpaper failed recently; the retry timer will try again.
+            self._set_status(self._palette_status)
+            return
 
         if self._extract_running:
             self._pending_state = state
@@ -317,7 +352,7 @@ class ThemeManager(QObject):
         self._extract_running = True
         thread = _ExtractThread(state, self)
         self._extract_thread = thread
-        thread.tokensReady.connect(self._on_tokens)
+        thread.resultReady.connect(self._on_result)
         thread.finished.connect(lambda t=thread: self._on_extract_finished(t))
         thread.finished.connect(thread.deleteLater)
         thread.start()
@@ -326,22 +361,37 @@ class ThemeManager(QObject):
         if self._extract_thread is thread:
             self._extract_thread = None
 
-    def _on_tokens(self, fingerprint: str, tokens: Optional[dict]) -> None:
+    def _on_result(self, fingerprint: str, result: ExtractionResult) -> None:
         self._extract_running = False
-        if self._mode != "dynamic":
+        if self._mode != "dynamic" or result.cancelled:
             return
 
-        if tokens:
+        if result.ok:
+            # Only a real palette is committed: the fingerprint, the last good
+            # tokens and the colours on screen all move together.
             self._fingerprint = fingerprint
-            self._last_good_tokens = tokens
-            self._apply(tokens)
-            self._palette_status = last_error() or self._wallpaper_status()
+            self._last_good_tokens = result.tokens
+            self._failed_fingerprint = None
+            self._failures = 0
+            self._retry_timer.stop()
+            self._apply(result.tokens)
+            self._palette_status = self._wallpaper_status()
         else:
-            # A crash in the worker: keep the last good palette but remember the
-            # wallpaper so the same failure is not retried every poll.
-            self._fingerprint = fingerprint
+            # Keep whatever is on screen and try this wallpaper again later.
+            # Committing the fingerprint here used to pin the built-in navy
+            # palette until the wallpaper changed or the app restarted.
+            if fingerprint == self._failed_fingerprint:
+                self._failures += 1
+            else:
+                self._failed_fingerprint = fingerprint
+                self._failures = 1
+            delay = retry_delay_ms(self._failures)
+            self._retry_at = time.monotonic() + delay / 1000
+            self._retry_timer.start(delay)
+            reason = result.error or "Could not refresh the wallpaper palette."
             self._palette_status = (
-                "Could not refresh the wallpaper palette; keeping the previous colours."
+                f"{reason} Keeping the current colours; "
+                f"trying again in {_describe_delay(delay)}."
             )
         self._set_status(self._palette_status)
 
@@ -393,6 +443,14 @@ class ThemeManager(QObject):
         except Exception:
             LOG.exception("Could not apply the theme")
         self.themeChanged.emit(dict(self._tokens))
+
+
+def _describe_delay(delay_ms: int) -> str:
+    seconds = round(delay_ms / 1000)
+    if seconds < 60:
+        return f"{seconds} seconds"
+    minutes = round(seconds / 60)
+    return "1 minute" if minutes == 1 else f"{minutes} minutes"
 
 
 _manager: Optional[ThemeManager] = None
