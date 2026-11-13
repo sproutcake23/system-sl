@@ -39,6 +39,7 @@ ICON_MAP = {
     "refresh": "fa6s.arrows-rotate",
     "settings": "fa6s.gear",
     "model": "fa6s.robot",
+    "delete_chat": "fa6s.trash",
 
     # Chat input row
     "attach": "fa6s.paperclip",
