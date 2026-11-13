@@ -158,10 +158,10 @@ def _fallback_set(name: str, value: str) -> None:
 
 
 def _fallback_delete(name: str) -> None:
-    _notify_fallback_used()
     try:
         if not _FALLBACK_FILE.is_file():
             return
+        _notify_fallback_used()
         fernet = _fallback_fernet()
         data = json.loads(fernet.decrypt(_FALLBACK_FILE.read_bytes()).decode("utf-8"))
         data.pop(name, None)
@@ -256,9 +256,10 @@ def delete_secret(name: str) -> None:
                 keyring.delete_password(SERVICE_NAME, name)
             except keyring.errors.PasswordDeleteError:
                 logger.debug("secret %s was not in the keyring", name)
-            return
     except Exception:
         logger.debug("keyring delete failed; using the fallback", exc_info=True)
+    # Always clear the encrypted fallback too: get_secret falls back to it
+    # when the keyring has nothing, so a copy left there would come back.
     _fallback_delete(name)
 
 

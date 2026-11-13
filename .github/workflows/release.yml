@@ -33,6 +33,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.3
 
+      # Qt (offscreen), QtMultimedia and the OCR tests need these at runtime.
+      - name: Install system libraries for tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libpulse0 libxkbcommon0 \
+            tesseract-ocr tesseract-ocr-eng poppler-utils
+
       - name: Install dependencies
         run: uv sync --extra test
 
@@ -43,9 +50,12 @@ jobs:
         run: |
           B="$HOME/.cache/system-sl-pytest"
           mkdir -p "$B/tmp"
+          # Hosted runners have no user systemd session, so systemd-run is
+          # not available; cap address space with ulimit instead (1500M is
+          # too tight for virtual memory, so allow 4G) and bound run time.
+          ulimit -v 4194304
           TMPDIR="$B/tmp" QT_QPA_PLATFORM=offscreen \
-            systemd-run --user --scope -q -p MemoryMax=1500M -p MemorySwapMax=0 \
-            timeout 200 uv run --frozen pytest -q --basetemp="$B/run"
+            timeout 300 uv run --frozen --extra test pytest -q --basetemp="$B/run"
 
   build-linux:
     needs: quality
@@ -365,7 +375,7 @@ jobs:
     if: false
     runs-on: macos-latest
     steps:
-      - run: echo "TODO: macOS build is not implemented yet."
+      - run: 'echo "TODO: macOS build is not implemented yet."'
 
   release:
     needs: [build-linux, build-windows]

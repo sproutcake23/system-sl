@@ -1,7 +1,9 @@
 """One rotating log file for the whole application.
 
-Both the GUI process and the ``--bg`` notifier write here, so a problem seen
-in one is still in the log after the process exits. Configuring logging at
+The GUI process and the ``--bg`` notifier each get their own file
+(``system-sl.log`` and ``system-sl-bg.log``): RotatingFileHandler is not safe
+across processes, and two processes rotating one file lose records (and fail
+outright on Windows, where the open file can't be renamed). Configuring logging at
 import time (as ``vector_converter`` and the priority engine used to) also
 touched the disk and the root logger during test collection; this is called
 explicitly from the entry points instead.
@@ -11,11 +13,13 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 
 from system_sl.utils.paths import get_tasks_file_path
 
 LOG_FILENAME = "system-sl.log"
+BG_LOG_FILENAME = "system-sl-bg.log"
 _MAX_BYTES = 2 * 1024 * 1024
 _BACKUP_COUNT = 3
 
@@ -28,7 +32,8 @@ def configure_logging(level: int = logging.INFO) -> None:
     if _configured:
         return
 
-    path = get_tasks_file_path(LOG_FILENAME)
+    filename = BG_LOG_FILENAME if "--bg" in sys.argv[1:] else LOG_FILENAME
+    path = get_tasks_file_path(filename)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         handler = RotatingFileHandler(

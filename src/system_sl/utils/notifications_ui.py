@@ -2,8 +2,8 @@
 
 This deliberately is not a modal window: a reminder must never steal focus
 from what the Player is doing. It is a compact frameless toast in the corner
-of the screen that dismisses itself, and can also be dismissed with Esc or a
-click.
+of the screen that dismisses itself, and can also be dismissed with a click.
+It never takes keyboard focus, so it does not react to keys (not even Esc).
 """
 
 from PySide6.QtCore import Qt, QTimer
@@ -90,12 +90,6 @@ class SystemNotification(QWidget):
     def mousePressEvent(self, event):
         self.hide()
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
-            self.hide()
-        else:
-            super().keyPressEvent(event)
-
     def hide(self):
         self._auto_dismiss.stop()
         super().hide()
@@ -145,6 +139,8 @@ class SystemNotification(QWidget):
 
         for text in message:
             label = QLabel(str(text))
+            # Task titles are literal text; never render one as HTML.
+            label.setTextFormat(Qt.TextFormat.PlainText)
             label.setObjectName("notifMessage")
             label.setWordWrap(True)
             label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)

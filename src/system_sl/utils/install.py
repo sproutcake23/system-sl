@@ -3,6 +3,7 @@ import subprocess
 import shutil
 import sys
 from pathlib import Path
+from system_sl.utils.autostart import desktop_exec_quote
 
 
 def is_pip_install() -> bool:
@@ -129,8 +130,9 @@ def create_desktop_shortcut(target_path: Path, install_dir: Path):
         "[Desktop Entry]",
         "Type=Application",
         "Name=THE SYSTEM",
-        f'Exec="{target_path}"',
-        f'Path="{install_dir}"',
+        f"Exec={desktop_exec_quote(str(target_path))}",
+        # Path is a plain string per the Desktop Entry spec; never quote it.
+        f"Path={install_dir}",
         "Terminal=false",
         f"Icon={icon_path}",
         "Categories=Utility;Productivity;",

@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import sys
 import threading
@@ -404,12 +405,28 @@ class MainWindow(QMainWindow):
         # QSettings (theme, tray, sync toggle, window state).
         self.settings.clear()
 
-        # JSON settings written by the chat and notification code.
+        # JSON settings written by the chat and notification code. A staged
+        # AppImage update is recorded in settings.json too; that is app state,
+        # not a preference, so it survives the reset.
+        settings_path = Path(get_tasks_file_path("settings.json"))
+        try:
+            staged = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            staged = {}
+        staged = {
+            k: v for k, v in (staged if isinstance(staged, dict) else {}).items()
+            if k.startswith("pending_appimage_")
+        }
         for name in ("llm_config.json", "settings.json"):
             try:
                 Path(get_tasks_file_path(name)).unlink(missing_ok=True)
             except OSError:
                 logger.warning("could not remove %s", name, exc_info=True)
+        if staged:
+            try:
+                settings_path.write_text(json.dumps(staged, indent=2), encoding="utf-8")
+            except OSError:
+                logger.warning("could not keep the staged update", exc_info=True)
 
         # Secrets stored in the keyring / encrypted fallback.
         for secret in (
@@ -425,6 +442,8 @@ class MainWindow(QMainWindow):
         self.notifications_check.setChecked(load_notifications_enabled())
         self.auto_update_check.setChecked(load_auto_update_preference())
         self.google_sync_toggle.setChecked(False)
+        self.close_to_tray_enabled = False
+        self.close_to_tray_toggle.setChecked(False)
         QMessageBox.information(
             self,
             tr("Settings reset"),

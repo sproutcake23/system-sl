@@ -8,6 +8,10 @@ used when an application exists, and the source text is returned otherwise
 
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger(__name__)
+
 
 def tr(text: str, context: str = "SystemSL") -> str:
     """Return the translation of ``text``, or ``text`` when none is loaded."""
@@ -20,5 +24,5 @@ def tr(text: str, context: str = "SystemSL") -> str:
         if app is not None:
             return QCoreApplication.translate(context, text)
     except Exception:
-        pass
+        log.debug("translation lookup failed for %r", text, exc_info=True)
     return text

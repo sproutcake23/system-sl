@@ -15,7 +15,8 @@ def test_desktop_entry_quotes_paths_with_spaces(tmp_path, monkeypatch):
     entry = tmp_path / ".local" / "share" / "applications" / "system-sl.desktop"
     text = entry.read_text()
     assert 'Exec="/opt/my apps/system-sl"' in text
-    assert 'Path="/opt/my apps"' in text
+    # Path is not an Exec-style key: quotes would become part of the name.
+    assert "Path=/opt/my apps\n" in text
 
 
 def test_development_project_root_is_the_repo_root():

@@ -1,17 +1,33 @@
+import logging
 import os
 import platform
 import plistlib
 import shlex
 import sys
 import subprocess
+from pathlib import Path
+
+def desktop_exec_quote(arg: str) -> str:
+    """Quote one argument for a Desktop Entry ``Exec=`` key.
+
+    Per the Desktop Entry spec, a quoted argument escapes ``"``, `` ` ``,
+    ``$`` and ``\\`` with a backslash, and a literal ``%`` is written ``%%``
+    (field codes). ``Path=`` is a plain string and must not be quoted.
+    """
+    escaped = "".join("\\" + c if c in '"`$\\' else c for c in str(arg))
+    return '"' + escaped.replace("%", "%%") + '"'
+
+
+log = logging.getLogger(__name__)
+
 
 class CrossPlatformAutostart:
     def __init__(self, app_name="SL-Notifier"):
         self.app_name = app_name
         self.os_type = platform.system()
-        
-    def _get_exec_cmd(self) -> str:
-        """Determines the correct command to execute this script/binary safely cross-platform."""
+
+    def _get_exec_args(self) -> list[str]:
+        """The program and arguments that start the background notifier."""
         if getattr(sys, "frozen", False):
             # Under an AppImage, sys.executable points inside the transient FUSE
             # mount ($APPIMAGE is running, sys.executable is
@@ -20,20 +36,63 @@ class CrossPlatformAutostart:
             # autostart entry that can never launch anything again.
             appimage = os.environ.get("APPIMAGE")
             if appimage and os.path.isfile(appimage):
-                return f'"{os.path.abspath(appimage)}" --bg'
-            return f'"{os.path.abspath(sys.executable)}" --bg'
+                return [os.path.abspath(appimage), "--bg"]
+            return [os.path.abspath(sys.executable), "--bg"]
 
         script_path = os.path.abspath(sys.argv[0])
         if not script_path.endswith(".py"):
-            return f'"{script_path}" --bg'
+            return [script_path, "--bg"]
+        return [os.path.abspath(sys.executable), script_path, "--bg"]
 
-        python_exe = os.path.abspath(sys.executable)
+    def _get_exec_cmd(self) -> str:
+        """The Windows Run-key command line: every path double-quoted."""
+        program, *rest = self._get_exec_args()
+        parts = [f'"{program}"'] + [
+            f'"{a}"' if a != "--bg" else a for a in rest
+        ]
+        return " ".join(parts)
 
-        # Every path is quoted. The Exec key is split on unquoted whitespace,
-        # so an install directory containing a space would otherwise be torn
-        # into two arguments. The previous /bin/sh -c wrapper masked this.
-        return f'"{python_exe}" "{script_path}" --bg'
-    
+    def _desktop_exec(self) -> str:
+        return " ".join(
+            a if a == "--bg" else desktop_exec_quote(a) for a in self._get_exec_args()
+        )
+
+    def recorded_command(self) -> str | None:
+        """Return the command the existing autostart entry launches, if any."""
+        try:
+            if self.os_type == "Windows":
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+                value, _ = winreg.QueryValueEx(key, self.app_name)
+                return value
+
+            elif self.os_type == "Linux":
+                desktop_path = os.path.expanduser(f"~/.config/autostart/{self.app_name.lower()}.desktop")
+                with open(desktop_path) as f:
+                    for line in f:
+                        if line.startswith("Exec="):
+                            return line[len("Exec="):].strip().replace("%%", "%")
+
+            elif self.os_type == "Darwin":  # macOS
+                plist_path = os.path.expanduser(f"~/Library/LaunchAgents/com.{self.app_name.lower()}.plist")
+                with open(plist_path, "rb") as f:
+                    return shlex.join(plistlib.load(f).get("ProgramArguments", []))
+        except (OSError, plistlib.InvalidFileException):
+            pass
+        return None
+
+    def recorded_executable(self) -> Path | None:
+        """Return the program the existing autostart entry launches, if any."""
+        command = self.recorded_command()
+        if not command:
+            return None
+        # Windows paths use backslashes, which POSIX splitting would eat.
+        try:
+            parts = shlex.split(command, posix=self.os_type != "Windows")
+        except ValueError:
+            return None
+        return Path(parts[0].strip('"')) if parts else None
+
     def is_enabled(self) -> bool:
         if self.os_type == "Windows":
             import winreg
@@ -58,6 +117,7 @@ class CrossPlatformAutostart:
 
     def enable(self) -> bool:
         exec_cmd = self._get_exec_cmd()
+        exec_args = self._get_exec_args()
 
         if self.os_type == "Windows":
             import winreg
@@ -71,7 +131,7 @@ class CrossPlatformAutostart:
                 winreg.SetValueEx(key, self.app_name, 0, winreg.REG_SZ, exec_cmd)
                 return True
             except Exception as e:
-                print(f"Windows Registry Error: {e}")
+                log.error("Windows Registry error: %s", e)
                 return False
 
         elif self.os_type == "Linux":
@@ -94,15 +154,13 @@ class CrossPlatformAutostart:
                 if base_dir == "/":
                     base_dir = os.path.abspath(os.path.dirname(sys.argv[0]))
 
-            # 2. Exec is written verbatim. An autostart entry already runs
-            # inside the session, so DISPLAY and the D-Bus address are
-            # inherited and do not need to be baked in.
-            path_line = ""
-            if base_dir:
-                path_value = (
-                    f'"{base_dir}"' if " " in base_dir else base_dir
-                )
-                path_line = f"Path={path_value}\n"
+            # 2. Exec quotes each argument per the Desktop Entry spec. Path is
+            # a plain string: quotes there would become part of the directory
+            # name and the launcher could not chdir into it. An autostart
+            # entry already runs inside the session, so DISPLAY and the
+            # D-Bus address are inherited and do not need to be baked in.
+            exec_cmd = self._desktop_exec()
+            path_line = f"Path={base_dir}\n" if base_dir else ""
             try:
                 with open(desktop_path, "w") as f:
                     f.write(
@@ -117,7 +175,7 @@ class CrossPlatformAutostart:
                     )
                 return True
             except Exception as e:
-                print(f"Linux Autostart Error: {e}")
+                log.error("Linux Autostart error: %s", e)
                 return False
 
         elif self.os_type == "Darwin":  # macOS
@@ -125,14 +183,21 @@ class CrossPlatformAutostart:
             plist_path = os.path.expanduser(
                 f"~/Library/LaunchAgents/{label}.plist"
             )
-            arguments = shlex.split(exec_cmd, posix=True)
             plist = {
                 "Label": label,
-                "ProgramArguments": arguments,
+                "ProgramArguments": exec_args,
                 "RunAtLoad": True,
             }
             try:
                 os.makedirs(os.path.dirname(plist_path), exist_ok=True)
+                if os.environ.get("XPC_SERVICE_NAME") == label:
+                    # Called from the agent itself (the startup autostart
+                    # repair in the --bg process): booting it out would kill
+                    # this process before bootstrap. Rewrite the plist; it
+                    # takes effect at the next login.
+                    with open(plist_path, "wb") as f:
+                        plistlib.dump(plist, f)
+                    return True
                 subprocess.run(
                     ["launchctl", "bootout", f"gui/{os.getuid()}", plist_path],
                     capture_output=True,
@@ -144,14 +209,14 @@ class CrossPlatformAutostart:
                     capture_output=True,
                 )
                 if loaded.returncode != 0:
-                    print(
-                        "macOS launchctl bootstrap failed: "
-                        + loaded.stderr.decode(errors="replace")
+                    log.error(
+                        "macOS launchctl bootstrap failed: %s",
+                        loaded.stderr.decode(errors="replace"),
                     )
                     return False
                 return True
             except Exception as e:
-                print(f"macOS LaunchAgent Error: {e}")
+                log.error("macOS LaunchAgent error: %s", e)
                 return False
 
         return False
@@ -166,7 +231,7 @@ class CrossPlatformAutostart:
             except FileNotFoundError:
                 return True  # Already disabled
             except Exception as e:
-                print(f"Windows Registry Error: {e}")
+                log.error("Windows Registry error: %s", e)
                 return False
 
         elif self.os_type == "Linux":
