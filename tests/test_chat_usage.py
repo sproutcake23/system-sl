@@ -145,6 +145,51 @@ def test_stream_turn_reports_usage(tmp_path, monkeypatch):
     for kind, value in session.stream_turn("hello"):
         kinds.append((kind, value))
 
-    assert ("usage", {"input_tokens": 7, "output_tokens": 2, "total_tokens": 9}) in kinds
+    usage = [value for kind, value in kinds if kind == "usage"]
+    assert usage and usage[-1]["input_tokens"] == 7 and usage[-1]["output_tokens"] == 2
+    # The context fill is the latest call's prompt plus what it wrote.
+    assert usage[-1]["context_tokens"] == 9
     assert session.last_usage == TokenUsage(7, 2, 9)
+    assert session.last_context_tokens == 9
     memory_mod.close_checkpointer()
+
+def test_format_context_shows_fill_of_the_window():
+    from system_sl.chatbot.usage import format_context
+
+    assert format_context(12_400, 128_000) == "Context 12.4k / 128k (10%)"
+    assert format_context(900, 32_000, estimated=True) == "Context ~900 / 32k (3%)"
+    assert format_context(0, 128_000) == ""
+
+
+def test_format_conversation_total():
+    from system_sl.chatbot.usage import format_conversation_total
+
+    assert format_conversation_total(None) == ""
+    assert format_conversation_total(
+        {"input_tokens": 40_000, "output_tokens": 5_000, "replies": 3, "cost": 0.031}
+    ) == "conversation 45k tokens ~$0.03"
+    # Some replies came from an unpriced model: the cost is a lower bound.
+    assert format_conversation_total(
+        {"input_tokens": 1_000, "output_tokens": 200, "replies": 2,
+         "unpriced_replies": 1, "cost": 0.0012}
+    ) == "conversation 1.2k tokens ≥$0.0012"
+    # Nothing priced: no cost at all rather than "$0".
+    assert format_conversation_total(
+        {"input_tokens": 1_000, "output_tokens": 200, "replies": 2, "unpriced_replies": 2}
+    ) == "conversation 1.2k tokens"
+
+
+def test_conversation_usage_accumulates_in_the_index(tmp_path, monkeypatch):
+    directory = tmp_path / "system-sl"
+    directory.mkdir()
+    monkeypatch.setattr(
+        memory_mod, "get_tasks_file_path", lambda name: str(directory / name)
+    )
+    memory_mod.create_conversation(thread_id="conv-total", model_name="m")
+    memory_mod.add_conversation_usage("conv-total", 100, 20, 0.001)
+    totals = memory_mod.add_conversation_usage("conv-total", 300, 30, None)
+    assert totals == {
+        "input_tokens": 400, "output_tokens": 50, "replies": 2,
+        "cost": 0.001, "unpriced_replies": 1,
+    }
+    assert memory_mod.get_conversation("conv-total")["usage"] == totals

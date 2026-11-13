@@ -342,3 +342,37 @@ def test_alert_bubble_renders(panel):
     widget.transcript.clear()
     widget._append_alert("Something failed")
     assert any("Something failed" in t for t, _ in _blocks(widget))
+
+
+def test_usage_label_shows_context_fill(panel, monkeypatch):
+    from system_sl.chatbot import context_window
+
+    widget, _app = panel
+    monkeypatch.setattr(context_window, "context_window_for_model", lambda _m: 100_000)
+    widget._on_usage(
+        {"input_tokens": 12_000, "output_tokens": 400, "total_tokens": 12_400,
+         "context_tokens": 12_400}
+    )
+    text = widget.usage_label.text()
+    assert text.startswith("Context 12.4k / 100k (12%)")
+    assert "last reply" in text
+
+    # Opening a new chat empties the context.
+    widget._estimate_context([])
+    assert not widget.usage_label.isVisible()
+
+
+def test_turn_usage_is_added_to_the_conversation_total(panel, monkeypatch):
+    from system_sl.chatbot import memory as memory_mod
+    from system_sl.chatbot import usage as usage_mod
+
+    widget, _app = panel
+    memory_mod.ensure_conversation(widget._thread_id, model_name="m", title="t")
+    monkeypatch.setattr(usage_mod, "model_prices", lambda _m: (1.0, 2.0))
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, "total_tokens": 1_000_000}
+    # Usage can be emitted twice per turn; it is recorded once.
+    widget._on_usage(usage)
+    widget._on_usage(usage)
+    widget._record_turn_usage(widget._thread_id)
+    assert memory_mod.get_conversation(widget._thread_id)["usage"]["input_tokens"] == 1_000_000
+    assert "conversation 1M tokens ~$1.00" in widget.usage_label.text()

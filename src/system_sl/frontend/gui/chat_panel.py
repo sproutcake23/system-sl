@@ -1009,7 +1009,11 @@ class _ChatWorker(QObject):
 
         # The provider's counts are authoritative; emit them once more here so
         # the blocking fallback path is covered too.
-        self.usage.emit(self.session.last_usage.as_dict())
+        usage = self.session.last_usage.as_dict()
+        context_tokens = getattr(self.session, "last_context_tokens", 0)
+        if context_tokens:
+            usage["context_tokens"] = context_tokens
+        self.usage.emit(usage)
 
         # Attachment text is compacted by the panel once the turn is over,
         # whatever the outcome (see ChatPanel._cleanup_thread).
@@ -1197,14 +1201,29 @@ class ChatPanel(QWidget):
         )
         root.addWidget(self.transcript, stretch=1)
 
-        # Token/cost line for the last reply. It stays out of the transcript
-        # itself so quoting or copying a message never includes it.
+        # How full the conversation's context window is, plus the tokens and
+        # cost of the last reply. It stays out of the transcript itself so
+        # quoting or copying a message never includes it.
+        self._context_tokens = 0
+        self._context_estimated = False
+        self._reply_usage_line = ""
+        # The finished turn's usage, added to the conversation's totals once
+        # the turn ends (usage can be emitted twice per turn).
+        self._turn_usage = None
         self.usage_label = QLabel("")
         self.usage_label.setObjectName("usageLabel")
         self.usage_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.usage_label.setVisible(False)
         self.usage_label.setAccessibleName("Token usage")
-        self.usage_label.setToolTip("Tokens and estimated cost of the last reply")
+        self.usage_label.setToolTip(
+            "Context: how much of the model's context window the conversation "
+            "fills (the latest prompt plus its reply). Older turns are trimmed "
+            "or summarised when it gets full.\n"
+            "Last reply: tokens read and written for the most recent answer, "
+            "and its estimated cost.\n"
+            "Conversation: everything this conversation has used so far "
+            "(≥ when some replies came from a model with no known price)."
+        )
         root.addWidget(self.usage_label)
 
         # Store raw error details for alert detail links
@@ -1561,7 +1580,9 @@ class ChatPanel(QWidget):
         self._thread_id = entry["id"]
         self._current_model = entry.get("last_model") or ""
         self._refresh_history_combo()
-        self._render_transcript(self._messages_for_thread(self._thread_id))
+        messages = self._messages_for_thread(self._thread_id)
+        self._render_transcript(messages)
+        self._estimate_context(messages)
 
     def _conversation_label(self, entry: dict) -> str:
         """Display name for a conversation in the history dropdown."""
@@ -1623,6 +1644,7 @@ class ChatPanel(QWidget):
         self._last_failed_user_id = None
         self._clear_quotes()
         self._render_transcript([])
+        self._estimate_context([])
         self._refresh_history_combo()
         self.input_box.setFocus()
 
@@ -1660,7 +1682,9 @@ class ChatPanel(QWidget):
             self._select_model_in_combo(last_model)
             self._update_default_button()
 
-        self._render_transcript(self._messages_for_thread(thread_id))
+        messages = self._messages_for_thread(thread_id)
+        self._render_transcript(messages)
+        self._estimate_context(messages)
         self._refresh_history_combo()
         self.input_box.setFocus()
 
@@ -3371,7 +3395,10 @@ class ChatPanel(QWidget):
             self._append_alert("could not rewind the conversation; nothing was changed")
             return False
 
-        self._render_transcript(self._messages_for_thread(self._thread_id))
+        messages = self._messages_for_thread(self._thread_id)
+        self._render_transcript(messages)
+        # The rewound turns no longer count towards the context.
+        self._estimate_context(messages)
         if self._messages.last(USER) is None:
             # Back to an empty conversation: let the resent message title it.
             update_conversation(self._thread_id, title="")
@@ -3646,9 +3673,10 @@ class ChatPanel(QWidget):
         self._refresh_history_combo()
 
         self._render_message(player_message)
-        # The previous reply's usage no longer describes this turn.
-        self.usage_label.clear()
-        self.usage_label.setVisible(False)
+        # The previous reply's numbers no longer describe this turn; the
+        # context fill stays visible until the new reply reports its own.
+        self._reply_usage_line = ""
+        self._refresh_usage_label()
         # Sending is a deliberate action: bring the new message into view.
         self._scroll_to_bottom()
         self._reset_stream_state()
@@ -3750,25 +3778,109 @@ class ChatPanel(QWidget):
         self._stop_dots()
 
     def _on_usage(self, usage: dict) -> None:
-        """Show the token count and estimated cost of the reply that ended."""
+        """Record the context fill and the cost of the reply that ended."""
         from system_sl.chatbot.usage import TokenUsage, format_usage
 
         if not isinstance(usage, dict) or not usage:
             return
+        reply = TokenUsage(
+            input_tokens=int(usage.get("input_tokens") or 0),
+            output_tokens=int(usage.get("output_tokens") or 0),
+            total_tokens=int(usage.get("total_tokens") or 0),
+        )
+        if not reply.is_empty:
+            self._turn_usage = reply
+        context_tokens = int(usage.get("context_tokens") or 0)
+        if context_tokens:
+            self._context_tokens = context_tokens
+            self._context_estimated = False
+        line = format_usage(reply, self._current_model)
+        if line:
+            self._reply_usage_line = f"last reply {line}"
+        self._refresh_usage_label()
+
+    def _estimate_context(self, messages) -> None:
+        """Approximate the context fill of a conversation just opened.
+
+        Real counts arrive with the next reply; until then the stored history
+        is counted locally (marked "~"). The system prompt and tool schemas
+        are not included, so this is a lower bound.
+        """
+        from system_sl.chatbot.context_window import count_message_tokens
+
+        try:
+            self._context_tokens = count_message_tokens(messages or [])
+        except Exception:
+            logger.debug("could not estimate the context size", exc_info=True)
+            self._context_tokens = 0
+        self._context_estimated = True
+        self._reply_usage_line = ""
+        self._refresh_usage_label()
+
+    def _conversation_total_line(self) -> str:
+        from system_sl.chatbot.memory import get_conversation
+        from system_sl.chatbot.usage import format_conversation_total
+
+        if not self._thread_id:
+            return ""
+        try:
+            entry = get_conversation(self._thread_id) or {}
+        except Exception:
+            return ""
+        return format_conversation_total(entry.get("usage"))
+
+    def _record_turn_usage(self, thread_id: str | None) -> None:
+        """Add the turn that just ended to its conversation's totals."""
+        usage, self._turn_usage = self._turn_usage, None
+        if usage is None or not thread_id:
+            return
+        from system_sl.chatbot.memory import add_conversation_usage
+        from system_sl.chatbot.usage import estimate_cost
+
+        try:
+            add_conversation_usage(
+                thread_id,
+                usage.input_tokens,
+                usage.output_tokens,
+                estimate_cost(usage, self._current_model or ""),
+            )
+        except Exception:
+            logger.warning("could not record the conversation's usage", exc_info=True)
+        if thread_id == self._thread_id:
+            self._refresh_usage_label()
+
+    def _refresh_usage_label(self) -> None:
+        from system_sl.chatbot.context_window import context_window_for_model
+        from system_sl.chatbot.usage import format_context
+
+        parts = []
+        if self._context_tokens:
+            try:
+                window = context_window_for_model(self._current_model or "")
+            except Exception:
+                window = 0
+            context = format_context(
+                self._context_tokens, window, estimated=self._context_estimated
+            )
+            if context:
+                parts.append(context)
+                self._usage_context_ratio = self._context_tokens / window
+        if self._reply_usage_line:
+            parts.append(self._reply_usage_line)
+        total = self._conversation_total_line()
+        if total:
+            parts.append(total)
+        if not parts:
+            self.usage_label.clear()
+            self.usage_label.setVisible(False)
+            return
         tokens = self._stream_tokens or self._get_live_tokens()
         colour = tokens.get("sys_color_text_secondary", "#9ab8e5")
-        line = format_usage(
-            TokenUsage(
-                input_tokens=int(usage.get("input_tokens") or 0),
-                output_tokens=int(usage.get("output_tokens") or 0),
-                total_tokens=int(usage.get("total_tokens") or 0),
-            ),
-            self._current_model,
-        )
-        if not line:
-            return
+        if self._context_tokens and getattr(self, "_usage_context_ratio", 0) >= 0.8:
+            # Nearly full: older turns are about to be trimmed or summarised.
+            colour = tokens.get("sys_color_alert", "#ff6b8a")
         self.usage_label.setStyleSheet(f"color: {colour}; font-size: 11px;")
-        self.usage_label.setText(line)
+        self.usage_label.setText("  ·  ".join(parts))
         self.usage_label.setVisible(True)
 
     @staticmethod
@@ -3841,6 +3953,9 @@ class ChatPanel(QWidget):
         # The worker has stopped, so the checkpoint is safe to write again:
         # close a turn that was cancelled mid-tool, then record any task
         # outcome the Player answered while it was streaming.
+        self._record_turn_usage(
+            getattr(finished_session, "thread_id", None) or self._thread_id
+        )
         if finished_session is not None:
             self._repair_session_after_turn(finished_session)
             if had_attachments:
