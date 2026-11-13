@@ -342,6 +342,12 @@ def create_llm(
             options["temperature"] = temperature
         if max_tokens:
             options["max_tokens"] = max_tokens
+        # langchain_openai only requests usage on streamed replies for the
+        # default OpenAI URL; with a custom base_url (OpenRouter, local
+        # servers) streams carried no usage, so no tokens or cost were shown.
+        options.setdefault("stream_usage", True)
+        if "stream_usage" in kwargs:
+            options.pop("stream_usage")
         return ReasoningChatOpenAI(
             model=model,
             **options,

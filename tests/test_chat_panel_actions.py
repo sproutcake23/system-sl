@@ -282,3 +282,63 @@ def test_edit_bar_warns_when_documents_are_only_names(panel):
     assert "only names" in widget.edit_label.text()
     assert "not resent" in widget.edit_label.text()
     widget._cancel_edit()
+
+
+def _blocks(widget):
+    doc = widget.transcript.document()
+    block, out = doc.firstBlock(), []
+    while block.isValid():
+        data = block.userData()
+        if block.text():
+            out.append((block.text(), getattr(data, "message_id", None)))
+        block = block.next()
+    return out
+
+
+def _stream(widget, deltas):
+    for delta in deltas:
+        widget._on_chunk(delta)
+        widget._render_answer()
+
+
+def test_streamed_paragraphs_stay_separate(panel):
+    widget, _app = panel
+    widget.transcript.clear()
+    widget._reset_stream_state()
+    widget._start_answer_line()
+    _stream(widget, ["First para.", "\n\n", "Second para", " grows."])
+    texts = [t for t, _ in _blocks(widget)]
+    assert "First para." in texts and "Second para grows." in texts
+
+
+def test_note_appended_mid_stream_is_not_swallowed(panel):
+    widget, _app = panel
+    widget.transcript.clear()
+    widget._reset_stream_state()
+    widget._start_answer_line()
+    _stream(widget, ["Hello there", " friend."])
+    answer_id = widget._stream_message_id
+    widget._append_note("A note")
+    _stream(widget, [" More", " words."])
+    blocks = _blocks(widget)
+    assert blocks[-1][0] == "A note" and blocks[-1][1] != answer_id
+    assert ("Hello there friend. More words.", answer_id) in blocks
+
+
+def test_final_reply_rerenders_whole_answer(panel):
+    widget, _app = panel
+    widget.transcript.clear()
+    widget._reset_stream_state()
+    widget._start_answer_line()
+    _stream(widget, ["Para one.", "\n\n", "Para two"])
+    widget._on_reply("Completely different reply.")
+    texts = [t for t, _ in _blocks(widget)]
+    assert texts[-1] == "Completely different reply."
+    assert "Para one." not in texts
+
+
+def test_alert_bubble_renders(panel):
+    widget, _app = panel
+    widget.transcript.clear()
+    widget._append_alert("Something failed")
+    assert any("Something failed" in t for t, _ in _blocks(widget))

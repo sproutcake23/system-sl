@@ -132,3 +132,17 @@ def test_edit_keeps_or_clears_deadline(tmp_path, monkeypatch):
 
     tasks.edit_task(None, "Synced (typo fixed)", new_deadline="", task_id=task_id)
     assert tasks.load_tasks()[0]["deadline"] is None
+
+
+def test_chat_tools_refuse_ambiguous_duplicate_titles(tmp_path, monkeypatch):
+    from system_sl.chatbot import system as system_mod
+
+    _isolate(tmp_path, monkeypatch)
+    tasks.save_tasks([
+        {"id": "a", "title": "Read", "category": "study"},
+        {"id": "b", "title": "Read", "category": "fun"},
+    ])
+    monkeypatch.setattr(system_mod, "load_tasks", tasks.load_tasks)
+    assert system_mod._resolve_task_id("Read", "fun") == "b"
+    with pytest.raises(ValueError):
+        system_mod._resolve_task_id("Read", "work")

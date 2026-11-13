@@ -45,11 +45,14 @@ def test_usage_from_openai_response_metadata():
     assert usage_from_message(message) == TokenUsage(10, 4, 14)
 
 
-def test_merge_keeps_the_cumulative_total():
-    first = TokenUsage(10, 2, 12)
-    second = TokenUsage(10, 5, 15)
-    assert merge_usage(first, second) == second
-    assert merge_usage(second, TokenUsage(1, 1, 2)) == second
+def test_merge_adds_chunk_and_call_usage():
+    # LangChain chunk usage is additive (Gemini deltas, Anthropic's split
+    # input/output chunks, one usage chunk per call on OpenAI-compatible APIs).
+    first = TokenUsage(10, 0, 10)
+    second = TokenUsage(0, 5, 5)
+    assert merge_usage(first, second) == TokenUsage(10, 5, 15)
+    # A second model call in the same turn (after a tool call) adds up too.
+    assert merge_usage(TokenUsage(10, 5, 15), TokenUsage(20, 3, 23)) == TokenUsage(30, 8, 38)
     assert merge_usage(None, first) == first
     assert merge_usage(first, None) == first
 

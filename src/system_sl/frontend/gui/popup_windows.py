@@ -229,9 +229,11 @@ class TasksWindow(QWidget):
         # only drain here when nothing has claimed the queue yet.
         from system_sl.utils.data_health import has_issues
 
+        # New issues first; drain_data_issues also stores the summary, which
+        # is taken right away so it is not shown again on the next refresh.
+        if has_issues():
+            drain_data_issues(self)
         summary = latest_data_issue_summary()
-        if not summary and has_issues():
-            summary = drain_data_issues(self)
         if summary:
             self._status_message = summary
         self._apply_status()

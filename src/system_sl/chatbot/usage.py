@@ -82,19 +82,24 @@ def usage_from_message(message: Any) -> Optional[TokenUsage]:
 
 
 def merge_usage(current: Optional[TokenUsage], incoming: Optional[TokenUsage]) -> Optional[TokenUsage]:
-    """Combine usage reported across several model calls in one turn.
+    """Add usage reported by another chunk or model call in the same turn.
 
-    A turn can call the model more than once (tool calls). Providers either
-    report each call separately or send cumulative totals on every chunk; use
-    the larger total so neither shape is double-counted.
+    LangChain's streamed usage is additive: ``AIMessageChunk.__add__`` sums
+    ``usage_metadata``. Gemini reports a delta on every chunk, Anthropic
+    splits input (first chunk) from output (last chunk), OpenAI-compatible
+    APIs send one usage chunk at the end, and a turn with tool calls makes
+    several model calls. Summing is right for all of them; keeping the
+    largest report under-counted every one except the last shape.
     """
     if incoming is None:
         return current
     if current is None:
         return incoming
-    if incoming.total_tokens >= current.total_tokens:
-        return incoming
-    return current
+    return TokenUsage(
+        current.input_tokens + incoming.input_tokens,
+        current.output_tokens + incoming.output_tokens,
+        current.total_tokens + incoming.total_tokens,
+    )
 
 
 def usage_from_chunks(chunks: Any) -> Optional[TokenUsage]:

@@ -261,3 +261,11 @@ def test_latest_summary_survives_a_second_drain(tmp_path, monkeypatch):
     assert "tasks.json" in first
     assert reporter.drain_data_issues(None) == ""
     assert reporter.latest_data_issue_summary() == first
+
+
+def test_latest_summary_is_shown_once():
+    from system_sl.utils import data_health
+
+    data_health.set_latest_summary("tasks.json was damaged")
+    assert data_health.take_latest_summary() == "tasks.json was damaged"
+    assert data_health.take_latest_summary() == ""

@@ -149,6 +149,18 @@ def latest_summary() -> str:
         return _last_summary
 
 
+def take_latest_summary() -> str:
+    """Return the most recent drain's summary and forget it.
+
+    A status line shows it once; keeping it meant the Tasks window repeated a
+    problem on every refresh for the rest of the session, even once fixed.
+    """
+    global _last_summary
+    with _lock:
+        summary, _last_summary = _last_summary, ""
+    return summary
+
+
 def set_latest_summary(summary: str) -> None:
     with _lock:
         global _last_summary

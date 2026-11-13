@@ -183,24 +183,40 @@ def add_task(category: str, title: str, deadline: Optional[str] = None) -> Any:
         return {"error": kind, "message": msg}
 
 
-def _resolve_task_id(title: str) -> str:
-    """Return the stable id of the task the model named, by title."""
+def _resolve_task_id(title: str, category: str | None = None) -> str:
+    """Return the stable id of the task the model named.
+
+    New tasks can't share a title, but older task files can hold duplicates.
+    The category then picks between them; if that still leaves more than one
+    (or none of them is in that category), refuse rather than act on a guess.
+    """
     wanted = (title or "").strip()
-    for task in load_tasks():
-        if not isinstance(task, dict):
-            continue
-        if task.get("title") == wanted:
-            task_id = task.get("id")
-            if task_id:
-                return str(task_id)
-    raise ValueError(f"Task '{title}' not found")
+    matches = [
+        t for t in load_tasks()
+        if isinstance(t, dict) and t.get("title") == wanted and t.get("id")
+    ]
+    if not matches:
+        raise ValueError(f"Task '{title}' not found")
+    if len(matches) > 1:
+        wanted_category = (category or "").strip().lower()
+        in_category = [
+            t for t in matches
+            if str(t.get("category") or "").strip().lower() == wanted_category
+        ]
+        if len(in_category) != 1:
+            raise ValueError(
+                f"Several tasks are titled '{title}'; ask the Player which one "
+                "(or have them rename one in the Tasks window)."
+            )
+        matches = in_category
+    return str(matches[0]["id"])
 
 
 @tool
 def remove_task(title: str, category: str) -> Any:
     """Remove/delete a specific task from a targeted category completely."""
     try:
-        task_id = _resolve_task_id(title)
+        task_id = _resolve_task_id(title, category)
         return remove_tasks(task_id=task_id, task_type=category)
     except ValueError as e:
         return {"error": "not_found", "message": str(e)}
@@ -210,7 +226,7 @@ def remove_task(title: str, category: str) -> Any:
 def mark_task_completed(title: str, category: str) -> Any:
     """Move a task from the open status to the completed status pool."""
     try:
-        task_id = _resolve_task_id(title)
+        task_id = _resolve_task_id(title, category)
         return core_mark_task_completed(task_id=task_id, task_type=category)
     except ValueError as e:
         return {"error": "not_found", "message": str(e)}

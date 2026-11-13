@@ -647,10 +647,14 @@ class MainWindow(QMainWindow):
         self._sync_cancel.set()
         shutdown_workers()
         # The SQLite checkpointer is process-wide and shared with the chat
-        # worker; close it only after that worker has stopped.
+        # worker; close it only once that worker has stopped. If the reply
+        # outlived ChatPanel.shutdown's bounded wait, leave it open: process
+        # exit closes the connection, and closing it now would make the
+        # still-running worker fail on a closed database.
         from system_sl.chatbot.memory import close_checkpointer
 
-        close_checkpointer()
+        if self.chat_panel.worker_stopped():
+            close_checkpointer()
 
     def open_tasks_window(self):
         if self.tasks_window is None:
@@ -722,9 +726,14 @@ class MainWindow(QMainWindow):
 
     def sync_google_tasks(self):
         if self._sync_thread is not None:
+            # A second click while syncing cancels it, so a sign-in the
+            # Player abandoned in the browser doesn't hold the button for the
+            # full sign-in timeout.
+            self._sync_cancel.set()
+            self.google_button.setEnabled(False)
+            self._set_sidebar_button_label(self.google_button, "Cancelling...")
             return
-        self.google_button.setEnabled(False)
-        self._set_sidebar_button_label(self.google_button, "Syncing...")
+        self._set_sidebar_button_label(self.google_button, "Syncing... (cancel)")
 
         # An unparented, tracked thread: quitting cannot destroy it mid-sync,
         # and cancelling the sign-in lets it end promptly (see _shutdown_for_quit).
@@ -737,6 +746,8 @@ class MainWindow(QMainWindow):
         self._sync_thread.start()
 
     def _on_google_sync_finished(self, imported: int, skipped: int):
+        if self._sync_cancel.is_set():
+            return
         if imported == 0 and skipped == 0:
             text = "No upcoming Google Tasks found."
         else:
@@ -746,6 +757,8 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Google Sync", text)
 
     def _on_google_sync_failed(self, error: str):
+        if self._sync_cancel.is_set():
+            return  # the Player cancelled; nothing to report
         QMessageBox.warning(self, "Google Sync Failed", error)
 
     def _cleanup_google_sync(self):

@@ -1589,6 +1589,12 @@ class ChatPanel(QWidget):
             )
             if entry["id"] == self._thread_id:
                 selected = index
+        if selected < 0 and self._thread_id:
+            # A new chat has no index entry until its first message. Without a
+            # row of its own, the combo would show (and "select") the most
+            # recent conversation, which then could not be picked to reopen.
+            self.history_combo.insertItem(0, "New conversation", self._thread_id)
+            selected = 0
         if selected >= 0:
             self.history_combo.setCurrentIndex(selected)
         self.history_combo.blockSignals(False)
@@ -2370,10 +2376,13 @@ class ChatPanel(QWidget):
         text_color: str,
         escape: bool = True,
         message_id: str | None = None,
+        timestamp: str = "",
     ) -> None:
         """Insert an escaped chat bubble (one line per newline)."""
         safe = html.escape(text).replace("\n", "<br>") if escape else text.replace("\n", "<br>")
-        self._insert_bubble_html(safe, align_right, bg_color, text_color, message_id)
+        self._insert_bubble_html(
+            safe, align_right, bg_color, text_color, message_id, timestamp=timestamp
+        )
 
     def _insert_bubble_html(
         self,
@@ -2680,7 +2689,10 @@ class ChatPanel(QWidget):
             while block.isValid():
                 data = block.userData()
                 if isinstance(data, _MessageBlockData) and data.message_id == wanted:
-                    return block.position()
+                    # End of the previous block: deleting up to the trailing
+                    # block's start would also remove the separator and
+                    # merge that message into the answer.
+                    return max(0, block.position() - 1)
                 block = block.next()
         return self.transcript.document().characterCount() - 1
 
@@ -2740,8 +2752,13 @@ class ChatPanel(QWidget):
         if tail_html:
             block = doc.findBlock(start)
             # A tail needs a block of its own; otherwise it would be appended
-            # to the paragraph that was just completed.
-            if not block.isValid() or (block.position() == start and block.text()):
+            # to the paragraph that was just completed (``start`` is then in
+            # the middle or at the end of that paragraph's block).
+            if (
+                not block.isValid()
+                or start > block.position()
+                or (block.position() == start and block.text())
+            ):
                 block_fmt = QTextBlockFormat()
                 block_fmt.setAlignment(Qt.AlignmentFlag.AlignLeft)
                 block_fmt.setTopMargin(4)
@@ -2776,17 +2793,32 @@ class ChatPanel(QWidget):
             self.transcript.moveCursor(QTextCursor.MoveOperation.End)
             self.transcript.ensureCursorVisible()
 
-    def _render_answer(self) -> None:
-        """Write newly completed markdown, then re-render the tail only."""
+    def _render_answer(self, final: bool = False) -> None:
+        """Write newly completed markdown, then re-render the tail only.
+
+        ``final`` re-renders the whole answer once from its full text. The
+        incremental pass splits at blank lines, which is right for the live
+        view but can't know about loose lists or indented code spanning a
+        blank line, and the reply may differ from what streamed; the finished
+        answer is always rendered from the complete markdown.
+        """
         tokens = self._stream_tokens or self._get_live_tokens()
         body_color = tokens.get("sys_color_text_main", "#d6e7ff")
         self._stream_tokens = tokens
+        if final and self._answer_start is not None:
+            self._stream_tail_start = self._answer_start
+            self._answer_committed_chars = 0
+            self._last_rendered_html = ""
 
         if not self._answer_text.strip():
             committed_html = " "
             tail_html = ""
         else:
-            boundary = self._stable_answer_boundary(self._answer_text)
+            boundary = (
+                len(self._answer_text)
+                if final
+                else self._stable_answer_boundary(self._answer_text)
+            )
             if boundary < self._answer_committed_chars:
                 boundary = self._answer_committed_chars
             committed = self._answer_text[self._answer_committed_chars:boundary]
@@ -2819,7 +2851,11 @@ class ChatPanel(QWidget):
         self._last_rendered_html = signature
         self._replace_answer_region(committed_html, tail_html)
         if self._answer_text.strip():
-            boundary = self._stable_answer_boundary(self._answer_text)
+            boundary = (
+                len(self._answer_text)
+                if final
+                else self._stable_answer_boundary(self._answer_text)
+            )
             self._answer_committed_chars = max(
                 self._answer_committed_chars, boundary
             )
@@ -3000,7 +3036,7 @@ class ChatPanel(QWidget):
             self._messages.set_flag(
                 self._stream_message_id, stopped=True, streaming=False
             )
-        self._render_answer()
+        self._render_answer(final=True)
         self._answer_open = False
 
     # ----- Task Confirmation -----
@@ -3706,7 +3742,7 @@ class ChatPanel(QWidget):
             self._messages.set_text(self._stream_message_id, self._answer_text)
             self._messages.set_flag(self._stream_message_id, streaming=False)
 
-        self._render_answer()
+        self._render_answer(final=True)
         self._answer_open = False
         self.reasoning_view.clear()
         self.reasoning_view.setVisible(False)
@@ -3751,7 +3787,7 @@ class ChatPanel(QWidget):
         self._last_failed_user_id = self._turn_user_id
         self._md_timer.stop()
         self._stop_dots()
-        self._render_answer()  # clears the loading dots if no token ever arrived
+        self._render_answer(final=True)  # clears the loading dots if no token ever arrived
         if self._stream_message_id:
             self._messages.set_flag(
                 self._stream_message_id, error=message, streaming=False
@@ -3861,12 +3897,21 @@ class ChatPanel(QWidget):
                     "will not be recorded",
                     wait_ms,
                 )
+                self._worker_outlived_shutdown = True
                 return
             # thread.finished is queued and will not be delivered after quit,
             # so finish the turn here: repair, then flush the outcomes.
             self._cleanup_thread()
         else:
             self._flush_pending_confirmations()
+
+    def worker_stopped(self) -> bool:
+        """False when a reply worker is still running after ``shutdown``.
+
+        The checkpointer must then stay open: the worker may still write
+        through it, and closing the connection underneath it raises.
+        """
+        return not getattr(self, "_worker_outlived_shutdown", False)
 
     def closeEvent(self, event) -> None:
         self.shutdown()

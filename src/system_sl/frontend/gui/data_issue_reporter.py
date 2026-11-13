@@ -12,8 +12,8 @@ from system_sl.utils.data_health import (
     DataIssue,
     combine_messages,
     has_issues,
-    latest_summary,
     pop_issues,
+    take_latest_summary,
     set_latest_summary,
 )
 
@@ -62,8 +62,11 @@ def drain_data_issues(parent: QWidget | None) -> str:
 
 
 def latest_data_issue_summary() -> str:
-    """The last summary another window drained, for status lines."""
-    return latest_summary()
+    """The last summary another window drained, for status lines.
+
+    Taken, not peeked: each summary is shown once.
+    """
+    return take_latest_summary()
 
 
 class DataIssueMonitor(QObject):
