@@ -419,6 +419,27 @@ jobs:
           system-sl-setup.exe
           > SHA256SUMS.txt
 
+      # The updater refuses a release whose checksums aren't signed by the
+      # key built into the app (src/system_sl/utils/release_signing.py).
+      - name: Sign checksums
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "RELEASE_SIGNING_KEY secret is not set; refusing to publish unsigned checksums." >&2
+            exit 1
+          fi
+          umask 077
+          key="$RUNNER_TEMP/release-signing.pem"
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key"
+          openssl pkeyutl -sign -inkey "$key" -rawin \
+            -in SHA256SUMS.txt -out SHA256SUMS.txt.sig
+          # Check the signature against the key before publishing it.
+          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/release-signing.pub"
+          openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/release-signing.pub" \
+            -rawin -in SHA256SUMS.txt -sigfile SHA256SUMS.txt.sig
+          rm -f "$key"
+
       # Scope the notes to changes since the previous tag. A fixed start tag
       # here made every release list everything since that tag.
       - name: Find previous release tag
@@ -436,6 +457,7 @@ jobs:
           system-sl-windows.zip
           system-sl-setup.exe
           SHA256SUMS.txt
+          SHA256SUMS.txt.sig
           --title "THE SYSTEM ${{ github.ref_name }}"
           --generate-notes
           --notes-start-tag "${{ steps.prev.outputs.tag }}"

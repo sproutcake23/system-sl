@@ -132,4 +132,4 @@ Turn on **Close to System Tray** to keep the app running when you close the wind
 
 ## Auto Update
 
-Turn on **Auto Update** to check GitHub for a new release at launch. Downloads are verified against the release's SHA-256 checksums before they're installed. An AppImage updates to the new AppImage and relaunches into it.
+Turn on **Auto Update** to check GitHub for a new release at launch. Before anything is installed, the release's SHA-256 checksums must carry a valid signature from the project's release key (built into the app), and the download must match them. An unsigned or tampered release is refused. An AppImage updates to the new AppImage and relaunches into it.

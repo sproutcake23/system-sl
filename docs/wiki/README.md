@@ -35,7 +35,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 - **Themes** — Follow the system’s light/dark appearance, choose Light, pick a darker near-black Dark palette, or generate colors from your wallpaper.
 - **Tabbed Settings and Collapsible Sidebar** — All options live in one Settings window, and `Ctrl+Shift+S` shrinks the sidebar to a rail of icons.
 - **System Tray** — Optionally keep the app running in the tray when you close the window.
-- **Auto Update** — Optionally install new releases at launch, verified against their published SHA-256 checksums.
+- **Auto Update** — Optionally install new releases at launch, verified against signed SHA-256 checksums.
 - **Secure Key Storage** — API keys and Google tokens are kept in your system keyring, or an encrypted file if none is available.
 
 ## Quick Start

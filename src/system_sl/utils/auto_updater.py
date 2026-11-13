@@ -15,6 +15,11 @@ import requests
 from PySide6.QtCore import QThread, Signal
 
 from system_sl.utils.host_env import host_env
+from system_sl.utils.release_signing import (
+    SignatureError,
+    signature_asset_name,
+    verify_checksums_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +107,28 @@ def find_checksums_asset(assets: list) -> dict | None:
         name = asset["name"].lower()
         if name.endswith((".sha256", ".sha256sum", "sha256sums.txt", "checksums.txt")):
             return asset
+    return None
+
+
+def find_signature_asset(assets: list, checksums_asset: dict | None) -> dict | None:
+    """Find the signature published for ``checksums_asset``, if any."""
+    if checksums_asset is None:
+        return None
+    wanted = signature_asset_name(checksums_asset["name"])
+    for asset in assets:
+        if asset["name"] == wanted:
+            return asset
+    return None
+
+
+def signature_failure(checksums: bytes | None, signature: bytes | None) -> str | None:
+    """Return why the checksums can't be trusted, or None when they verify."""
+    if checksums is None:
+        return None  # checksum_failure() reports the missing checksums
+    try:
+        verify_checksums_signature(checksums, signature)
+    except SignatureError as e:
+        return f"Update failed: {e} Refusing to install."
     return None
 
 
@@ -564,29 +591,42 @@ class UpdateCheckThread(QThread):
                 self.progress.emit(25)
                 archive = download_asset(download_url, tmp_path)
                 self.progress.emit(50)
-                # Supply-chain verification: confirm the downloaded asset
-                # matches the SHA-256 published in the release checksums.
-                # Fail closed: no checksums asset, no matching entry, or a
-                # mismatch all abort instead of installing blindly.
-                #
-                # TODO(release-signing): verify a detached signature (e.g.
-                # minisign/ed25519 with a public key embedded in the app) as
-                # well. A checksum only proves the download matches the
-                # release metadata, which whoever can publish a release can
-                # rewrite. Nothing in the UI or README claims signature
-                # verification yet; do not claim it until this exists.
+                # Supply-chain verification, failing closed at every step:
+                # 1. the checksums file must carry a valid signature from the
+                #    project's release key (see release_signing.py), so it
+                #    can't be swapped along with the download;
+                # 2. the download must match its entry in those checksums.
                 checksums_asset = find_checksums_asset(assets)
-                checksums_text = None
-                if checksums_asset is not None:
-                    try:
-                        checksums_text = requests.get(
+                signature_asset = find_signature_asset(assets, checksums_asset)
+                checksums_bytes = None
+                signature = None
+                try:
+                    if checksums_asset is not None:
+                        response = requests.get(
                             checksums_asset["browser_download_url"], timeout=30
-                        ).text
-                    except requests.RequestException as e:
-                        self.update_complete.emit(
-                            False, f"Update failed: could not fetch release checksums: {e}"
                         )
-                        return
+                        response.raise_for_status()
+                        checksums_bytes = response.content
+                    if signature_asset is not None:
+                        response = requests.get(
+                            signature_asset["browser_download_url"], timeout=30
+                        )
+                        response.raise_for_status()
+                        signature = response.content
+                except requests.RequestException as e:
+                    self.update_complete.emit(
+                        False, f"Update failed: could not fetch release checksums: {e}"
+                    )
+                    return
+                failure = signature_failure(checksums_bytes, signature)
+                if failure is not None:
+                    self.update_complete.emit(False, failure)
+                    return
+                checksums_text = (
+                    checksums_bytes.decode("utf-8", "replace")
+                    if checksums_bytes is not None
+                    else None
+                )
                 failure = checksum_failure(archive, asset["name"], checksums_text)
                 if failure is not None:
                     self.update_complete.emit(False, failure)
