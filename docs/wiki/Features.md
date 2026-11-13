@@ -88,9 +88,9 @@ All files of one message share a single budget, derived from the current model's
 
 Import upcoming tasks from Google Tasks. See [Google Tasks Sync](Google-Tasks-Sync).
 
-## Native Notifications
+## Desktop Reminders
 
-HUD-style desktop alerts styled like the SYSTEM, with:
+Small toast popups drawn by the app in the SYSTEM's style. They are not OS-native notifications: they appear in a corner, never take focus, and close on their own after a few seconds. They come with:
 
 - Custom notification sounds (`.mp3` / `.wav`) placed in the `sounds/` folder
 - Sound preview and validation
