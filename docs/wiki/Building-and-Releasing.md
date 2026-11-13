@@ -43,11 +43,34 @@ The tag triggers the workflow, which builds on Linux and Windows and publishes a
 - `system-sl-linux.tar.xz`
 - `system-sl-setup.exe`
 - `system-sl-windows.zip`
-- `SHA256SUMS.txt`
+- `SHA256SUMS.txt` and its signature, `SHA256SUMS.txt.sig`
 
 Users with **Auto Update** on receive it at their next launch.
 
 Pull requests that change the build also run the workflow, without publishing anything. Both platforms must pass three checks in the built binary: `--check-ocr` reads a generated scanned PDF using only the bundled tools, `--check-gui` opens the main window, loads a sound, and confirms the Google Tasks API description is present, and `--check-theme` runs the bundled wallust on a generated image and verifies Dynamic mode produces a complete palette.
+
+## Release signing
+
+The auto-updater installs a release only if `SHA256SUMS.txt` is signed by the
+project's Ed25519 release key. The release workflow signs it with the
+`RELEASE_SIGNING_KEY` repository secret and fails if the secret is missing.
+The matching public key is built into the app as `RELEASE_PUBLIC_KEY_PEM` in
+`src/system_sl/utils/release_signing.py`; with no public key there, the app
+refuses every update.
+
+To create the key (once), keep the private key outside the repository:
+
+```bash
+openssl genpkey -algorithm ed25519 -out ~/system-sl-release.pem
+chmod 600 ~/system-sl-release.pem
+gh secret set RELEASE_SIGNING_KEY < ~/system-sl-release.pem
+openssl pkey -in ~/system-sl-release.pem -pubout   # paste into RELEASE_PUBLIC_KEY_PEM
+```
+
+Back up the private key somewhere safe and offline. If it is lost, releases
+can't be signed for apps that already have the old public key; if it leaks,
+anyone can sign an update. To rotate it, ship a release with the new public
+key while the old key still signs, then switch the secret.
 
 ## Google OAuth client
 
