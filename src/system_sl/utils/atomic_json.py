@@ -48,13 +48,51 @@ def atomic_write_json(filepath: str | Path, data: dict | list) -> None:
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, delete=False, suffix=".tmp"
     ) as tf:
-        json.dump(data, tf, indent=4, ensure_ascii=False)
-        tf.flush()
-        os.fsync(tf.fileno())  # Force to disk
         temp_name = tf.name
+        try:
+            json.dump(data, tf, indent=4, ensure_ascii=False)
+            tf.flush()
+            os.fsync(tf.fileno())  # Force to disk
+        except BaseException:
+            tf.close()
+            _discard(temp_name)
+            raise
 
-    # Atomic replace on POSIX; on Windows, replace() is also atomic for same-volume
-    os.replace(temp_name, path)
+    try:
+        # Atomic replace on POSIX; on Windows, replace() is also atomic for same-volume
+        os.replace(temp_name, path)
+    except BaseException:
+        _discard(temp_name)
+        raise
+    _fsync_dir(path.parent)
+
+
+def _discard(name: str) -> None:
+    """Remove a leftover temp file, ignoring one that is already gone."""
+    try:
+        os.unlink(name)
+    except OSError:
+        pass
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Flush the rename itself to disk, where the platform supports it.
+
+    Without this a power cut right after the write can bring back the old
+    file. Windows cannot open directories, so it is skipped there.
+    """
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def corrupt_backup_path(path: Path, now: datetime | None = None) -> Path:
@@ -81,7 +119,7 @@ def load_json_with_status(
     Does NOT catch OSError (permission denied, etc.) — those propagate so the
     caller can report an unreadable file.
 
-    On JSONDecodeError, moves the corrupt file to a unique
+    On JSONDecodeError or bytes that are not UTF-8, moves the corrupt file to a unique
     ``<filepath>.corrupt-<timestamp>`` before returning ``LoadStatus.CORRUPT``,
     so the user can recover manually.
 
@@ -96,15 +134,17 @@ def load_json_with_status(
     if not path.exists():
         return LoadStatus.MISSING, None, None
 
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read().strip()
-
-    if not content:
-        return LoadStatus.EMPTY, None, None
+    with open(path, "rb") as f:
+        raw = f.read()
 
     try:
+        content = raw.decode("utf-8").strip()
+        if not content:
+            return LoadStatus.EMPTY, None, None
         return LoadStatus.OK, json.loads(content), None
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        # Bytes that are not UTF-8 are as broken as bad JSON: quarantine them
+        # too, rather than letting the error escape every reader.
         # Back up corrupt file for recovery
         corrupt_backup: Path | None = corrupt_backup_path(path)
         detail = ""

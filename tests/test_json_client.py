@@ -96,3 +96,29 @@ def test_unreadable_file_reports_unreadable(tmp_path, monkeypatch):
     issues = pop_issues()
     assert [issue.kind for issue in issues] == ["unreadable"]
     assert load_data(str(path)) == {}
+
+
+def test_non_utf8_file_is_quarantined(tmp_path):
+    _reset_issues()
+    bad = tmp_path / "tasks.json"
+    bad.write_bytes(b'[{"title": "caf\xe9"}]')
+
+    result = load_data_result(str(bad))
+
+    assert result.status is LoadStatus.CORRUPT
+    assert not bad.exists()
+    assert result.corrupt_path is not None and result.corrupt_path.exists()
+
+
+def test_failed_write_leaves_no_temp_file(tmp_path):
+    import pytest
+
+    from system_sl.utils.json_client import save_data
+
+    target = tmp_path / "tasks.json"
+    target.write_text("[]", encoding="utf-8")
+    with pytest.raises(TypeError):
+        save_data(str(target), [object()])
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["tasks.json"]
+    assert target.read_text(encoding="utf-8") == "[]"

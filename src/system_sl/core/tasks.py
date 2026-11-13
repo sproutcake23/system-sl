@@ -22,6 +22,28 @@ COMPLETED_TASKS_FILE_PATH = get_tasks_file_path("completed_tasks.json")
 TASKS_LOCK_PATH = get_tasks_file_path("tasks.lock")
 
 
+class DataFileUnavailable(OSError):
+    """A data file exists but could not be read, so it must not be rewritten."""
+
+
+def _require_readable(path: str) -> None:
+    """Refuse to rewrite ``path`` when its current contents could not be read.
+
+    Writers load, change and save. If the load failed (no permission, or a
+    damaged file that could not be moved aside) the load comes back empty,
+    and saving that would replace the real file with almost nothing.
+    """
+    result = load_data_result(path)
+    if result.status is LoadStatus.UNREADABLE:
+        raise DataFileUnavailable(
+            f"Could not read {path} ({result.error}); not saving over it."
+        )
+    if result.status is LoadStatus.CORRUPT and result.corrupt_path is None:
+        raise DataFileUnavailable(
+            f"{path} is damaged and could not be moved aside; not saving over it."
+        )
+
+
 def sanitize_title(title: str) -> str:
     """Return a task title as the Player wrote it.
 
@@ -214,6 +236,7 @@ def add_tasks(
     task_title = sanitize_title(task_title)
 
     with file_lock(TASKS_LOCK_PATH):
+        _require_readable(TASKS_FILE_PATH)
         tasks = load_tasks()
 
         if source_id:
@@ -280,6 +303,7 @@ def remove_tasks(
         raise ValueError("Task id or title must be a non-empty string")
 
     with file_lock(TASKS_LOCK_PATH):
+        _require_readable(TASKS_FILE_PATH)
         tasks = load_tasks()
         task = _find_task(tasks, key)
         if task is None:
@@ -357,6 +381,7 @@ def load_display_order() -> list:
 def save_ranked_order(tasks: list) -> None:
     """Record the ranking's output, leaving the player's drag order as it is."""
     with file_lock(TASKS_LOCK_PATH):
+        _require_readable(TASK_ORDER_FILE_PATH)
         data = load_data(TASK_ORDER_FILE_PATH)
         updated = dict(data) if isinstance(data, dict) else {}
         updated["order"] = _order_keys(tasks)
@@ -507,6 +532,7 @@ def edit_task(
     new_title = sanitize_title(new_title)
 
     with file_lock(TASKS_LOCK_PATH):
+        _require_readable(TASKS_FILE_PATH)
         tasks = load_tasks()
         task = _find_task(tasks, key)
         if task is None:
@@ -553,7 +579,12 @@ def mark_task_completed(
     if not isinstance(key, str) or not key.strip():
         raise ValueError("Task id or title must be a non-empty string")
 
+    # One lock for the whole move, and the history entry is written before
+    # the task is removed: a crash in between leaves the task in both files
+    # (easy to tidy up) instead of in neither.
     with file_lock(TASKS_LOCK_PATH):
+        _require_readable(TASKS_FILE_PATH)
+        _require_readable(COMPLETED_TASKS_FILE_PATH)
         task = _find_task(load_tasks(), key)
         if task is None:
             raise ValueError(f"Task '{key}' not found")
@@ -561,13 +592,9 @@ def mark_task_completed(
         real_category = task.get("category") or task_type
         real_id = task.get("id")
 
-    removed_title = remove_tasks(task_id=real_id) if real_id else remove_tasks(real_title)
-
-    with file_lock(TASKS_LOCK_PATH):
         completed_tasks = load_completed_tasks()
-
         completion_entry = {
-            "title": removed_title,
+            "title": real_title,
             "completed_at": datetime.now().strftime("%Y-%m-%d"),
             "category": real_category,
         }
@@ -578,6 +605,9 @@ def mark_task_completed(
             completion_entry["literal_title"] = True
         if completion_entry not in completed_tasks:
             completed_tasks.append(completion_entry)
-
         save_completed_tasks(completed_tasks)
+
+        removed_title = (
+            remove_tasks(task_id=real_id) if real_id else remove_tasks(real_title)
+        )
     return removed_title

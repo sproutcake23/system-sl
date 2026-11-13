@@ -181,6 +181,8 @@ def add_task(category: str, title: str, deadline: Optional[str] = None) -> Any:
         msg = str(e)
         kind = "duplicate" if "already exists" in msg else "invalid"
         return {"error": kind, "message": msg}
+    except OSError as e:
+        return {"error": "storage", "message": f"Could not save the task: {e}"}
 
 
 def _resolve_task_id(title: str, category: str | None = None) -> str:
@@ -221,6 +223,8 @@ def remove_task(title: str, category: str) -> Any:
         return remove_tasks(task_id=task_id, task_type=category)
     except ValueError as e:
         return {"error": "not_found", "message": str(e)}
+    except OSError as e:
+        return {"error": "storage", "message": f"Could not update the task: {e}"}
 
 
 @tool
@@ -231,6 +235,8 @@ def mark_task_completed(title: str, category: str) -> Any:
         return core_mark_task_completed(task_id=task_id, task_type=category)
     except ValueError as e:
         return {"error": "not_found", "message": str(e)}
+    except OSError as e:
+        return {"error": "storage", "message": f"Could not update the task: {e}"}
 
 
 @tool
