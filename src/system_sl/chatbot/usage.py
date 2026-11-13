@@ -188,6 +188,40 @@ def format_context(used: int, window: int, estimated: bool = False) -> str:
     return f"Context {approx}{_format_count(used)} / {_format_count(window)} ({percent}%)"
 
 
+def format_cost(cost: float) -> str:
+    if cost == 0.0:
+        return "free"
+    if cost < 0.01:
+        return f"~${cost:.4f}"
+    return f"~${cost:.2f}"
+
+
+def format_conversation_total(totals: Optional[dict]) -> str:
+    """Tokens and estimated cost spent over a whole conversation.
+
+    ``totals`` is the ``usage`` entry kept in the conversation index. Replies
+    from a model with no known price are counted but cannot be priced; the
+    cost is then marked as a lower bound ("≥").
+    """
+    if not isinstance(totals, dict):
+        return ""
+    tokens = int(totals.get("input_tokens") or 0) + int(totals.get("output_tokens") or 0)
+    if tokens <= 0:
+        return ""
+    text = f"conversation {_format_count(tokens)} tokens"
+    replies = int(totals.get("replies") or 0)
+    unpriced = int(totals.get("unpriced_replies") or 0)
+    if replies and unpriced >= replies:
+        return text  # nothing could be priced; don't show $0
+    cost = float(totals.get("cost") or 0.0)
+    if unpriced and cost == 0.0:
+        return text  # free + unknown: the total isn't known
+    cost_text = format_cost(cost)
+    if unpriced:
+        cost_text = "≥" + cost_text.lstrip("~")
+    return f"{text} {cost_text}"
+
+
 def format_usage(usage: Optional[TokenUsage], model_name: str = "") -> str:
     """A short, human-readable line for the transcript."""
     if usage is None or usage.is_empty:
@@ -201,13 +235,7 @@ def format_usage(usage: Optional[TokenUsage], model_name: str = "") -> str:
         )
 
     cost = estimate_cost(usage, model_name)
-    if cost is None:
-        # An unknown price is not the same as a free model.
-        pass
-    elif cost == 0.0:
-        parts.append("free")
-    elif cost < 0.01:
-        parts.append(f"~${cost:.4f}")
-    else:
-        parts.append(f"~${cost:.2f}")
+    if cost is not None:
+        # An unknown price (None) is not the same as a free model.
+        parts.append(format_cost(cost))
     return " · ".join(parts)

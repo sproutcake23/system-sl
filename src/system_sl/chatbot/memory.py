@@ -426,6 +426,40 @@ def list_conversations() -> list[dict]:
     )
 
 
+def add_conversation_usage(
+    thread_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost: float | None,
+) -> dict | None:
+    """Add one reply's tokens and estimated cost to a conversation's totals.
+
+    ``cost`` is None when the model has no known price; those replies are
+    counted in ``unpriced_replies`` so the total can say it is incomplete.
+    Totals are what was spent, so rewinding a turn does not reduce them.
+    """
+    with _index_transaction():
+        index = load_conversation_index()
+        entry = next(
+            (e for e in index["conversations"] if e["id"] == thread_id), None
+        )
+        if entry is None:
+            return None
+        usage = entry.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
+        usage["input_tokens"] = int(usage.get("input_tokens") or 0) + max(0, int(input_tokens))
+        usage["output_tokens"] = int(usage.get("output_tokens") or 0) + max(0, int(output_tokens))
+        usage["replies"] = int(usage.get("replies") or 0) + 1
+        if cost is None:
+            usage["unpriced_replies"] = int(usage.get("unpriced_replies") or 0) + 1
+        else:
+            usage["cost"] = float(usage.get("cost") or 0.0) + max(0.0, float(cost))
+        entry["usage"] = usage
+        save_conversation_index(index)
+        return dict(usage)
+
+
 def get_conversation(thread_id: str) -> dict | None:
     """Return one conversation's index entry, or None."""
     for entry in load_conversation_index()["conversations"]:

@@ -360,3 +360,19 @@ def test_usage_label_shows_context_fill(panel, monkeypatch):
     # Opening a new chat empties the context.
     widget._estimate_context([])
     assert not widget.usage_label.isVisible()
+
+
+def test_turn_usage_is_added_to_the_conversation_total(panel, monkeypatch):
+    from system_sl.chatbot import memory as memory_mod
+    from system_sl.chatbot import usage as usage_mod
+
+    widget, _app = panel
+    memory_mod.ensure_conversation(widget._thread_id, model_name="m", title="t")
+    monkeypatch.setattr(usage_mod, "model_prices", lambda _m: (1.0, 2.0))
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, "total_tokens": 1_000_000}
+    # Usage can be emitted twice per turn; it is recorded once.
+    widget._on_usage(usage)
+    widget._on_usage(usage)
+    widget._record_turn_usage(widget._thread_id)
+    assert memory_mod.get_conversation(widget._thread_id)["usage"]["input_tokens"] == 1_000_000
+    assert "conversation 1M tokens ~$1.00" in widget.usage_label.text()

@@ -1207,6 +1207,9 @@ class ChatPanel(QWidget):
         self._context_tokens = 0
         self._context_estimated = False
         self._reply_usage_line = ""
+        # The finished turn's usage, added to the conversation's totals once
+        # the turn ends (usage can be emitted twice per turn).
+        self._turn_usage = None
         self.usage_label = QLabel("")
         self.usage_label.setObjectName("usageLabel")
         self.usage_label.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1217,7 +1220,9 @@ class ChatPanel(QWidget):
             "fills (the latest prompt plus its reply). Older turns are trimmed "
             "or summarised when it gets full.\n"
             "Last reply: tokens read and written for the most recent answer, "
-            "and its estimated cost."
+            "and its estimated cost.\n"
+            "Conversation: everything this conversation has used so far "
+            "(≥ when some replies came from a model with no known price)."
         )
         root.addWidget(self.usage_label)
 
@@ -3783,6 +3788,8 @@ class ChatPanel(QWidget):
             output_tokens=int(usage.get("output_tokens") or 0),
             total_tokens=int(usage.get("total_tokens") or 0),
         )
+        if not reply.is_empty:
+            self._turn_usage = reply
         context_tokens = int(usage.get("context_tokens") or 0)
         if context_tokens:
             self._context_tokens = context_tokens
@@ -3810,6 +3817,38 @@ class ChatPanel(QWidget):
         self._reply_usage_line = ""
         self._refresh_usage_label()
 
+    def _conversation_total_line(self) -> str:
+        from system_sl.chatbot.memory import get_conversation
+        from system_sl.chatbot.usage import format_conversation_total
+
+        if not self._thread_id:
+            return ""
+        try:
+            entry = get_conversation(self._thread_id) or {}
+        except Exception:
+            return ""
+        return format_conversation_total(entry.get("usage"))
+
+    def _record_turn_usage(self, thread_id: str | None) -> None:
+        """Add the turn that just ended to its conversation's totals."""
+        usage, self._turn_usage = self._turn_usage, None
+        if usage is None or not thread_id:
+            return
+        from system_sl.chatbot.memory import add_conversation_usage
+        from system_sl.chatbot.usage import estimate_cost
+
+        try:
+            add_conversation_usage(
+                thread_id,
+                usage.input_tokens,
+                usage.output_tokens,
+                estimate_cost(usage, self._current_model or ""),
+            )
+        except Exception:
+            logger.warning("could not record the conversation's usage", exc_info=True)
+        if thread_id == self._thread_id:
+            self._refresh_usage_label()
+
     def _refresh_usage_label(self) -> None:
         from system_sl.chatbot.context_window import context_window_for_model
         from system_sl.chatbot.usage import format_context
@@ -3828,6 +3867,9 @@ class ChatPanel(QWidget):
                 self._usage_context_ratio = self._context_tokens / window
         if self._reply_usage_line:
             parts.append(self._reply_usage_line)
+        total = self._conversation_total_line()
+        if total:
+            parts.append(total)
         if not parts:
             self.usage_label.clear()
             self.usage_label.setVisible(False)
@@ -3911,6 +3953,9 @@ class ChatPanel(QWidget):
         # The worker has stopped, so the checkpoint is safe to write again:
         # close a turn that was cancelled mid-tool, then record any task
         # outcome the Player answered while it was streaming.
+        self._record_turn_usage(
+            getattr(finished_session, "thread_id", None) or self._thread_id
+        )
         if finished_session is not None:
             self._repair_session_after_turn(finished_session)
             if had_attachments:
