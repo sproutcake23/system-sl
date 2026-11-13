@@ -142,7 +142,21 @@ def test_chat_tools_refuse_ambiguous_duplicate_titles(tmp_path, monkeypatch):
         {"id": "a", "title": "Read", "category": "study"},
         {"id": "b", "title": "Read", "category": "fun"},
     ])
-    monkeypatch.setattr(system_mod, "load_tasks", tasks.load_tasks)
     assert system_mod._resolve_task_id("Read", "fun") == "b"
     with pytest.raises(ValueError):
         system_mod._resolve_task_id("Read", "work")
+
+
+def test_chat_tools_can_remove_and_complete_tasks(tmp_path, monkeypatch):
+    """Run the real tools, with no stub for the task loader."""
+    from system_sl.chatbot import system as system_mod
+
+    _isolate(tmp_path, monkeypatch)
+    tasks.add_tasks("study", "Read chapter")
+    tasks.add_tasks("study", "Write notes")
+
+    system_mod.mark_task_completed.invoke({"title": "Read chapter", "category": "study"})
+    system_mod.remove_task.invoke({"title": "Write notes", "category": "study"})
+
+    assert tasks.load_tasks() == []
+    assert [c["title"] for c in tasks.load_completed_tasks()] == ["Read chapter"]

@@ -38,15 +38,13 @@ from system_sl.core.onboarding import ONBOARDING_QUESTIONS, PersonaStorageHandle
 from system_sl.core.tasks import (
     add_tasks,
     edit_task,
+    load_display_order,
     load_tasks,
     mark_task_completed,
     remove_tasks,
-)
-from system_sl.core.priority_engine_new import (
-    load_manual_order,
-    run_prioritization,
     save_manual_order,
-)  # we are importing run_prioritization from api section(priority_engine_new)
+)
+from system_sl.core.priority_engine_new import run_prioritization  # we are importing run_prioritization from api section(priority_engine_new)
 from system_sl.frontend.gui.theme import get_current_theme_tokens
 from system_sl.frontend.gui.data_issue_reporter import (
     drain_data_issues,
@@ -354,14 +352,14 @@ class TasksWindow(QWidget):
         return f"Showing tasks unranked — {reason}"
 
     def _unranked_tasks(self) -> list:
-        """Return every stored task, in manual order, for unranked rendering."""
+        """Return every stored task, in the last shown order, for unranked rendering."""
         try:
             stored = [t for t in load_tasks() if isinstance(t, dict)]
         except Exception as e:
             self._status_message = f"Could not load tasks: {e}"
             return []
 
-        order = load_manual_order()
+        order = load_display_order()
         position = {key: i for i, key in enumerate(order)}
         return sorted(
             stored,
