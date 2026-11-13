@@ -147,6 +147,28 @@ def freshness_score(article: dict, now: datetime, reliability: int) -> float:
     return min(100.0, base + importance)
 
 
+def _combined_state(feedback: dict | None, article: dict) -> dict:
+    """Feedback for the article plus any coverage of the same story.
+
+    A player who liked, saved, disliked or marked one publisher's coverage has
+    expressed an opinion about the whole story. Combining the states keeps that
+    signal when clustering later promotes a different publisher's article.
+    """
+    if not feedback or not isinstance(feedback.get("articles"), dict):
+        return {}
+    articles = feedback["articles"]
+    identifiers = [article.get("id"), *(article.get("story_ids") or [])]
+    merged: dict = {}
+    for identifier in identifiers:
+        state = articles.get(identifier) if identifier else None
+        if not isinstance(state, dict):
+            continue
+        for key in ("liked", "disliked", "saved", "known"):
+            if state.get(key):
+                merged[key] = True
+    return merged
+
+
 def novelty_score(
     article: dict,
     history_ids: Iterable[str] = (),
@@ -155,35 +177,40 @@ def novelty_score(
 ) -> float:
     """Penalize articles the player has already seen or explicitly rejected."""
     article_id = article.get("id")
+    story_ids = {
+        str(identifier)
+        for identifier in (article.get("story_ids") or [])
+        if identifier
+    }
+    seen = set(history_ids)
     score = 100.0
-    if article_id and article_id in set(history_ids):
+    if article_id and article_id in seen:
         score = 40.0
+    elif story_ids & seen:
+        # Another publisher's coverage of the same story was already shown.
+        score = 45.0
     elif any(title_similarity(article.get("title", ""), title) >= 0.9 for title in history_titles):
         score = 50.0
 
-    if feedback:
-        state = feedback.get("articles", {}).get(article_id, {}) if isinstance(feedback.get("articles"), dict) else {}
-        if isinstance(state, dict):
-            if state.get("known"):
-                score = min(score, 10.0)
-            elif state.get("saved"):
-                score = max(score, 80.0)
-        preference = topic_preference(feedback, article.get("category", ""))
-        if preference <= -3:
-            score = min(score, 15.0)
-        elif preference > 0:
-            score = min(100.0, score + 3.0 * preference)
+    state = _combined_state(feedback, article)
+    if state:
+        if state.get("known"):
+            score = min(score, 10.0)
+        elif state.get("saved"):
+            score = max(score, 80.0)
+    preference = topic_preference(feedback, article.get("category", ""))
+    if preference <= -3:
+        score = min(score, 15.0)
+    elif preference > 0:
+        score = min(100.0, score + 3.0 * preference)
     return max(0.0, min(100.0, score))
 
 
 def feedback_adjustment(article: dict, feedback: dict | None) -> tuple[float, bool]:
     """Return a score delta and whether the article should be hidden."""
+    state = _combined_state(feedback, article)
     if not feedback:
         return 0.0, False
-
-    state = feedback.get("articles", {}).get(article.get("id"), {})
-    if not isinstance(state, dict):
-        state = {}
 
     delta = 0.0
     hidden = False
@@ -315,6 +342,9 @@ def _take(
     count: int,
     used_ids: set[str],
     used_titles: list[str],
+    *,
+    source_counts: dict[str, int] | None = None,
+    max_per_source: int | None = None,
 ) -> list[dict]:
     selected: list[dict] = []
     for score in candidates:
@@ -326,8 +356,18 @@ def _take(
             continue
         if any(title_similarity(article.get("title", ""), title) >= SIMILARITY_THRESHOLD for title in used_titles):
             continue
+        source_id = str(article.get("source_id") or "")
+        if (
+            source_counts is not None
+            and max_per_source is not None
+            and source_id
+            and source_counts.get(source_id, 0) >= max_per_source
+        ):
+            continue
         used_ids.add(identifier)
         used_titles.append(article.get("title", ""))
+        if source_counts is not None and source_id:
+            source_counts[source_id] = source_counts.get(source_id, 0) + 1
         selected.append(
             {
                 "article": article,
@@ -365,6 +405,20 @@ def select_briefing(
 
     used_ids: set[str] = set()
     used_titles: list[str] = []
+    source_counts: dict[str, int] = {}
+    distinct_sources = {
+        str(score.article.get("source_id"))
+        for score in candidates
+        if score.article.get("source_id")
+    }
+    # Source diversity matters when several publishers are present. With one
+    # or two sources a strict cap would starve the briefing, so it is relaxed.
+    if len(distinct_sources) >= 4:
+        max_per_source = 2
+    elif len(distinct_sources) >= 2:
+        max_per_source = 3
+    else:
+        max_per_source = None
 
     persona_candidates = [
         score for score in candidates if has_persona and score.P >= PERSONA_THRESHOLD
@@ -373,8 +427,22 @@ def select_briefing(
         score for score in candidates if has_tasks and score.T >= TASK_THRESHOLD
     ]
 
-    persona = _take(persona_candidates, persona_target, used_ids, used_titles)
-    tasks = _take(task_candidates, task_target, used_ids, used_titles)
+    persona = _take(
+        persona_candidates,
+        persona_target,
+        used_ids,
+        used_titles,
+        source_counts=source_counts,
+        max_per_source=max_per_source,
+    )
+    tasks = _take(
+        task_candidates,
+        task_target,
+        used_ids,
+        used_titles,
+        source_counts=source_counts,
+        max_per_source=max_per_source,
+    )
 
     # General discovery prefers stories that are not already personal. It has
     # no relevance threshold: general news should exist even for a brand-new
@@ -383,20 +451,55 @@ def select_briefing(
         candidates,
         key=lambda item: (item.P >= PERSONA_THRESHOLD or item.T >= TASK_THRESHOLD, -item.R, -item.F),
     )
-    general = _take(general_pool, general_target, used_ids, used_titles)
+    general = _take(
+        general_pool,
+        general_target,
+        used_ids,
+        used_titles,
+        source_counts=source_counts,
+        max_per_source=max_per_source,
+    )
 
     # Shortfalls can be filled with additional strong matches in their own
     # sections, never by lowering the general section's quality or duplicating.
     remaining = max_articles - len(persona) - len(tasks) - len(general)
     if remaining > 0 and has_persona:
-        extra = _take(persona_candidates, remaining, used_ids, used_titles)
+        extra = _take(
+            persona_candidates,
+            remaining,
+            used_ids,
+            used_titles,
+            source_counts=source_counts,
+            max_per_source=max_per_source,
+        )
         persona.extend(extra)
         remaining -= len(extra)
     if remaining > 0 and has_tasks:
-        extra = _take(task_candidates, remaining, used_ids, used_titles)
+        extra = _take(
+            task_candidates,
+            remaining,
+            used_ids,
+            used_titles,
+            source_counts=source_counts,
+            max_per_source=max_per_source,
+        )
         tasks.extend(extra)
         remaining -= len(extra)
     if remaining > 0:
+        general.extend(
+            _take(
+                general_pool,
+                remaining,
+                used_ids,
+                used_titles,
+                source_counts=source_counts,
+                max_per_source=max_per_source,
+            )
+        )
+    remaining = max_articles - len(persona) - len(tasks) - len(general)
+    if remaining > 0:
+        # The cap is a preference, not a hard limit: never return a short
+        # briefing when good candidates are still available.
         general.extend(_take(general_pool, remaining, used_ids, used_titles))
 
     return {"persona": persona, "tasks": tasks, "general": general}

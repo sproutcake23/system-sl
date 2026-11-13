@@ -98,6 +98,24 @@ class ScoringTests(unittest.TestCase):
         scored = score_article(article, persona(), TaskSignal(), feedback=feedback, now=NOW)
         self.assertTrue(scored.hard_negative)
 
+    def test_feedback_on_one_publishers_coverage_applies_to_the_story(self):
+        article = make_article(
+            "primary", "AI update", "An AI update.", "AI & Machine Learning"
+        )
+        article["story_ids"] = ["other-publisher"]
+
+        disliked = {
+            "articles": {"other-publisher": {"disliked": True}},
+            "topics": {},
+        }
+        scored = score_article(article, persona(), TaskSignal(), feedback=disliked, now=NOW)
+        self.assertTrue(scored.hard_negative)
+
+        saved = {"articles": {"other-publisher": {"saved": True}}, "topics": {}}
+        scored = score_article(article, persona(), TaskSignal(), feedback=saved, now=NOW)
+        self.assertFalse(scored.hard_negative)
+        self.assertGreaterEqual(scored.N, 80)
+
     def test_topic_not_interested_hides(self):
         article = make_article("a", "AI update", "An AI update.", "AI & Machine Learning")
         feedback = {"articles": {}, "topics": {"AI & Machine Learning": -3}}
