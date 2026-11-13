@@ -398,3 +398,33 @@ def test_delete_chat_removes_it_and_opens_the_next(panel, monkeypatch):
     assert memory_mod.get_conversation(doomed) is None
     assert widget._thread_id == keep
     assert widget.history_combo.findData(doomed) < 0
+
+
+def test_theme_change_redraws_existing_bubbles(panel):
+    from system_sl.frontend.gui.theme import get_current_theme_tokens, set_active_tokens
+
+    widget, app = panel
+    widget._model.replies = []
+    _send(widget, app, "hello")
+    original = get_current_theme_tokens()
+    try:
+        recoloured = dict(original, sys_color_text_main="#123456", sys_color_surface="#123456")
+        set_active_tokens(recoloured)
+        widget.refresh_theme(recoloured)
+        assert "#123456" in widget.transcript.toHtml()
+        # The conversation itself is unchanged.
+        assert ("assistant", "reply 1") in _shown(widget)
+    finally:
+        set_active_tokens(original)
+
+
+def test_theme_change_mid_reply_redraws_when_the_turn_ends(panel):
+    widget, _app = panel
+    widget._thread = object()  # pretend a reply is streaming
+    try:
+        widget.refresh_theme()
+        assert widget._theme_redraw_pending
+    finally:
+        widget._thread = None
+    widget._redraw_for_theme()
+    assert not widget._theme_redraw_pending
