@@ -22,7 +22,6 @@ from system_sl.core.tasks import load_completed_tasks
 from system_sl.utils import get_tasks_file_path
 
 log = logging.getLogger(__name__)
-log = logging.getLogger(__name__)
 
 
 class Setup:
@@ -588,47 +587,3 @@ class Fusion:
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 8 — CLI STANDALONE MODE
 # ══════════════════════════════════════════════════════════════════════════════
-
-if __name__ == "__main__":
-    log.info("\n" + "═" * 60)
-    log.info("  USER VECTOR BUILDER — Standalone Debug Mode")
-    log.info("═" * 60)
-
-    try:
-        helper = Helper()
-        fusion_engine = Fusion()
-        info = helper.get_vector_info()
-
-        persona = "✓ found" if info["persona_exists"] else "✗ MISSING"
-        completed = "✓ found" if info["completed_tasks_exists"] else "✗ not found"
-        cache = "✓ exists" if info["cache_exists"] else "○ none"
-        weights = info["fusion_weights"]
-        log.info(f"\n  Persona file   : {persona}")
-        log.info(f"  Completed tasks: {completed}")
-        log.info(f"  Cache          : {cache}")
-        log.info(f"  Completed count: {info['completed_task_count']}")
-        log.info(
-            f"  Fusion weights : persona={weights['persona']:.2f}"
-            f"  decay={weights['decay']:.2f}"
-        )
-
-        if not info["persona_exists"]:
-            log.info("\n  ✗ Cannot build vector — run onboarding first.")
-        else:
-            log.info("\n  Building vector (may take a few seconds on first run)...")
-            vec = fusion_engine.build_user_vector(use_cache=False)
-            log.info(f"\n  Vector shape : {vec.shape}")
-            log.info(f"  Vector norm  : {np.linalg.norm(vec):.6f}  (should be ~1.0)")
-            log.info(f"  Non-zero dims: {np.count_nonzero(vec)}")
-            log.info(f"  Top 5 values : {sorted(vec, reverse=True)[:5]}")
-            log.info("\n  ✓ Vector built successfully.")
-
-    except FileNotFoundError as e:
-        log.info(f"\n  ✗ {e}")
-    except RuntimeError as e:
-        log.error("%s", e)
-    except Exception as e:
-        log.info(f"\n  ✗ Unexpected error: {e}")
-        raise
-
-# TODO: IMplement temporal decay maths here and also doing caching for optimization

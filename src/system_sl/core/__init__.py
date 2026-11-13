@@ -8,8 +8,6 @@ from system_sl.core.tasks import (
     save_completed_tasks,
     mark_task_completed,
 )
-from system_sl.core.onboarding import check_and_run_onboarding, force_run_setup
-from system_sl.core.user_info import user_goal_check, user_edit_goal
 
 
 __all__ = [
@@ -22,8 +20,4 @@ __all__ = [
     "load_completed_tasks",
     "save_completed_tasks",
     "mark_task_completed",
-    "check_and_run_onboarding",
-    "force_run_setup", 
-    "user_goal_check",
-    "user_edit_goal",
 ]

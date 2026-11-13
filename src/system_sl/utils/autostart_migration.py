@@ -1,6 +1,9 @@
+import logging
 import os
 import subprocess
 from system_sl.utils.install_cleanup import cleanup_previous_installs
+
+log = logging.getLogger(__name__)
 
 def run_legacy_cleanup():
     """
@@ -23,7 +26,7 @@ def run_legacy_cleanup():
         
         # If systemd knows about it, or the old file still exists, clean it up!
         if "enabled" in check_service.stdout or os.path.exists(legacy_file_path):
-            print("[Migration] Legacy systemd service detected. Commencing safe migration...")
+            log.info("Legacy systemd service found; migrating it")
 
             # Stop the old 30-minute interval ghost process immediately
             subprocess.run(["systemctl", "--user", "stop", legacy_service_name], capture_output=True)
@@ -37,11 +40,11 @@ def run_legacy_cleanup():
                 
             # Flush systemd's memory cache so it entirely forgets about the old service
             subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
-            print("[Migration] Legacy systemd service completely eradicated.")
+            log.info("Legacy systemd service removed")
 
     except Exception as e:
         # We catch all exceptions so an unexpected environment doesn't crash the user's entire app
-        print(f"[Migration Warning] Failed to clean up legacy systemd artifacts: {e}")
+        log.warning("Could not clean up the legacy systemd service: %s", e)
 
 
 def initialize_application_autostart():

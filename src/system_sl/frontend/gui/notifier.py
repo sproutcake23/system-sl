@@ -6,6 +6,7 @@ This avoids importing the full GUI stack (chat, settings, etc.) and only
 loads what's needed for hourly task notifications.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from system_sl.utils.notification_settings import load_notifications_enabled
 from system_sl.utils.autostart_migration import initialize_application_autostart
 from system_sl.utils.auto_updater import apply_pending_update
 from system_sl.utils.worker_threads import shutdown_workers
+
+log = logging.getLogger(__name__)
 
 
 def main():
@@ -51,13 +54,10 @@ def main():
     # off does not remove it. Exit instead of idling for the whole session
     # and holding the lock the GUI needs.
     if not load_notifications_enabled():
-        print(
-            "[INFO] Notifications are disabled; "
-            "not starting the background notifier."
-        )
+        log.info("Notifications are disabled; not starting the background notifier.")
         return 0
 
-    print("[INFO] Running in background notifier mode...")
+    log.info("Running in background notifier mode")
 
     view = SystemNotification()
     controller = BackgroundServiceController(view)

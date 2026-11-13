@@ -31,10 +31,6 @@ _FILE_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "Player profile",
         "Tasks are ranked without a player profile until it is restored.",
     ),
-    "user_info.json": (
-        "Player profile",
-        "Tasks are ranked without a player profile until it is restored.",
-    ),
 }
 _GENERIC_DESCRIPTION = ("Data file", "Default values are being used instead.")
 

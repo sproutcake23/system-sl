@@ -541,7 +541,3 @@ def mark_task_completed(
 
         save_completed_tasks(completed_tasks)
     return removed_title
-
-
-if __name__ == "__main__":
-    log.info("%s", get_topn_task())

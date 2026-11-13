@@ -106,7 +106,7 @@ Build a standalone executable:
 uv run build-sl
 ```
 
-On first launch, the app asks for your chatbot provider, model, and API key.
+On first launch, the app offers the optional Player Profile wizard. It asks for a chatbot provider, model, and API key only when you first use the chat.
 
 To read scanned PDFs from source, install `tesseract` and `poppler` on your system. Release builds include them.
 
@@ -119,7 +119,7 @@ Full documentation lives in the wiki:
 - [Installation](https://github.com/sproutcake23/System-SL/wiki/Installation)
 - [Features](https://github.com/sproutcake23/System-SL/wiki/Features)
 - [Google Tasks Sync](https://github.com/sproutcake23/System-SL/wiki/Google-Tasks-Sync)
-- [CLI Usage](https://github.com/sproutcake23/System-SL/wiki/CLI-Usage)
+- [Command-Line Flags](https://github.com/sproutcake23/System-SL/wiki/Command-Line-Flags)
 - [Background Service](https://github.com/sproutcake23/System-SL/wiki/Background-Service)
 - [Building and Releasing](https://github.com/sproutcake23/System-SL/wiki/Building-and-Releasing)
 

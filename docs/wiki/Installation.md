@@ -52,7 +52,7 @@ To read scanned PDFs attached in chat, also install `tesseract` and `poppler` wi
 
 ## First launch
 
-The app asks for your chatbot provider, model, and API key, then offers the optional Player Profile wizard. See [Features](Features).
+The app offers the optional Player Profile wizard, then opens the main window. Tasks and reminders work straight away; the chat panel asks for your chatbot provider, model, and API key the first time you send a message. See [Features](Features).
 
 ## Where data is stored
 

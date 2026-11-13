@@ -14,7 +14,7 @@ System-SL
 ├── README.md             # User-facing documentation
 ├── CONTRIBUTING.md       # Developer documentation
 ├── docs/wiki/            # Wiki pages (copied to the GitHub wiki by hand)
-├── .github/workflows/    # release.yml: the authoritative Linux and Windows build
+├── .github/workflows/    # ci.yml: lint + tests on every PR; release.yml: the Linux and Windows build
 ├── packaging/            # PyInstaller spec, AppImage and Windows installer packaging
 │
 └── src/system_sl/        # The package; imports are system_sl.*
@@ -53,11 +53,12 @@ uv run system-sl --bg     # background notifier
 
 ## 🧪 Verifying Changes
 
-There is no automated test suite, so verification is manual. Before pushing, these must pass:
+CI (`.github/workflows/ci.yml`) runs ruff and the test suite on every pull request and push to `main`. Run the same checks before pushing:
 
 ```bash
+uvx ruff check src tests
+QT_QPA_PLATFORM=offscreen uv run --extra test pytest -q
 uv build --wheel --offline     # metadata and packaging still valid
-python -m compileall src/
 ```
 
 For anything behavioural, build and launch the app. Several bugs have only shown up in the frozen build:

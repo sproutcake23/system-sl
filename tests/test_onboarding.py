@@ -51,7 +51,46 @@ def test_back_prefills_and_summary_is_saved_from_the_table(tmp_path, monkeypatch
     assert data["statistics"]["high_count"] >= 1
 
 
-def test_user_goals_no_longer_prompt():
-    from system_sl.core import user_info
+def test_rerunning_onboarding_starts_from_the_saved_answers(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    QApplication.instance() or QApplication([])
 
-    assert user_info.user_goal_check("/nonexistent/path.json") == []
+    from system_sl.frontend.gui.popup_windows import OnboardingWindow
+
+    first = OnboardingWindow()
+    first._on_begin()
+    for index in range(len(ONBOARDING_QUESTIONS)):
+        first.answer_input.setText(f"answer {index}")
+        first.impact_buttons[index % 3].setChecked(True)
+        first._on_next()
+    first._on_finish()
+
+    again = OnboardingWindow()
+    again._on_begin()
+    assert again.answer_input.text() == "answer 0"
+    assert again.impact_buttons[0].isChecked()
+    assert len(again.responses) == len(ONBOARDING_QUESTIONS)
+
+    # Changing one answer keeps the others.
+    again.answer_input.setText("changed")
+    again._on_next()
+    again._show_completion()
+    assert again.summary_table.item(0, 1).text() == "changed"
+    assert again.summary_table.item(1, 1).text() == "answer 1"
+
+
+def test_saved_answers_stop_at_the_first_gap(tmp_path):
+    from system_sl.core.onboarding import PersonaStorageHandler
+
+    handler = PersonaStorageHandler()
+    handler.persona_file = tmp_path / "persona.json"
+    ids = [q["id"] for q in ONBOARDING_QUESTIONS]
+    handler.persona_file.write_text(json.dumps({"responses": [
+        {"question_id": ids[0], "answer": "a", "impact": 1},
+        {"question_id": ids[2], "answer": "c", "impact": 1},
+    ]}))
+    saved = handler.load_saved_responses(ONBOARDING_QUESTIONS)
+    assert [r["answer"] for r in saved] == ["a"]
+
+    handler.persona_file.write_text("{broken")
+    assert handler.load_saved_responses(ONBOARDING_QUESTIONS) == []

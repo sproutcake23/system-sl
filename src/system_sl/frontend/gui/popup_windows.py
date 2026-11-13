@@ -395,8 +395,6 @@ class TasksWindow(QWidget):
             self._text_to_task[key] = task
 
     def _on_reordered(self, moved_text, old_rank, new_rank, new_texts, new_titles):
-        # BUG: REMEBER TO DEAL WITH THIS FUNCTION CAREFULLY
-
         # new_titles contains the actual task titles from Qt.UserRole (no parsing needed)
         new_order_dicts = [
             self._text_to_task[t] for t in new_titles if t in self._text_to_task
@@ -789,7 +787,9 @@ class OnboardingWindow(QWidget):
         )
 
     def _on_begin(self):
-        self.responses.clear()
+        # Re-running onboarding starts from the saved answers, so changing one
+        # answer doesn't mean typing all the others again.
+        self.responses = self.storage.load_saved_responses(self.questions)
         self.current_index = 0
         self._show_question()
         self.stack.setCurrentIndex(1)
