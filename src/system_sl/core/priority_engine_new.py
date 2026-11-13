@@ -28,7 +28,6 @@ from system_sl.utils.atomic_json import atomic_write_json, safe_load_json
 from system_sl.utils.paths import get_tasks_file_path
 from system_sl.utils.file_lock import file_lock
 
-logging.basicConfig(level=logging.INFO, format="[priority_engine] %(message)s")
 log = logging.getLogger(__name__)
 
 
@@ -760,18 +759,18 @@ def run_prioritization(display: bool = True, use_thompson: bool = False) -> dict
 
 
 def display_prioritized_tasks(result: dict) -> None:
-    print("\n══ ⚔ SYSTEM TASK PRIORITIZATION ══")
-    print(f"Context : {result.get('context')} - {result.get('context_description')}")
-    print(f"Bandit  : {result.get('bandit_confidence'):.1%} confidence\n")
+    log.info("\n══ ⚔ SYSTEM TASK PRIORITIZATION ══")
+    log.info(f"Context : {result.get('context')} - {result.get('context_description')}")
+    log.info(f"Bandit  : {result.get('bandit_confidence'):.1%} confidence\n")
 
     for q_key, data in result.get("quadrants", {}).items():
         if not data["tasks"]:
             continue
-        print(f"── {data['icon']} {data['name']} ──")
+        log.info(f"── {data['icon']} {data['name']} ──")
         for t in data["tasks"]:
             bar = "█" * int(t["pull_normalized"] * 20)
-            print(f" [{bar:<20}] {t['title'][:40]} (P={t['P_final']:.4f})")
-    print("\n")
+            log.info(f" [{bar:<20}] {t['title'][:40]} (P={t['P_final']:.4f})")
+    log.info("\n")
 
 
 if __name__ == "__main__":
@@ -785,8 +784,8 @@ if __name__ == "__main__":
                 with open(Setup()._get_file_path("prioritize.json"), "r") as f:
                     ranked = json.load(f).get("all_tasks_ranked", [])
                 ThompsonSampler().record_feedback(title, ranked)
-                print(f"✓ Bandit updated for '{title}'")
+                log.info(f"✓ Bandit updated for '{title}'")
             except Exception as e:
-                print(f"✗ Error updating bandit: {e}")
+                log.info(f"✗ Error updating bandit: {e}")
     else:
         run_prioritization(use_thompson=False)

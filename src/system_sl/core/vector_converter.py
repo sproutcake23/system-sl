@@ -21,8 +21,7 @@ import json
 from system_sl.core.tasks import load_completed_tasks
 from system_sl.utils import get_tasks_file_path
 
-
-logging.basicConfig(level=logging.INFO, format="[user_vector] %(message)s")
+log = logging.getLogger(__name__)
 log = logging.getLogger(__name__)
 
 
@@ -526,7 +525,7 @@ class Fusion:
                 completed_tasks = load_completed_tasks()
 
             except Exception as e:
-                print(f"Error {e}")
+                log.error("Error %s", e)
         else:
             log.info("No completed_tasks.json found — using persona only")
 
@@ -591,9 +590,9 @@ class Fusion:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("\n" + "═" * 60)
-    print("  USER VECTOR BUILDER — Standalone Debug Mode")
-    print("═" * 60)
+    log.info("\n" + "═" * 60)
+    log.info("  USER VECTOR BUILDER — Standalone Debug Mode")
+    log.info("═" * 60)
 
     try:
         helper = Helper()
@@ -604,32 +603,32 @@ if __name__ == "__main__":
         completed = "✓ found" if info["completed_tasks_exists"] else "✗ not found"
         cache = "✓ exists" if info["cache_exists"] else "○ none"
         weights = info["fusion_weights"]
-        print(f"\n  Persona file   : {persona}")
-        print(f"  Completed tasks: {completed}")
-        print(f"  Cache          : {cache}")
-        print(f"  Completed count: {info['completed_task_count']}")
-        print(
+        log.info(f"\n  Persona file   : {persona}")
+        log.info(f"  Completed tasks: {completed}")
+        log.info(f"  Cache          : {cache}")
+        log.info(f"  Completed count: {info['completed_task_count']}")
+        log.info(
             f"  Fusion weights : persona={weights['persona']:.2f}"
             f"  decay={weights['decay']:.2f}"
         )
 
         if not info["persona_exists"]:
-            print("\n  ✗ Cannot build vector — run onboarding first.")
+            log.info("\n  ✗ Cannot build vector — run onboarding first.")
         else:
-            print("\n  Building vector (may take a few seconds on first run)...")
+            log.info("\n  Building vector (may take a few seconds on first run)...")
             vec = fusion_engine.build_user_vector(use_cache=False)
-            print(f"\n  Vector shape : {vec.shape}")
-            print(f"  Vector norm  : {np.linalg.norm(vec):.6f}  (should be ~1.0)")
-            print(f"  Non-zero dims: {np.count_nonzero(vec)}")
-            print(f"  Top 5 values : {sorted(vec, reverse=True)[:5]}")
-            print("\n  ✓ Vector built successfully.")
+            log.info(f"\n  Vector shape : {vec.shape}")
+            log.info(f"  Vector norm  : {np.linalg.norm(vec):.6f}  (should be ~1.0)")
+            log.info(f"  Non-zero dims: {np.count_nonzero(vec)}")
+            log.info(f"  Top 5 values : {sorted(vec, reverse=True)[:5]}")
+            log.info("\n  ✓ Vector built successfully.")
 
     except FileNotFoundError as e:
-        print(f"\n  ✗ {e}")
+        log.info(f"\n  ✗ {e}")
     except RuntimeError as e:
-        print(e)
+        log.error("%s", e)
     except Exception as e:
-        print(f"\n  ✗ Unexpected error: {e}")
+        log.info(f"\n  ✗ Unexpected error: {e}")
         raise
 
 # TODO: IMplement temporal decay maths here and also doing caching for optimization

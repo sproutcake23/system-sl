@@ -885,6 +885,9 @@ def _run_gui_check():
 
 
 def main():
+    from system_sl.utils.logging_setup import configure_logging
+
+    configure_logging()
     if "--check-ocr" in sys.argv:
         _run_ocr_check()
     if "--check-gui" in sys.argv:

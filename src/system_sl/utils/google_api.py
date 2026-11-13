@@ -4,6 +4,7 @@ import json
 import os.path
 import subprocess
 import sys
+import logging
 import threading
 import webbrowser
 from pathlib import Path
@@ -17,6 +18,8 @@ from googleapiclient.discovery import build, Resource
 
 from system_sl.utils import secure_storage
 from system_sl.utils.host_env import host_env
+
+log = logging.getLogger(__name__)
 
 # Release builds ship the app's own OAuth client under this name in the
 # bundled assets. CI writes it from the GOOGLE_OAUTH_CLIENT repository secret;
@@ -130,7 +133,7 @@ class GoogleAPIClient:
             except RefreshError:
                 # The refresh token was revoked or expired. Drop it so the
                 # user gets a fresh sign-in instead of the same error forever.
-                print("Stored Google token is no longer valid — signing in again.")
+                log.info("Stored Google token is no longer valid — signing in again.")
                 secure_storage.delete_secret(secure_storage.SECRET_GOOGLE_TOKEN)
                 creds = None
             else:
@@ -252,7 +255,7 @@ class GoogleAPIClient:
                 )
                 all_tasks.extend(tasks_result.get("items", []))
             except Exception as e:
-                print(f"API Error fetching tasks from list '{task_list.get('title')}': {e}")
+                log.warning(f"API Error fetching tasks from list '{task_list.get('title')}': {e}")
                 continue
 
         return all_tasks

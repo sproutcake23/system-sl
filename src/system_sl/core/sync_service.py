@@ -1,6 +1,7 @@
 """Module for synchronizing external data sources using the Dependency Inversion Principle."""
 
 import datetime
+import logging
 import threading
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
@@ -8,6 +9,8 @@ from typing import Any, Dict, List, Optional
 from system_sl.core.tasks import add_tasks
 from system_sl.utils import GoogleAPIClient
 from system_sl.utils.google_api import GoogleSyncCancelled
+
+log = logging.getLogger(__name__)
 
 SCOPES: List[str] = [
     "https://www.googleapis.com/auth/tasks.readonly",
@@ -100,10 +103,10 @@ class GoogleSyncEngine:
         """Saves an individual task, keyed by its remote id when it has one."""
         try:
             add_tasks(source_type, title, deadline=deadline, source_id=source_id)
-            print(f" [+] Imported [{source_type}]: {title} (Due: {deadline})")
+            log.info(f" [+] Imported [{source_type}]: {title} (Due: {deadline})")
             return 1
         except ValueError:
-            print(f" [x] Skipped (Duplicate): {title}")
+            log.info(f" [x] Skipped (Duplicate): {title}")
             return 0
 
     def execute_sync(self, provider: GoogleProvider, max_results: int = 10) -> tuple[int, int]:
@@ -121,16 +124,16 @@ class GoogleSyncEngine:
         """
         if self.cancel_event.is_set():
             raise GoogleSyncCancelled("Google sync was cancelled.")
-        print(f"Connecting to Google Service for [{provider.source_name}]...")
+        log.info(f"Connecting to Google Service for [{provider.source_name}]...")
         now = datetime.datetime.utcnow()
         six_months_later = now + datetime.timedelta(days=182)
         time_max_iso = six_months_later.isoformat() + "Z"
 
-        print(f"Fetching {provider.source_name} data until {six_months_later.strftime('%Y-%m-%d')}...")
+        log.info(f"Fetching {provider.source_name} data until {six_months_later.strftime('%Y-%m-%d')}...")
         raw_items = provider.fetch_raw_data(time_max_iso, max_results)
 
         if not raw_items:
-            print(f"No upcoming items found for {provider.source_name}.")
+            log.info(f"No upcoming items found for {provider.source_name}.")
             return 0, 0
 
         count = 0
@@ -144,7 +147,7 @@ class GoogleSyncEngine:
                 provider.source_name, title, clean_deadline, source_id
             )
 
-        print(f"\n[{provider.source_name}] Sync complete. {count} items processed.")
+        log.info(f"\n[{provider.source_name}] Sync complete. {count} items processed.")
         return count, len(raw_items) - count
 
 

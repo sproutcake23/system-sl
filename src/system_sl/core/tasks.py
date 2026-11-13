@@ -179,7 +179,7 @@ def add_tasks(
                 if deadline and existing.get("deadline") != deadline:
                     existing["deadline"] = deadline
                     save_tasks(tasks)
-                    print(f"Updated deadline for '{task_title}' to {deadline}")
+                    log.info(f"Updated deadline for '{task_title}' to {deadline}")
                 return task_title
 
         for task in tasks:
@@ -188,7 +188,7 @@ def add_tasks(
                     task["deadline"] = deadline
                     save_tasks(tasks)
 
-                    print(f"Updated deadline for '{task_title}' to {deadline}")
+                    log.info(f"Updated deadline for '{task_title}' to {deadline}")
                     return task_title
 
                 raise ValueError(f"Task '{task_title}' already exists")
@@ -486,4 +486,4 @@ def mark_task_completed(
 
 
 if __name__ == "__main__":
-    print(get_topn_task())
+    log.info("%s", get_topn_task())
