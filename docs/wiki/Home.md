@@ -22,6 +22,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 
 - [Installation](Installation)
 - [Features](Features)
+- [Daily Intel](Daily-Intel)
 - [Google Tasks Sync](Google-Tasks-Sync)
 - [Command-Line Flags](Command-Line-Flags)
 - [Background Service](Background-Service)

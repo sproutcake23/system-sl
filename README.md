@@ -29,6 +29,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 - **Your Choice of Model** — Google Gemini, Ollama, LM Studio, OpenRouter, Groq, Together AI, or any OpenAI-compatible endpoint. Switch models from the chat panel.
 - **Document Attachments** — Attach or drag in a PDF, DOCX, HTML, or text file and review the tasks found in it before they're added. Scanned PDFs are read with OCR.
 - **Google Tasks Sync** — Import your Google Tasks as quests. Opt-in from Settings.
+- **Daily Intel** — A personalized daily briefing from trusted technology and industry feeds, organized by your persona, active quests, and general discovery. Includes explainable relevance, AI or local summaries, feedback controls, and offline caching.
 - **Desktop Reminders** — Notifications drawn by the app as styled Qt popups, with custom notification sounds. They are not OS-native notifications.
 - **Background Reminder** — An hourly notifier that keeps you on track, with its own on/off switch.
 - **Cross-Platform Autostart** — Register the notifier on Linux, Windows, or macOS.
@@ -118,6 +119,7 @@ Full documentation lives in the wiki:
 
 - [Installation](https://github.com/sproutcake23/System-SL/wiki/Installation)
 - [Features](https://github.com/sproutcake23/System-SL/wiki/Features)
+- [Daily Intel](https://github.com/sproutcake23/System-SL/wiki/Daily-Intel)
 - [Google Tasks Sync](https://github.com/sproutcake23/System-SL/wiki/Google-Tasks-Sync)
 - [Command-Line Flags](https://github.com/sproutcake23/System-SL/wiki/Command-Line-Flags)
 - [Background Service](https://github.com/sproutcake23/System-SL/wiki/Background-Service)

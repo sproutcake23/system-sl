@@ -20,6 +20,7 @@ from system_sl.utils.theme_gen import DEFAULT_TOKENS
 ICON_MAP = {
     # Main window left sidebar
     "tasks": "fa6s.list-check",
+    "intel": "fa6s.newspaper",
     "google": "fa6b.google",
     "sound": "fa6s.bell",
     "install": "fa6s.download",
@@ -68,6 +69,15 @@ ICON_MAP = {
     "deselect_all": "fa6s.xmark",
     "confirm_add": "fa6s.check",
     "cancel": "fa6s.xmark",
+
+    # Daily Intel
+    "like": "fa6s.thumbs-up",
+    "dislike": "fa6s.thumbs-down",
+    "save": "fa6s.bookmark",
+    "known": "fa6s.eye",
+    "external_link": "fa6s.arrow-up-right-from-square",
+    "topic": "fa6s.tags",
+    "saved_filter": "fa6s.bookmark",
 
     # General UI
     "chevron_down": "fa6s.chevron-down",
