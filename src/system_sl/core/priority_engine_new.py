@@ -6,7 +6,7 @@
 ║  Features:                                                           ║
 ║  1. No Repetition: Uses Setup() & Fusion() from vector_converter.    ║
 ║  2. Class-Based: Grouped by responsibility (Analyzer, Context, etc). ║
-║  3. Pluggable Strategies: Thompson Sampling can be swapped/removed   ║
+║  3. Pluggable Strategies: the weight optimiser can be swapped        ║
 ║     without breaking the core gravity logic.                         ║
 ║  4. Dev-Friendly: Clean separation of concerns and type hinting.     ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -330,7 +330,13 @@ class ContextEngine:
 
 
 class BaseWeightOptimizer:
-    """Interface for optimization strategies. Pluggable architecture."""
+    """Fixed, equal signal weights.
+
+    A Thompson-sampling optimiser used to sit beside this one, but the
+    ranking never consumed its weights and nothing trained it, so it was
+    removed. A learning optimiser would have to feed ``get_weights()`` into
+    the gravity blend to have any effect.
+    """
 
     def get_confidence(self) -> float:
         return 1.0  # Default to full confidence in context without bandit
@@ -340,88 +346,6 @@ class BaseWeightOptimizer:
 
     def record_feedback(self, task_title: str, ranked_tasks: List[dict]) -> None:
         pass
-
-
-class ThompsonSampler(BaseWeightOptimizer):
-    """Multi-Armed Bandit strategy, opt-in only.
-
-    GravityEngine uses this optimiser's confidence but not the per-signal
-    weights it reports, so feedback would shift timings without actually
-    training the semantic/urgency/momentum mix. Leaving it off is honest;
-    enabling it needs the scoring blend to consume ``get_weights()``.
-    """
-
-    _DEFAULT_STATE = {
-        "semantic_w": {"alpha": 2, "beta": 2},
-        "urgency_w": {"alpha": 2, "beta": 2},
-        "momentum_w": {"alpha": 2, "beta": 2},
-    }
-
-    def __init__(self):
-        self.setup = Setup()
-        self.state_file = Path(self.setup._get_file_path("bandit_state.json"))
-        self.state = self._load_state()
-
-    def _load_state(self) -> dict:
-        if self.state_file.exists():
-            try:
-                with open(self.state_file, "r") as f:
-                    data = json.load(f)
-                return {
-                    k: data.get(k, v.copy()) for k, v in self._DEFAULT_STATE.items()
-                }
-            except Exception:
-                log.debug("could not read the bandit state", exc_info=True)
-        return {k: v.copy() for k, v in self._DEFAULT_STATE.items()}
-
-    def _save_state(self) -> None:
-        atomic_write_json(self.state_file, self.state)
-
-    def get_confidence(self) -> float:
-        total = sum(
-            p["alpha"] + p["beta"] - 4
-            for k, p in self.state.items()
-            if not k.startswith("_")
-        )
-        return min(1.0, max(0.0, total / 30.0))
-
-    def get_weights(self) -> Dict[str, float]:
-        # The posterior mean of each Beta, not a random draw. Thompson
-        # sampling proper would sample, but a task list that reshuffles on
-        # every refresh is unusable, so the estimate has to be stable.
-        raw = {
-            k: p["alpha"] / (p["alpha"] + p["beta"])
-            for k, p in self.state.items()
-            if not k.startswith("_")
-        }
-        total = sum(raw.values())
-        return (
-            {k: round(v / total, 6) for k, v in raw.items()}
-            if total
-            else super().get_weights()
-        )
-
-    def record_feedback(self, task_title: str, ranked_tasks: List[dict]) -> None:
-        rank = next(
-            (
-                i
-                for i, t in enumerate(ranked_tasks)
-                if t.get("title", "").strip().lower() == task_title.strip().lower()
-            ),
-            None,
-        )
-
-        if rank is None:
-            return
-
-        if rank == 0:
-            for key in ["semantic_w", "urgency_w", "momentum_w"]:
-                self.state[key]["alpha"] += 1
-        elif rank >= 2:
-            self.state["urgency_w"]["beta"] += 1
-            self.state["semantic_w"]["alpha"] += 1
-
-        self._save_state()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -458,7 +382,7 @@ class GravityEngine:
         D_eff = D * ctx_profile["D_compress"]
         P_context = (W_eff * I_eff) / (D_eff**2 + epsilon)
 
-        # Strategy Blending (falls back to pure context if Thompson is omitted)
+        # Blend by the optimiser's confidence (always 1.0 with fixed weights)
         conf = self.optimizer.get_confidence()
         P_final = (P_base * (1 - conf)) + (P_context * conf)
 
@@ -503,17 +427,14 @@ class PriorityPipeline:
         },
     }
 
-    def __init__(self, use_thompson_sampling: bool = False):
+    def __init__(self):
         self.setup = Setup()
         self.tasks_file = Path(self.setup._get_file_path("tasks.json"))
         self.output_file = Path(self.setup._get_file_path("prioritize.json"))
 
         self.context_engine = ContextEngine()
 
-        # Pluggable Optimizer Injection
-        self.optimizer = (
-            ThompsonSampler() if use_thompson_sampling else BaseWeightOptimizer()
-        )
+        self.optimizer = BaseWeightOptimizer()
         self.gravity_engine = GravityEngine(self.optimizer)
 
     def _assign_quadrant(self, scores: dict) -> str:
@@ -685,15 +606,8 @@ def save_manual_order(tasks: list) -> None:
         atomic_write_json(file, {"order": order})
 
 
-def run_prioritization(display: bool = True, use_thompson: bool = False) -> dict:
-    """Main application entry point.
-
-    Thompson sampling is off by default. Its posterior weights are reported in
-    the output but the gravity blend only uses its confidence, so feedback
-    changed timings rather than the actual semantic/urgency/momentum mix.
-    Enabling it would imply training that does not happen; see the note on
-    ``ThompsonSampler`` before turning it back on.
-    """
+def run_prioritization(display: bool = True) -> dict:
+    """Rank every task and save the result to ``prioritize.json``."""
     degradation = None
     fusion = Fusion()
 
@@ -723,7 +637,7 @@ def run_prioritization(display: bool = True, use_thompson: bool = False) -> dict
     try:
         # Constructed inside the guard on purpose: the constructor eagerly
         # loads the NLP model and can raise for a broken bundle.
-        pipeline = PriorityPipeline(use_thompson_sampling=use_thompson)
+        pipeline = PriorityPipeline()
         result = pipeline.run(user_vec)
     except Exception as e:
         # A failure inside the pipeline must not propagate into the Qt slot
