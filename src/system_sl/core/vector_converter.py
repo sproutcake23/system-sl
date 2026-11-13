@@ -189,7 +189,7 @@ class Decay_stradegy:
         self._LAMBDA = (
             math.log(2) / self.DECAY_HALF_LIFE_DAYS
         )  # Remembering old days physical chemistry
-        # skip contributions below this (> 86 days old)
+        # With a 3-day half-life, weight 0.05 is reached at about 13 days.
         self._MIN_DECAY_WEIGHT = 0.05
 
     # def _read_completion_entry(self, entry: dict) -> tuple[str, datetime] | None:
@@ -271,7 +271,7 @@ class Decay_stradegy:
         -------
         float  in range (0.0, 1.0]
         1.0 = completed today
-        0.5 = completed 30 days ago
+        0.5 = completed one half-life (3 days) ago
         0.0 → (asymptote, never exactly zero)
         """
         days_since = max(0, (datetime.now() - completion_date).days)
