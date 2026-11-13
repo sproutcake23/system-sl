@@ -145,6 +145,17 @@ def test_stream_turn_reports_usage(tmp_path, monkeypatch):
     for kind, value in session.stream_turn("hello"):
         kinds.append((kind, value))
 
-    assert ("usage", {"input_tokens": 7, "output_tokens": 2, "total_tokens": 9}) in kinds
+    usage = [value for kind, value in kinds if kind == "usage"]
+    assert usage and usage[-1]["input_tokens"] == 7 and usage[-1]["output_tokens"] == 2
+    # The context fill is the latest call's prompt plus what it wrote.
+    assert usage[-1]["context_tokens"] == 9
     assert session.last_usage == TokenUsage(7, 2, 9)
+    assert session.last_context_tokens == 9
     memory_mod.close_checkpointer()
+
+def test_format_context_shows_fill_of_the_window():
+    from system_sl.chatbot.usage import format_context
+
+    assert format_context(12_400, 128_000) == "Context 12.4k / 128k (10%)"
+    assert format_context(900, 32_000, estimated=True) == "Context ~900 / 32k (3%)"
+    assert format_context(0, 128_000) == ""

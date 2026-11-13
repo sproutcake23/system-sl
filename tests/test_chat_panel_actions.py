@@ -342,3 +342,21 @@ def test_alert_bubble_renders(panel):
     widget.transcript.clear()
     widget._append_alert("Something failed")
     assert any("Something failed" in t for t, _ in _blocks(widget))
+
+
+def test_usage_label_shows_context_fill(panel, monkeypatch):
+    from system_sl.chatbot import context_window
+
+    widget, _app = panel
+    monkeypatch.setattr(context_window, "context_window_for_model", lambda _m: 100_000)
+    widget._on_usage(
+        {"input_tokens": 12_000, "output_tokens": 400, "total_tokens": 12_400,
+         "context_tokens": 12_400}
+    )
+    text = widget.usage_label.text()
+    assert text.startswith("Context 12.4k / 100k (12%)")
+    assert "last reply" in text
+
+    # Opening a new chat empties the context.
+    widget._estimate_context([])
+    assert not widget.usage_label.isVisible()

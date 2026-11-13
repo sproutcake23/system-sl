@@ -173,6 +173,21 @@ def _format_count(value: int) -> str:
     return f"{value / 1_000_000:.1f}M".replace(".0M", "M")
 
 
+def format_context(used: int, window: int, estimated: bool = False) -> str:
+    """How full the conversation's context window is, e.g. "Context 12k / 128k (9%)".
+
+    ``used`` is what the model last had to read (the latest prompt plus the
+    reply it wrote), so it grows over the conversation, unlike a single
+    reply's input/output counts. ``estimated`` marks a local approximation
+    (an opened conversation before any reply reported real numbers).
+    """
+    if used <= 0 or window <= 0:
+        return ""
+    percent = min(999, round(used * 100 / window))
+    approx = "~" if estimated else ""
+    return f"Context {approx}{_format_count(used)} / {_format_count(window)} ({percent}%)"
+
+
 def format_usage(usage: Optional[TokenUsage], model_name: str = "") -> str:
     """A short, human-readable line for the transcript."""
     if usage is None or usage.is_empty:

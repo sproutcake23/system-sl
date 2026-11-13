@@ -279,6 +279,7 @@ class ChatSession:
         augmented = _user_text(user_msg)
         formatted_messages = self.wrap_message(augmented, message_id)
         self.last_usage = TokenUsage()
+        self.last_context_tokens = 0
 
         self._prepare_turn()
         set_turn_context(_gate_text(augmented, typed_text), on_proposal)
@@ -346,10 +347,17 @@ class ChatSession:
         augmented = _user_text(user_msg)
         formatted_messages = self.wrap_message(augmented, message_id)
         self.last_usage = TokenUsage()
+        self.last_context_tokens = 0
 
         self._prepare_turn()
         set_turn_context(_gate_text(augmented, typed_text), on_proposal)
         reported: Optional[TokenUsage] = None
+        # Size of the latest model call (its prompt plus what it wrote): how
+        # full the context window is after this turn. A chunk that reports
+        # input tokens starts a call (Anthropic's first chunk, Gemini's first
+        # delta, OpenAI's single usage chunk); output after it adds up.
+        last_prompt = 0
+        last_output = 0
         try:
             for chunk, metadata in self.agent.stream(
                 {"messages": formatted_messages},
@@ -375,7 +383,14 @@ class ChatSession:
                 if not isinstance(chunk, AIMessageChunk):
                     continue
 
-                reported = merge_usage(reported, usage_from_message(chunk))
+                chunk_usage = usage_from_message(chunk)
+                reported = merge_usage(reported, chunk_usage)
+                if chunk_usage is not None:
+                    if chunk_usage.input_tokens:
+                        last_prompt = chunk_usage.input_tokens
+                        last_output = chunk_usage.output_tokens
+                    else:
+                        last_output += chunk_usage.output_tokens
 
                 if on_tool:
                     for call in chunk.tool_call_chunks or []:
@@ -395,7 +410,11 @@ class ChatSession:
 
             if reported is not None:
                 self.last_usage = reported
-                yield "usage", reported.as_dict()
+                usage = reported.as_dict()
+                if last_prompt:
+                    self.last_context_tokens = last_prompt + last_output
+                    usage["context_tokens"] = self.last_context_tokens
+                yield "usage", usage
         finally:
             clear_turn_context()
 
