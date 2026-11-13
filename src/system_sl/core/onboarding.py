@@ -10,6 +10,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List
 
+from system_sl.utils.atomic_json import atomic_write_json
+
 
 # =====================================================================
 # 0. SHARED CONFIGURATION (single source of truth for both frontends)
@@ -209,8 +211,8 @@ class PersonaStorageHandler:
             "statistics": statistics,
         }
 
-        with open(self.persona_file, "w") as file_pointer:
-            json.dump(persona_data, file_pointer, indent=2)
+        # Atomic, so a crash mid-save can't leave a truncated profile behind.
+        atomic_write_json(self.persona_file, persona_data)
 
         # A profile rewrite must take effect immediately rather than leaving a
         # semantic vector calculated from the previous answers in place.

@@ -94,3 +94,24 @@ def test_saved_answers_stop_at_the_first_gap(tmp_path):
 
     handler.persona_file.write_text("{broken")
     assert handler.load_saved_responses(ONBOARDING_QUESTIONS) == []
+
+
+def test_a_failed_profile_save_keeps_the_old_profile(tmp_path, monkeypatch):
+    import pytest
+
+    import system_sl.utils.atomic_json as atomic_json
+    from system_sl.core.onboarding import PersonaStorageHandler
+
+    handler = PersonaStorageHandler()
+    handler.data_dir = tmp_path
+    handler.persona_file = tmp_path / "persona.json"
+    handler.persona_file.write_text('{"responses": ["old"]}')
+
+    def crash(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(atomic_json.os, "fsync", crash)
+    with pytest.raises(OSError):
+        handler.write_persona_profile([{"answer": "new"}], {})
+
+    assert json.loads(handler.persona_file.read_text()) == {"responses": ["old"]}
