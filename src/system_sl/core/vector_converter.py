@@ -452,7 +452,7 @@ class Helper:
                     cache = json.load(f)
                 info["built_at"] = cache.get("built_at")
             except Exception:
-                pass
+                log.debug("could not read the vector cache", exc_info=True)
 
         if self.persona_path.exists():
             try:
@@ -467,7 +467,7 @@ class Helper:
                     for r in persona.get("responses", [])
                 ]
             except Exception:
-                pass
+                log.debug("could not read persona.json", exc_info=True)
 
         if self.completed_path.exists():
             try:
@@ -480,7 +480,7 @@ class Helper:
                 pw, dw = decay_strategy._build_fusion_weights(count, 1.0)
                 info["fusion_weights"] = {"persona": pw, "decay": dw}
             except Exception:
-                pass
+                log.debug("could not read completed_tasks.json", exc_info=True)
 
         return info
 

@@ -371,7 +371,7 @@ class ThompsonSampler(BaseWeightOptimizer):
                     k: data.get(k, v.copy()) for k, v in self._DEFAULT_STATE.items()
                 }
             except Exception:
-                pass
+                log.debug("could not read the bandit state", exc_info=True)
         return {k: v.copy() for k, v in self._DEFAULT_STATE.items()}
 
     def _save_state(self) -> None:
