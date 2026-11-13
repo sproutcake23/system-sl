@@ -24,9 +24,7 @@ from typing import Optional, Dict, List
 
 # ── Import Shared Dependencies to avoid repetition ──────────────────────
 from system_sl.core.vector_converter import Setup, Fusion
-from system_sl.utils.atomic_json import atomic_write_json, safe_load_json
-from system_sl.utils.paths import get_tasks_file_path
-from system_sl.utils.file_lock import file_lock
+from system_sl.utils.atomic_json import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -540,7 +538,7 @@ class PriorityPipeline:
             return self._empty_result(f"Parse error: {e}")
 
         if not all_tasks:
-            save_manual_order(all_tasks)
+            save_ranked_order(all_tasks)
             return self._empty_result("No tasks found")
         
         # Context & Strategy
@@ -581,16 +579,10 @@ class PriorityPipeline:
         # Sort & Map
         scored_tasks.sort(key=lambda t: t["P_final"], reverse=True)
 
-        # The player's own drag order wins over the score. This is what
-        # "reordering is applied to the ranking" means: the manual order is
-        # read back and used to sort the ranked list.
-        manual = load_manual_order()
-        if manual:
-            pos = {key: i for i, key in enumerate(manual)}
-            # Order files written before ids existed hold titles.
-            scored_tasks.sort(
-                key=lambda t: pos.get(t.get("id"), pos.get(t.get("title", ""), -1))
-            )
+        # The player's drag order wins over the score for the tasks they
+        # dragged. Only the drag order is read back here, never this
+        # function's own previous output, or the first ranking would stick.
+        scored_tasks = apply_manual_order(scored_tasks, load_manual_order())
         task_title = []
         quadrants = {q: [] for q in self.QUADRANTS}
         for task in scored_tasks:
@@ -598,7 +590,7 @@ class PriorityPipeline:
             q = self._assign_quadrant(task)
             task["quadrant"] = q
             quadrants[q].append(task)
-        save_manual_order(task_title)
+        save_ranked_order(task_title)
         # Output payload
         output = {
             "generated_at": datetime.now().isoformat(),
@@ -654,35 +646,52 @@ def empty_ranking(reason: str) -> dict:
 # SECTION 6 — PUBLIC API & CLI
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# NOTE: ADDED TO SAVE THE DRAG ORDER FROM THE USER AND
-def load_manual_order() -> list:
-    """Load manual task order from disk. Returns empty list if missing/corrupt."""
-    file = Path(get_tasks_file_path("task_order.json"))
-    data = safe_load_json(file)
-    if data is None:
-        return []
-    if isinstance(data, dict) and "order" in data:
-        return data["order"]
-    return []
+def apply_manual_order(ranked: list, manual: list) -> list:
+    """Merge the player's drag order into a score-ranked list.
 
-
-# NOTE: Changed and removed the category thing
-def save_manual_order(tasks: list) -> None:
-    """Persist the manual task order atomically under the shared task lock.
-
-    Stable ids are preferred; titles are kept only for order files written
-    before tasks had ids.
+    Tasks in ``manual`` keep their dragged order relative to each other.
+    Every other task (new ones, or ones never dragged) goes in at its score
+    rank, so a new urgent task still appears near the top.
     """
-    order = []
-    for task in tasks:
-        if not isinstance(task, dict):
-            continue
-        key = task.get("id") or task.get("title")
-        if key:
-            order.append(key)
-    file = Path(get_tasks_file_path("task_order.json"))
-    with file_lock(get_tasks_file_path("tasks.lock")):
-        atomic_write_json(file, {"order": order})
+    if not manual:
+        return list(ranked)
+    pos = {key: i for i, key in enumerate(manual)}
+
+    def manual_pos(task):
+        # Order files written before ids existed hold titles.
+        if task.get("id") in pos:
+            return pos[task["id"]]
+        return pos.get(task.get("title", ""))
+
+    dragged = sorted(
+        (t for t in ranked if manual_pos(t) is not None), key=manual_pos
+    )
+    result = list(dragged)
+    for rank, task in enumerate(ranked):
+        if manual_pos(task) is None:
+            result.insert(min(rank, len(result)), task)
+    return result
+
+
+def load_manual_order() -> list:
+    """Return the player's drag order. See core.tasks for the file layout."""
+    from system_sl.core.tasks import load_manual_order as _load
+
+    return _load()
+
+
+def save_manual_order(tasks: list) -> None:
+    """Record an order the player set by dragging."""
+    from system_sl.core.tasks import save_manual_order as _save
+
+    _save(tasks)
+
+
+def save_ranked_order(tasks: list) -> None:
+    """Record the ranking's output without touching the drag order."""
+    from system_sl.core.tasks import save_ranked_order as _save
+
+    _save(tasks)
 
 
 def run_prioritization(display: bool = True, use_thompson: bool = False) -> dict:
