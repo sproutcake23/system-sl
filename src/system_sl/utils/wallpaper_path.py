@@ -70,6 +70,11 @@ def _state(source: str, candidate: Optional[str], extra: str = "", error: Option
     )
 
 
+def state_for_image(path: str, source: str = "manual") -> WallpaperState:
+    """Describe a specific image file as the wallpaper (a manual choice)."""
+    return _state(source, path)
+
+
 def _first_existing_line(output: Optional[str]) -> Optional[str]:
     if not output:
         return None

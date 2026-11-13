@@ -199,3 +199,65 @@ def test_unknown_system_scheme_is_probed_off_the_gui_thread(manager, monkeypatch
 
     assert called == []
     assert started == [1]
+
+
+def test_chosen_wallpaper_is_used_without_detection(manager, tmp_path, monkeypatch):
+    from PIL import Image
+
+    from system_sl.frontend.gui import theme_manager as tm
+
+    image = tmp_path / "pick.png"
+    Image.new("RGB", (4, 4), (200, 30, 30)).save(image)
+    monkeypatch.setattr(tm, "_ProbeThread", None)  # detection must not start
+    started = []
+    monkeypatch.setattr(manager, "_start_extract", lambda state: started.append(state))
+    monkeypatch.setattr(tm, "cached_tokens_for", lambda path: None)
+    seen = []
+    manager.overrideChanged.connect(seen.append)
+
+    manager.set_wallpaper_override(str(image))
+
+    assert manager.wallpaper_override == str(image)
+    assert seen == [str(image)]
+    assert started and started[0].image_path == str(image.resolve())
+    assert started[0].source == "manual"
+
+    # Clearing the choice goes back to detection.
+    probes = []
+    monkeypatch.setattr(manager, "_probe", lambda: probes.append(1))
+    manager.set_wallpaper_override(None)
+    assert manager.wallpaper_override == ""
+    assert probes == [1]
+
+
+def test_refresh_forgets_the_failure_backoff(manager, monkeypatch):
+    from system_sl.utils.wallust_theme import ExtractionResult
+
+    probes = []
+    monkeypatch.setattr(manager, "_probe", lambda: probes.append(1))
+    manager._on_result("fp-1", ExtractionResult(error="boom"))
+    assert manager._retry_timer.isActive()
+
+    manager.refresh_wallpaper()
+
+    assert not manager._retry_timer.isActive()
+    assert manager._failed_fingerprint is None
+    assert probes == [1]
+
+
+def test_preview_follows_the_palette_and_mode(manager):
+    from system_sl.frontend.gui.theme_preview import ThemePreview
+    from system_sl.utils.theme_gen import DEFAULT_TOKENS
+
+    manager._mode = "dark"
+    preview = ThemePreview(manager)
+    assert preview._dynamic_controls.isHidden()
+
+    manager._apply(dict(DEFAULT_TOKENS, sys_color_primary="#123456"))
+    assert preview._swatches["sys_color_primary"].toolTip() == "Accent: #123456"
+
+    manager._mode = "dynamic"
+    manager.modeChanged.emit("dynamic")
+    assert not preview._dynamic_controls.isHidden()
+    assert preview.detected_button.isHidden()  # no chosen wallpaper yet
+    preview.deleteLater()
