@@ -3,13 +3,15 @@ INPUT :
 It takes persona.json and completed_tasks.json
 
 Implements -
-It implements spacy md model and
+SentenceTransformer (all-MiniLM-L6-v2) based semantic vectors.
+spaCy is no longer used or supported.
 
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import math
 import numpy as np
 from datetime import datetime
@@ -23,91 +25,129 @@ from system_sl.utils import get_tasks_file_path
 
 log = logging.getLogger(__name__)
 
+# Model configuration
+SENTENCE_TRANSFORMER_MODEL = "all-MiniLM-L6-v2"
+VECTOR_DIM = 384  # all-MiniLM-L6-v2 dimension
+
+# Directory (inside the PyInstaller bundle) where the model files are shipped.
+BUNDLED_MODEL_DIR = Path("models") / SENTENCE_TRANSFORMER_MODEL
+
+
+def _model_dim(model) -> int:
+    """Return a SentenceTransformer model's embedding dimension.
+
+    ``get_embedding_dimension`` is the current name; older sentence-transformers
+    releases only expose ``get_sentence_embedding_dimension``.
+    """
+    for attr in ("get_embedding_dimension", "get_sentence_embedding_dimension"):
+        getter = getattr(model, attr, None)
+        if getter is not None:
+            return int(getter())
+    return VECTOR_DIM
+
+
+def model_source() -> str:
+    """Return the model path/name SentenceTransformer should load.
+
+    Precedence:
+    1. ``SYSTEM_SL_MINILM_MODEL`` — an explicit local model directory (used by
+       the build and by tests).
+    2. The model shipped inside a frozen build (``sys._MEIPASS/models/...``),
+       so releases work offline.
+    3. The HuggingFace model id, which downloads once and is cached.
+
+    A frozen build that is missing the bundled model falls through to (3) and
+    logs a warning rather than crashing: ranking still works, it just needs
+    network access the first time.
+    """
+    override = os.environ.get("SYSTEM_SL_MINILM_MODEL")
+    if override and Path(override).is_dir():
+        return override
+
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        bundled = Path(bundle_root) / BUNDLED_MODEL_DIR
+        if bundled.is_dir():
+            return str(bundled)
+        log.warning(
+            "Bundled embedding model missing at %s — falling back to the "
+            "HuggingFace id (needs network on first run).",
+            bundled,
+        )
+
+    return SENTENCE_TRANSFORMER_MODEL
+
 
 class Setup:
-    _nlp = None
+    _st_model = None  # SentenceTransformer instance
+
     def __init__(self) -> None:
         pass  # For lazy model loading
 
-    # def _get_config_dir(self) -> Path:
-    #     """
-    #     This is same technique as used in tasks.py.
-    #     Return the persistent config directory for system-sl
-    #     just we need to use
-    #     _get_config_dir
-
-    #     Windows - %APPDATA%/system-sl
-    #     Linux - ~/.config/system-sl
-
-    #     """
-    #     prog = "system-sl"
-    #     if os.name == "nt":
-    #         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    #     else:
-    #         base = Path.home() / ".config"
-
-    #     config_dir = base / prog
-    #     config_dir.mkdir(
-    #         parents=True, exist_ok=True
-    #     )  # works as safety net if the parent floder won't exist it creates otherwise leaves.
-
-    #     return config_dir
-
     def _get_file_path(self, filename: str) -> Path:
         """
-        This is same technique as used in tasks.py.
-        Return the persistent config directory for system-sl
-        just we need to use
-        _get_config_dir
-
-        Windows - %APPDATA%/system-sl
+        Return the persistent config directory for system-sl.
         Linux - ~/.config/system-sl
-
-
         """
         return get_tasks_file_path(filename)
 
-    def _load_spacy_model(self):
+    def get_model(self):
+        """Return the shared SentenceTransformer, loading it on first call.
+
+        all-MiniLM-L6-v2 is the only embedding model the app supports; there is
+        no fallback backend. A missing package is a hard error, because silently
+        ranking without a semantic model would look like the priority engine
+        merely being bad at its job.
         """
-        Load spacy medium model (en_core_web_md) i will not explain why i choose this.
+        if self._st_model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as exc:
+                raise RuntimeError(
+                    "sentence-transformers is required for persona vectors. "
+                    f"Install it with: pip install sentence-transformers ({exc})"
+                ) from exc
 
-        """
-        try:
-            import sys
-            import spacy
+            source = model_source()
+            log.info(
+                "Loading SentenceTransformer from %s (%s)",
+                source,
+                "bundled" if Path(source).is_dir() else "HuggingFace id",
+            )
+            self._st_model = SentenceTransformer(source)
+            log.info(
+                "SentenceTransformer loaded (dim: %d)", _model_dim(self._st_model)
+            )
+        return self._st_model
 
-            if getattr(sys, "frozen", False):
-                bundle_dir = sys._MEIPASS
-                model_pkg = os.path.join(bundle_dir, "en_core_web_md")
-                if os.path.isdir(model_pkg):
-                    for entry in os.listdir(model_pkg):
-                        candidate = os.path.join(model_pkg, entry)
-                        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "config.cfg")):
-                            model = spacy.load(candidate)
-                            break
-                    else:
-                        model = spacy.load("en_core_web_md")
-                else:
-                    model = spacy.load("en_core_web_md")
-            else:
-                model = spacy.load("en_core_web_md")
-            log.info("spacy en_core_web_md is loaded. ")
-            return model
-        except OSError:
-            raise RuntimeError("[System Error] model is not installed — run: python -m spacy download en_core_web_md")
 
-    # _nlp = None for lazy loading
+# Shared, process-wide setup instance.
+_setup_instance = Setup()
 
-    def _get_model(self):
-        """Return the global spacy model, loading it on first call."""
-        if Setup._nlp is None:
-            Setup._nlp = self._load_spacy_model()
-        return Setup._nlp
+
+def get_shared_model():
+    """Return the process-wide shared SentenceTransformer, loading on first use."""
+    return _setup_instance.get_model()
+
+
+def encode(text: str) -> np.ndarray:
+    """Encode ``text`` into a normalized all-MiniLM-L6-v2 vector."""
+    model = _setup_instance.get_model()
+    embedding = model.encode(text, normalize_embeddings=True)
+    return np.asarray(embedding, dtype=np.float32)
+
+
+def get_vector_dim() -> int:
+    """Return the active model's embedding dimension (384 for MiniLM)."""
+    try:
+        return _model_dim(_setup_instance.get_model())
+    except Exception:
+        return VECTOR_DIM
 
 
 class Real_worker:
     def __init__(self) -> None:
-        self.my_setup = Setup()  # created to use the function from setup class
+        self.my_setup = _setup_instance  # use the module-level setup
 
     def _build_persona_blob(self, persona: dict) -> str:
         """
@@ -130,7 +170,7 @@ class Real_worker:
         responses = persona.get("responses", [])
         if not responses:
             raise ValueError(
-                "persona.json has no responsesRun the onboarding questionarrie first"
+                "persona.json has no responses - run the onboarding questionnaire first"
             )
         blob_parts = []
         log.info("Building persona blob from %d responses: ", len(responses))
@@ -154,10 +194,7 @@ class Real_worker:
 
     def _vectorize_blob(self, blob: str) -> np.ndarray:
         """
-        Convert a text blob into a 300-dim spaCy vector.
-
-        spaCy's Doc.vector is the mean of all token vectors in the document.
-        Tokens with no vector entry in the model are silently skipped.
+        Convert a text blob into a normalized all-MiniLM-L6-v2 vector.
 
         Parameters
         ----------
@@ -166,23 +203,16 @@ class Real_worker:
 
         Returns
         -------
-        np.ndarray  shape (300,)
+        np.ndarray  shape (384,)
         """
-
-        nlp = self.my_setup._get_model()
-        doc = nlp(blob)  # NOTE: doc is name of vector
-
-        if not doc.has_vector:
-            log.warning(
-                "Document has no vector - all tokens may be OOV. Returning zeros"
-            )
-            return np.zeros(300, dtype=np.float32)
-        return doc.vector.copy()  # .copy() prevents mutation of spaCy internal state
+        vec = encode(blob)
+        log.info("Vectorized blob | dim=%d", len(vec))
+        return vec
 
 
 class Decay_stradegy:
     def __init__(self) -> None:
-        self.my_setup = Setup()
+        self.my_setup = _setup_instance
 
         self.DECAY_HALF_LIFE_DAYS = 3  # TODO: Try to make a logic so dynamically adjust this for now i setted it for 3.
         self._LAMBDA = (
@@ -213,31 +243,9 @@ class Decay_stradegy:
     #     -------
     #     tuple (title: str, date: datetime) or None if entry is malformed.
     #     """
-    #     # FIXME: Change tasks.py mark_task_completed function to correctly write completed.json
-    #     # NOTE: Also make changes in priortization_engine
-    #
-    #     if not isinstance(entry, dict):
-    #         log.debug("Skipping non-dict entry in completed_tasks.json: %r", entry)
-    #         return None
-    #
-    #     title = entry.get("title", "").strip()
-    #     date_str = entry.get("completed_at", "").strip()
-    #
-    #     if not title:
-    #         log.debug("Skipping entry with the empty title: %r", entry)
-    #         return None
-    #
-    #     if not date_str:
-    #         log.debug("Skipping entry with no completed_at date: %r", entry)
-    #         return None
-    #
-    #     try:
-    #         date = datetime.strptime(date_str, "%Y-%m-%d")
-    #         return title, date
-    #
-    #     except ValueError:
-    #         log.debug("Invalid completed_at date %r in entry %r", date_str, entry)
-    #         return None
+    # FIXME: Change tasks.py mark_task_completed function to correctly write completed.json
+    # NOTE: Also make changes in priortization_engine
+
     def _read_completion_entry(self, entry: dict) -> tuple[str, datetime] | None:
         if not isinstance(entry, dict):
             return None
@@ -281,11 +289,9 @@ class Decay_stradegy:
         Build a purely time-weighted vector from a flat list of completed tasks.
 
 
-        Returns: (decay_vector, task_count, raw_coherence_norm)
+        Returns: (decay_vector, task_count)
         """
-        nlp = self.my_setup._get_model()
-
-        accumulated_vector = np.zeros(300, dtype=np.float64)
+        accumulated_vector = np.zeros(get_vector_dim(), dtype=np.float64)
         total_weight = 0.0
         count = 0
 
@@ -293,7 +299,7 @@ class Decay_stradegy:
             log.warning(
                 "completed_tasks data is not a flat list. Skipping behavioral history."
             )
-            return np.zeros(300, dtype=np.float32), 0, 0.0
+            return np.zeros(get_vector_dim(), dtype=np.float32), 0
 
         for entry in completed_tasks:
             parsed = self._read_completion_entry(entry)
@@ -307,12 +313,8 @@ class Decay_stradegy:
                 log.debug("skipping old tasks %r", title)
                 continue
 
-            doc = nlp(title.lower())
-            if not doc.has_vector:
-                log.debug("  No vector for completed task %r — skipping", title)
-                continue
-
-            accumulated_vector += w * doc.vector.astype(np.float64)
+            vec = encode(title.lower())
+            accumulated_vector += w * vec.astype(np.float64)
             total_weight += w
             count += 1
 
@@ -325,7 +327,7 @@ class Decay_stradegy:
 
         if total_weight == 0:
             log.info("No valid completed tasks found — decay vector is zero")
-            return np.zeros(300, dtype=np.float32), 0
+            return np.zeros(get_vector_dim(), dtype=np.float32), 0
 
         # --- THE NEW COHERENCE MATH ---
         # 1. Get the raw weighted mean
@@ -346,7 +348,7 @@ class Decay_stradegy:
 
         dynamic_midpoint = 30 - (
             20 * coherence
-        )  # ALigned tasks = 10 , non-aligned tasks = 30
+        )  # Aligned tasks = 10 , non-aligned tasks = 30
         x = STEEEPNESS * (decay_task_count - dynamic_midpoint)
         decay_w = MAX_DECAY / (
             1 + math.exp(-x)
@@ -360,7 +362,7 @@ class Decay_stradegy:
 class Caching:
     def __init__(self) -> None:
         # Initialize dependencies ONCE here
-        self.setup = Setup()
+        self.setup = _setup_instance
 
         # Define all file paths ONCE here
         self.persona_path = Path(self.setup._get_file_path("persona.json"))
@@ -397,6 +399,11 @@ class Caching:
                 return None
 
             vector = np.array(cache["vector"], dtype=np.float32)
+            if len(vector) != get_vector_dim() or cache.get("model") != SENTENCE_TRANSFORMER_MODEL:
+                log.info(
+                    "Cache was built with a different model/dimension — rebuilding"
+                )
+                return None
             log.info(
                 "Loaded user vector from cache (built %s)",
                 cache.get("built_at", "unknown"),
@@ -412,6 +419,8 @@ class Caching:
         try:
             cache = {
                 "built_at": datetime.now().isoformat(),
+                "model": SENTENCE_TRANSFORMER_MODEL,
+                "dim": len(vector),
                 "persona_mtime": self._get_file_mtime(self.persona_path),
                 "completed_mtime": self._get_file_mtime(self.completed_path),
                 "vector": vector.tolist(),
@@ -426,7 +435,7 @@ class Caching:
 class Helper:
     def __init__(self):
         # Initialize dependencies ONCE here
-        self.setup = Setup()
+        self.setup = _setup_instance
 
         # Define all file paths ONCE here
         self.persona_path = Path(self.setup._get_file_path("persona.json"))
@@ -443,6 +452,7 @@ class Helper:
             "persona_answers": [],
             "completed_task_count": 0,
             "fusion_weights": {"persona": 1.0, "decay": 0.0},
+            "vector_dim": get_vector_dim(),
         }
 
         if self.cache_path.exists():
@@ -487,7 +497,7 @@ class Helper:
 class Fusion:
     def __init__(self) -> None:
         # Initialize dependencies ONCE here
-        self.setup = Setup()
+        self.setup = _setup_instance
 
         # Define all file paths ONCE here
         self.persona_path = Path(self.setup._get_file_path("persona.json"))
@@ -497,8 +507,9 @@ class Fusion:
 
     def build_user_vector(self, use_cache: bool = True) -> np.ndarray:
         """
-        The main orchestrator: Builds or loads the 300-dim user vector.
+        The main orchestrator: Builds or loads the 384-dim user vector.
         Brings together Real_worker and Decay_stradegy.
+        Uses SentenceTransformer all-MiniLM-L6-v2.
         """
         if not self.persona_path.exists():
             raise FileNotFoundError(
@@ -511,7 +522,7 @@ class Fusion:
             if cached is not None:
                 return cached
 
-        log.info("Building user vector from scratch...")
+        log.info("Building user vector from scratch (dim=%d)...", get_vector_dim())
 
         # Load JSONs
         with open(self.persona_path, "r", encoding="utf-8") as f:
@@ -533,7 +544,11 @@ class Fusion:
         worker = Real_worker()
         blob = worker._build_persona_blob(persona)
         persona_vec = worker._vectorize_blob(blob)
-        log.info("Persona vector built | norm=%.4f", float(np.linalg.norm(persona_vec)))
+        log.info(
+            "Persona vector built | norm=%.4f | dim=%s",
+            float(np.linalg.norm(persona_vec)),
+            len(persona_vec),
+        )
 
         # Phase 2: Temporal Decay Vector
         log.info("─── Phase 2: Temporal Decay Vector ──────────────")
@@ -574,10 +589,12 @@ class Fusion:
             fused = (fused / norm).astype(np.float32)
         else:
             log.error("Fused vector has zero norm — returning zeros.")
-            fused = np.zeros(300, dtype=np.float32)
+            fused = np.zeros(get_vector_dim(), dtype=np.float32)
 
         log.info(
-            "Final vector | norm=%.4f (should be ~1.0)", float(np.linalg.norm(fused))
+            "Final vector | norm=%.4f (should be ~1.0) | dim=%s",
+            float(np.linalg.norm(fused)),
+            len(fused),
         )
 
         self.cache._save_cache(fused)
