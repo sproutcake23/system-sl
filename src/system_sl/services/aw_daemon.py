@@ -183,7 +183,7 @@ def run_activitywatch_daemon(port: int = 5600) -> None:
                     break
                 time.sleep(0.25)
 
-    watcher_bin = _resolve_bin("awatcher")
+    watcher_bin = _resolve_bin("aw-awatcher")
     if watcher_bin:
         procs.append(subprocess.Popen([watcher_bin]))
 
