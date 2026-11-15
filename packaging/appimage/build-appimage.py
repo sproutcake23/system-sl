@@ -17,8 +17,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Lets AppImageUpdate and similar tools find newer releases. appimagetool
-# writes the matching .zsync file next to the AppImage; publish both.
 UPDATE_INFORMATION = (
     "gh-releases-zsync|sproutcake23|system-sl|latest|system-sl-*-x86_64.AppImage.zsync"
 )
@@ -47,13 +45,7 @@ def find_appimagetool(tools_dir: Path) -> Path:
 
 
 def read_version(project_root: Path) -> str:
-    """Return the project version.
-
-    pyproject.toml declares the version dynamically from
-    ``system_sl.__version__``, so it cannot be read from the table. Parse the
-    attribute statically rather than importing the package, which would pull
-    in the whole dependency tree.
-    """
+    """Return the project version."""
     init_module = project_root / "src" / "system_sl" / "__init__.py"
     match = re.search(
         r'^__version__\s*=\s*["\']([^"\']+)["\']',
@@ -85,6 +77,29 @@ def build_bundle(project_root: Path) -> Path:
     return bundle
 
 
+def bundle_activitywatch(project_root: Path, appdir: Path) -> None:
+    """Copy ActivityWatch binaries and the GNOME Wayland extension into AppDir."""
+    aw_assets = project_root / "packaging" / "activitywatch"
+
+    bin_dst = appdir / "usr" / "bin"
+    bin_dst.mkdir(parents=True, exist_ok=True)
+    for binary_name in ("aw-server-rust", "aw-awatcher"):
+        src = aw_assets / "bin" / binary_name
+        if not src.is_file():
+            raise SystemExit(f"Missing required ActivityWatch binary: {src}")
+        dst = bin_dst / binary_name
+        shutil.copy2(src, dst)
+        dst.chmod(0o755)
+
+    ext_uuid = "focused-window-dbus@flexagoon.com"
+    ext_src = aw_assets / "gnome-shell-extensions" / ext_uuid
+    if not (ext_src / "metadata.json").is_file() or not (ext_src / "extension.js").is_file():
+        raise SystemExit(f"Missing GNOME extension files in {ext_src}")
+
+    ext_dst = appdir / "usr" / "share" / "gnome-shell-extensions" / ext_uuid
+    shutil.copytree(ext_src, ext_dst)
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
     version = read_version(project_root)
@@ -107,20 +122,17 @@ def main() -> None:
         app_lib_dir = appdir / "usr" / "lib"
         app_lib_dir.mkdir(parents=True)
 
-        # Copy the bundle, not the Python packaging entry point. The former is
-        # portable; the latter embeds the builder's virtualenv in its shebang.
         shutil.copytree(bundle, app_lib_dir / "system-sl", symlinks=True)
+        bundle_activitywatch(project_root, appdir)
         shutil.copy2(desktop, appdir / "system-sl.desktop")
         shutil.copy2(icon, appdir / "system-sl.svg")
         shutil.copy2(icon_png, appdir / "system-sl.png")
-        # appimagetool used to derive .DirIcon from the desktop file's icon;
-        # since its 2026-10-29 continuous build it requires one up front, and
-        # it must be a PNG: an SVG is flagged as invalid.
         (appdir / ".DirIcon").symlink_to("system-sl.png")
 
         apprun = appdir / "AppRun"
         apprun.write_text(
             "#!/bin/sh\n"
+            "export PATH=\"${APPDIR}/usr/bin:${PATH}\"\n"
             "exec \"${APPDIR}/usr/lib/system-sl/system-sl\" \"$@\"\n"
         )
         apprun.chmod(0o755)
@@ -128,11 +140,7 @@ def main() -> None:
         appimagetool = find_appimagetool(temporary_dir / "tools")
         env = os.environ.copy()
         env["VERSION"] = version
-        # appimagetool is itself an AppImage. Extract-and-run works on CI and
-        # developer machines even when FUSE 2 is unavailable.
         env.setdefault("APPIMAGE_EXTRACT_AND_RUN", "1")
-        # appimagetool writes the .zsync file into its working directory, so
-        # run it from dist/ to keep the .zsync next to the AppImage.
         run_cmd(
             [appimagetool, "-u", UPDATE_INFORMATION, appdir, output],
             cwd=output.parent,

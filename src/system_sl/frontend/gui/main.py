@@ -42,6 +42,11 @@ from system_sl.utils import (
 from system_sl.core import GoogleSyncEngine, TasksProvider
 from system_sl.core.onboarding import PersonaStorageHandler
 from system_sl.services import BackgroundServiceController
+from system_sl.services.aw_daemon import (
+    disable_activitywatch,
+    enable_activitywatch,
+    is_aw_user_enabled,
+)
 from system_sl.utils.audio_manager import (
     play_sound,
     set_sound_setting,
@@ -82,7 +87,6 @@ class _GoogleSyncWorker(QObject):
             imported, skipped = engine.execute_sync(TasksProvider(engine.client))
             self.finished.emit(imported, skipped)
         except GoogleSyncCancelled:
-            # Shutdown or a deliberate cancel: no error dialog.
             return
         except GoogleSyncError as e:
             self.failed.emit(str(e))
@@ -92,8 +96,6 @@ class _GoogleSyncWorker(QObject):
 
 SIDEBAR_BUTTON_SIZE = 34
 SIDEBAR_RAIL_RIGHT_MARGIN = 4
-# Top and bottom match the chat panel, lining the toggle and the Settings button
-# up with its header and input rows.
 SIDEBAR_VERTICAL_MARGIN = 9
 SIDEBAR_SPACING = 10
 SETTINGS_SECTION_GAP = 12
@@ -115,8 +117,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Main Menu")
         self.setMinimumSize(QSize(700, 400))
 
-        # Apply the saved theme before any widget is built, so every window,
-        # dialog and notification starts in the right palette.
         self.settings = QSettings("system-sl", "AppConfig")
         self.theme_manager = get_theme_manager()
         self.theme_manager.start()
@@ -140,7 +140,6 @@ class MainWindow(QMainWindow):
         )
         self.tray_icon = None
         self._setup_tray_icon()
-        # Register callback for secure-storage fallback warning (shows tray toast).
         secure_storage.register_fallback_warning_callback(self._show_fallback_warning)
         self.theme_manager.themeChanged.connect(self._on_theme_changed)
         self.theme_manager.statusChanged.connect(self._on_theme_status)
@@ -178,7 +177,6 @@ class MainWindow(QMainWindow):
         self.settings_button.setIcon(get_icon("settings"))
         self.settings_button.clicked.connect(lambda: self.open_settings())
 
-        # These stay visible in the collapsed rail, reduced to their icons.
         self._sidebar_labels = {}
         for btn in (self.task_button, self.google_button, self.settings_button):
             btn.setFixedHeight(SIDEBAR_BUTTON_SIZE)
@@ -189,9 +187,6 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.task_button)
         left_layout.addWidget(self.google_button)
 
-        # Google sign-in only works for accounts allowed on the OAuth client,
-        # so the sync button stays hidden until the player opts in.
-        # Set after addWidget: re-parenting resets visibility to hidden.
         self.google_button.setVisible(
             self.settings.value("google_sync_enabled", False, type=bool)
         )
@@ -205,8 +200,6 @@ class MainWindow(QMainWindow):
         self.profile_hint.setCursor(Qt.PointingHandCursor)
         self.profile_hint.setWordWrap(True)
         self.profile_hint.setObjectName("profileHint")
-        # A wrapped label in a QVBoxLayout otherwise expands to absorb all
-        # spare vertical space and stretches the whole column.
         self.profile_hint.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
@@ -223,8 +216,6 @@ class MainWindow(QMainWindow):
         # right box — chatbot panel
         from system_sl.frontend.gui.chat_panel import ChatPanel
         self.chat_panel = ChatPanel(self)
-        # A child widget gets no closeEvent when the app quits, so the panel
-        # is told explicitly: it ends a running reply and saves its outcome.
         QApplication.instance().aboutToQuit.connect(self.chat_panel.shutdown)
         self.chat_panel.settings_requested.connect(
             lambda: self.open_settings(AppSettingsDialog.LLM_TAB)
@@ -239,23 +230,11 @@ class MainWindow(QMainWindow):
 
         self._apply_sidebar_state()
 
-        # The reminder used to start unconditionally, so merely opening the
-        # app produced a popup even with autostart off. Start it only when the
-        # user asked for reminders, and never fire at launch: the hourly timer
-        # owns the schedule. (--bg still notifies immediately; that run exists
-        # to deliver the login reminder.)
         if self.notifications_check.isChecked():
             self._start_notifier(notify_now=False)
 
-        # Data-file problems (a damaged config or chat history, say) are
-        # queued wherever they are found. Only the Tasks window used to drain
-        # that queue, after a ranking pass, so most went unmentioned. Check it
-        # here too, on the GUI thread, and explain each one non-modally.
         self._data_issue_monitor = DataIssueMonitor(self)
 
-        # Worker threads (ranking, reminders) must be finished before Python
-        # tears the windows down, or a live QThread is destroyed and the
-        # process aborts.
         QApplication.instance().aboutToQuit.connect(self._shutdown_for_quit)
 
     def _build_general_settings_page(self) -> QWidget:
@@ -280,6 +259,15 @@ class MainWindow(QMainWindow):
         self.sound_button = QPushButton("Notification Sound")
         self.sound_button.setIcon(get_icon("sound"))
         self.sound_button.clicked.connect(self.change_notification_sound)
+
+        self.activitywatch_check = QCheckBox("ActivityWatch Tracking")
+        self.activitywatch_check.setChecked(is_aw_user_enabled())
+        self.activitywatch_check.setToolTip(
+            "Track active window and AFK time locally in the background.\n"
+            "Continues running even when THE SYSTEM window is closed, and starts "
+            "at login until you explicitly turn this off."
+        )
+        self.activitywatch_check.toggled.connect(self._toggle_activitywatch)
 
         # Theme picker: System, Light, Dark or Dynamic.
         self.theme_combo = QComboBox()
@@ -359,6 +347,7 @@ class MainWindow(QMainWindow):
 
         sections = (
             ("Notifications", (self.notifications_check, self.check_box, self.sound_button)),
+            ("ActivityWatch", (self.activitywatch_check,)),
             ("Appearance", (self.theme_combo, self.theme_preview, self.theme_status)),
             ("Player", (self.profile_button,)),
             (
@@ -386,8 +375,6 @@ class MainWindow(QMainWindow):
                 page_layout.addWidget(widget, alignment=Qt.AlignmentFlag.AlignLeft)
         page_layout.addStretch(1)
 
-        # Installing only works from an AppImage; elsewhere it can only fail.
-        # Set after addWidget: re-parenting resets visibility to hidden.
         self.install_desktop_btn.setVisible(bool(os.environ.get("APPIMAGE")))
 
         return page
@@ -408,12 +395,8 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        # QSettings (theme, tray, sync toggle, window state).
         self.settings.clear()
 
-        # JSON settings written by the chat and notification code. A staged
-        # AppImage update is recorded in settings.json too; that is app state,
-        # not a preference, so it survives the reset.
         settings_path = Path(get_tasks_file_path("settings.json"))
         try:
             staged = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -434,7 +417,6 @@ class MainWindow(QMainWindow):
             except OSError:
                 logger.warning("could not keep the staged update", exc_info=True)
 
-        # Secrets stored in the keyring / encrypted fallback.
         for secret in (
             secure_storage.SECRET_LLM_API_KEY,
             secure_storage.SECRET_GOOGLE_TOKEN,
@@ -444,8 +426,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 logger.warning("could not clear %s", secret, exc_info=True)
 
-        # Reflect the defaults without pretending a restart already happened.
         self.notifications_check.setChecked(load_notifications_enabled())
+        self.activitywatch_check.setChecked(is_aw_user_enabled())
         self.auto_update_check.setChecked(load_auto_update_preference())
         self.google_sync_toggle.setChecked(False)
         self.close_to_tray_enabled = False
@@ -470,7 +452,6 @@ class MainWindow(QMainWindow):
         self._settings_window.show_tab(tab)
 
     def _edit_profile_from_settings(self) -> None:
-        # Settings is application-modal, so it has to close for the wizard to be usable.
         self._settings_window.accept()
         self.open_onboarding()
 
@@ -487,12 +468,9 @@ class MainWindow(QMainWindow):
 
         for button, label in self._sidebar_labels.items():
             self._set_sidebar_button_label(button, label)
-            # The theme's horizontal padding leaves no room for a rail icon.
             button.setStyleSheet("padding: 0px;" if collapsed else "")
 
         if collapsed:
-            # The chat panel's own padding also separates the icons from its
-            # content, so match it on the left to keep the gaps either side even.
             left_margin = (
                 SIDEBAR_RAIL_RIGHT_MARGIN
                 + self.chat_panel.layout().contentsMargins().left()
@@ -516,7 +494,6 @@ class MainWindow(QMainWindow):
             self._sidebar.setMaximumWidth(UNCONSTRAINED_WIDTH)
             self._main_layout.setStretch(0, 1)
             self._main_layout.setStretch(1, 3)
-
 
         action = "Expand" if collapsed else "Collapse"
         self.sidebar_toggle.setIcon(
@@ -621,7 +598,7 @@ class MainWindow(QMainWindow):
                 "Secrets stored in fallback encryption (machine-id based). "
                 "Install gnome-keyring/kwallet for real security.",
                 QSystemTrayIcon.MessageIcon.Warning,
-                10000,  # 10 seconds
+                10000,
             )
 
     def closeEvent(self, event):
@@ -635,28 +612,18 @@ class MainWindow(QMainWindow):
             return
         event.accept()
         if not self._allow_exit:
-            # The app disables Qt's last-window auto-quit to support tray mode,
-            # so explicitly quit when the user has opted out of tray behavior.
             QTimer.singleShot(0, QApplication.instance().quit)
 
     def _shutdown_for_quit(self) -> None:
-        """Stop background work so nothing outlives the application."""
+        """Stop UI background work; ActivityWatch (--aw-bg) stays alive independently."""
         self._data_issue_monitor.stop()
-        # Hide first: any remaining wait for a ranking pass then happens with
-        # no window on screen instead of as a frozen one.
         if self.tasks_window is not None:
             self.tasks_window.shutdown()
             self.tasks_window.hide()
         self.hide()
         self._stop_notifier()
-        # Cancel a sign-in waiting on the browser before waiting for workers.
         self._sync_cancel.set()
         shutdown_workers()
-        # The SQLite checkpointer is process-wide and shared with the chat
-        # worker; close it only once that worker has stopped. If the reply
-        # outlived ChatPanel.shutdown's bounded wait, leave it open: process
-        # exit closes the connection, and closing it now would make the
-        # still-running worker fail on a closed database.
         from system_sl.chatbot.memory import close_checkpointer
 
         if self.chat_panel.worker_stopped():
@@ -681,13 +648,10 @@ class MainWindow(QMainWindow):
         self.onboarding_window.show()
 
     def _on_onboarding_closed(self, completed):
-        # Keep no stale reference after either finishing, skipping, or closing
-        # the wizard, so it can be opened again from the main menu.
         if self.onboarding_window is not None:
             self.onboarding_window.deleteLater()
             self.onboarding_window = None
         if completed:
-            # A profile now exists, so drop the urgency-only explanation.
             self._profile_missing = False
             self._update_profile_hint()
 
@@ -724,25 +688,31 @@ class MainWindow(QMainWindow):
     def _toggle_notifications(self, enabled):
         save_notifications_enabled(enabled)
         if enabled:
-            # The user just asked for reminders, so confirm immediately
-            # instead of leaving them waiting an hour for the first tick.
             self._start_notifier(notify_now=True)
         else:
             self._stop_notifier()
 
+    def _toggle_activitywatch(self, enabled: bool) -> None:
+        if enabled:
+            ext_status = enable_activitywatch()
+            if ext_status == "needs_relogin":
+                QMessageBox.information(
+                    self,
+                    "ActivityWatch — GNOME Wayland Setup",
+                    "The Focused Window D-Bus extension has been installed and enabled.\n\n"
+                    "Please log out and back in once so GNOME Shell activates window title tracking.",
+                )
+        else:
+            disable_activitywatch()
+
     def sync_google_tasks(self):
         if self._sync_thread is not None:
-            # A second click while syncing cancels it, so a sign-in the
-            # Player abandoned in the browser doesn't hold the button for the
-            # full sign-in timeout.
             self._sync_cancel.set()
             self.google_button.setEnabled(False)
             self._set_sidebar_button_label(self.google_button, "Cancelling...")
             return
         self._set_sidebar_button_label(self.google_button, "Syncing... (cancel)")
 
-        # An unparented, tracked thread: quitting cannot destroy it mid-sync,
-        # and cancelling the sign-in lets it end promptly (see _shutdown_for_quit).
         self._sync_cancel = threading.Event()
         self._sync_worker = _GoogleSyncWorker(self._sync_cancel)
         self._sync_thread = new_worker_thread(self._sync_worker)
@@ -764,14 +734,12 @@ class MainWindow(QMainWindow):
 
     def _on_google_sync_failed(self, error: str):
         if self._sync_cancel.is_set():
-            return  # the Player cancelled; nothing to report
+            return
         QMessageBox.warning(self, "Google Sync Failed", error)
 
     def _cleanup_google_sync(self):
         self.google_button.setEnabled(True)
         self._set_sidebar_button_label(self.google_button, "Google")
-        # The thread and worker are owned by the worker-thread tracker until
-        # they have really finished; dropping them here is enough.
         self._sync_worker = None
         self._sync_thread = None
 
@@ -801,7 +769,11 @@ class MainWindow(QMainWindow):
                 "It now appears in your applications menu.",
             )
         else:
-            QMessageBox.warning(self, "Failed", "Could not install the app.\nMake sure you're running from the AppImage.")
+            QMessageBox.warning(
+                self,
+                "Failed",
+                "Could not install the app.\nMake sure you're running from the AppImage.",
+            )
 
     def show_about_dialog(self):
         """Show the About dialog with version information."""
@@ -843,49 +815,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Auto Update", message)
 
 
-# # ─── ADD THIS RELOADER CLASS AT THE TOP OF YOUR FILE ──────────────────
-# class DevelopmentAutoReloader(QObject):
-#     """Watches the source file and instantly swaps the process in RAM when you save."""
-#     def __init__(self, app_instance: QApplication):
-#         super().__init__()
-#         self.app = app_instance
-#         self.watcher = QFileSystemWatcher()
-        
-#         # Monitor the absolute path of this main.py file
-#         self.script_path = os.path.abspath(sys.argv[0])
-#         self.watcher.addPath(self.script_path)
-#         self.watcher.fileChanged.connect(self.trigger_hot_reload)
-#         print(f"[RELOADER] Monitoring file for live RAM updates: {self.script_path}")
-
-#     @Slot(str)
-#     def trigger_hot_reload(self, path: str):
-#         print("\n[RELOADER] Change detected! Swapping process in RAM...")
-        
-#         # Cross-platform check for compiled executable deployment vs source development
-#         if getattr(sys, "frozen", False):
-#             # Deployed Mode: The executable spawns itself directly
-#             subprocess.Popen([sys.executable] + sys.argv[1:])
-#         else:
-#             # Development Mode: Python spawns the live script file
-#             subprocess.Popen([sys.executable, self.script_path] + sys.argv[1:])
-        
-#         # Kill this old instance out of memory instantly
-#         self.app.quit()
-#         os._exit(0)
-
 def _finish_check(flag, ok, details):
-    """Report a --check-* result and exit with it.
-
-    Windows release builds have no console, so the workflow reads the report
-    file named after the flag, and the exit code.
-    """
     report = sys.argv[sys.argv.index(flag) + 1:]
     if report:
         with open(report[0], "w", encoding="utf-8") as report_file:
             report_file.write(details + "\n")
     print(details)
     sys.stdout and sys.stdout.flush()
-    # Skip Qt teardown: the check is over, and a crash there would hide its result.
     os._exit(0 if ok else 1)
 
 
@@ -959,7 +895,6 @@ def _run_gui_check():
         if not sounds:
             problems.append("no bundled sounds")
         else:
-            # Longer than check_audio_duration() waits: a cold start is slow.
             player = QMediaPlayer()
             player.setSource(QUrl.fromLocalFile(sounds[0]))
             waited = QElapsedTimer()
@@ -986,6 +921,11 @@ def main():
     from system_sl.utils.logging_setup import configure_logging
 
     configure_logging()
+
+    if "--aw-bg" in sys.argv:
+        from system_sl.frontend.gui.aw_bg_main import main as aw_bg_main
+        return aw_bg_main()
+
     from system_sl.utils.audio_manager import initialize_audio
 
     initialize_audio()
@@ -996,11 +936,6 @@ def main():
     if "--check-theme" in sys.argv:
         _run_theme_check()
 
-    # The background notifier. The frozen binary and the console script reach
-    # this through entry.py, which dispatches before importing the GUI stack.
-    # A direct "python main.py --bg" lands here instead, so it is handled
-    # before the QApplication is created: notifier.main() makes its own, and
-    # a second one aborts with "Please destroy the QApplication singleton".
     if "--bg" in sys.argv:
         from system_sl.frontend.gui.notifier import main as notifier_main
         return notifier_main()
@@ -1014,25 +949,14 @@ def main():
 
     app = QApplication(sys.argv)
 
-    # Initialize icon system (loads FontAwesome fonts)
     initialize_icons()
-
-    # Apply the saved theme (and icon colours) before any window is created.
     get_theme_manager(app).start()
     app.setQuitOnLastWindowClosed(False)
     initialize_application_autostart()
 
-    # reload = DevelopmentAutoReloader(app)
-
-    # Do not copy the API key into os.environ. create_llm() is handed the key
-    # explicitly, and exporting it here froze the key loaded at startup: a key
-    # entered later in the settings dialog was ignored for the rest of the
-    # process and then written back over the stored one.
-    #
-    # The LLM is deliberately not configured here. Task management, ranking and
-    # notifications all work without a provider, so a first-run player is never
-    # blocked by a missing API key. The chat panel prompts for one the first
-    # time a message is sent.
+    gnome_ext_status = "not_needed"
+    if is_aw_user_enabled():
+        gnome_ext_status = enable_activitywatch()
 
     try:
         storage = PersonaStorageHandler()
@@ -1045,6 +969,16 @@ def main():
                 main_window = MainWindow()
                 main_window.show()
                 main_window._check_for_updates()
+                if gnome_ext_status == "needs_relogin":
+                    QTimer.singleShot(
+                        1500,
+                        lambda: QMessageBox.information(
+                            main_window,
+                            "GNOME Wayland Window Tracking",
+                            "ActivityWatch installed the Focused Window D-Bus GNOME extension.\n\n"
+                            "Log out and back in once to activate window title tracking.",
+                        ),
+                    )
 
             onboarding.onboarding_complete.connect(_on_onboarding_done)
             onboarding.show()
@@ -1052,6 +986,16 @@ def main():
             main_window = MainWindow()
             main_window.show()
             main_window._check_for_updates()
+            if gnome_ext_status == "needs_relogin":
+                QTimer.singleShot(
+                    1500,
+                    lambda: QMessageBox.information(
+                        main_window,
+                        "GNOME Wayland Window Tracking",
+                        "ActivityWatch installed the Focused Window D-Bus GNOME extension.\n\n"
+                        "Log out and back in once to activate window title tracking.",
+                    ),
+                )
 
     except Exception:
         import traceback
