@@ -174,18 +174,26 @@ def run_activitywatch_daemon(port: int = 5600) -> None:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+
     if not is_aw_server_alive(port):
         server_bin = _resolve_bin("aw-server-rust")
         if server_bin:
             procs.append(subprocess.Popen([server_bin, "--port", str(port)]))
-            for _ in range(24):
+            for _ in range(96):
                 if is_aw_server_alive(port):
                     break
                 time.sleep(0.25)
 
-    watcher_bin = _resolve_bin("aw-awatcher")
-    if watcher_bin:
-        procs.append(subprocess.Popen([watcher_bin]))
+    # Verify the server is actually reachable (either pre-existing or newly started)
+
+    if is_aw_server_alive(port):
+        watcher_bin = _resolve_bin("aw-awatcher")
+        if watcher_bin:
+            procs.append(subprocess.Popen([watcher_bin]))
+    else:
+        log.error("ActivityWatch server did not start on port %d; skipping aw-awatcher.", port)
+        shutdown()
+
 
     # Supervise children and respect explicit user shutoff
     while True:
