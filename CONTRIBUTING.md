@@ -14,18 +14,20 @@ System-SL
 ├── README.md             # User-facing documentation
 ├── CONTRIBUTING.md       # Developer documentation
 ├── docs/wiki/            # Wiki pages (copied to the GitHub wiki by hand)
+├── tests/                # Test suite (pytest, no network)
 ├── .github/workflows/    # ci.yml: lint + tests on every PR; release.yml: the Linux and Windows build
 ├── packaging/            # PyInstaller spec, AppImage and Windows installer packaging
 │
 └── src/system_sl/        # The package; imports are system_sl.*
     ├── core/             # Tasks, onboarding, priority engine, vector fusion, Google sync
     ├── chatbot/          # LLM providers, config, chat tools and document reading
+    ├── intel/            # Daily Intel: feeds, scoring, summaries, storage, briefing service
     ├── frontend/gui/     # PySide6 desktop app
     │   ├── entry.py      #   `system-sl` command: runs notifier.py for --bg, else main.py
     │   ├── main.py       #   Main window
     │   ├── notifier.py   #   Lightweight background notifier (--bg)
     │   └── ...           #   Chat panel, settings, popups, icons, theming
-    ├── services/         # Background notification controller
+    ├── services/         # Background notification controller and Daily Intel scheduler
     ├── utils/            # Paths, autostart, audio, notifications, auto-updater, build,
     │                     # theming, secure storage, Google API, install/cleanup
     └── assets/           # Sounds, GIFs, icons, .desktop files
@@ -58,8 +60,11 @@ CI (`.github/workflows/ci.yml`) runs ruff and the test suite on every pull reque
 ```bash
 uvx ruff check src tests
 QT_QPA_PLATFORM=offscreen uv run --extra test pytest -q
+uv run python -m compileall src/
 uv build --wheel --offline     # metadata and packaging still valid
 ```
+
+The Daily Intel tests cover feed parsing and deduplication, storage, scoring, and the briefing scenarios with fake feeds and summaries. Add or update tests when changing that feature.
 
 For anything behavioural, build and launch the app. Several bugs have only shown up in the frozen build:
 

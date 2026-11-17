@@ -30,6 +30,7 @@ SL is a personal progression system inspired by Solo Leveling. You define your d
 - **Document Attachments** — Attach or drag in a PDF, DOCX, HTML, or text file and review the tasks found in it before they're added. Scanned PDFs are read with OCR.
 - **Google Tasks Sync** — Import your Google Tasks as quests. Opt-in from Settings.
 - **Desktop Reminders** — Toast popups drawn by the app in the System's style (not OS-native notifications), with custom notification sounds.
+- **Daily Intel** — A personalized daily briefing from trusted technology and industry feeds, organized by your persona, active quests, and general discovery. Includes explainable relevance, AI or local summaries, feedback controls, and offline caching.
 - **Background Reminder** — An hourly notifier that keeps you on track, with its own on/off switch.
 - **Cross-Platform Autostart** — Register the notifier on Linux, Windows, or macOS.
 - **Themes** — Follow the system’s light/dark appearance, choose Light, pick a darker near-black Dark palette, or generate colors from your wallpaper.
@@ -70,6 +71,7 @@ uv run build-sl
 
 - [Installation](Installation)
 - [Features](Features)
+- [Daily Intel](Daily-Intel)
 - [Google Tasks Sync](Google-Tasks-Sync)
 - [Command-Line Flags](Command-Line-Flags)
 - [Background Service](Background-Service)

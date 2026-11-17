@@ -626,6 +626,141 @@ QMenu::item:selected {{
     color: {t['sys_color_text_highlight']};
 }}
 
+/* --- Daily Intel --- */
+QLabel#intelHeading {{
+    color: {t['sys_color_primary']};
+    font-size: 22px;
+    font-weight: bold;
+}}
+
+QLabel#intelDate {{
+    color: {t['sys_color_text_secondary']};
+    font-size: 12px;
+}}
+
+QLabel#intelMeta {{
+    color: {t['sys_color_text_muted']};
+    font-size: 11px;
+}}
+
+QLabel#intelSection {{
+    color: {t['sys_color_primary']};
+    font-size: 15px;
+    font-weight: bold;
+}}
+
+QLabel#intelSectionSub {{
+    color: {t['sys_color_text_muted']};
+    font-size: 11px;
+}}
+
+QFrame#intelCard {{
+    background-color: {t['sys_color_surface_raised']};
+    border: 1px solid {t['sys_color_border']};
+}}
+
+QFrame#intelCard:hover {{
+    border: 1px solid {t['sys_color_primary_dim']};
+}}
+
+QLabel#intelTitle {{
+    color: {t['sys_color_text_main']};
+    font-size: 15px;
+    font-weight: bold;
+}}
+
+QLabel#intelBadge {{
+    color: {t['sys_color_button_text']};
+    background-color: {t['sys_color_primary_dim']};
+    border: 1px solid {t['sys_color_border']};
+    font-size: 10px;
+    font-weight: bold;
+    padding: 2px 6px;
+}}
+
+QLabel#intelRelevance {{
+    color: {t['sys_color_text_highlight']};
+    font-size: 11px;
+    font-weight: bold;
+}}
+
+QLabel#intelKicker {{
+    color: {t['sys_color_text_muted']};
+    font-size: 10px;
+    font-weight: bold;
+}}
+
+QLabel#intelBody {{
+    color: {t['sys_color_text_secondary']};
+    font-size: 12px;
+}}
+
+QLabel#intelWhy {{
+    color: {t['sys_color_text_main']};
+    font-size: 12px;
+}}
+
+QLabel#intelReason {{
+    color: {t['sys_color_text_muted']};
+    font-size: 10px;
+}}
+
+QLabel#intelWarning {{
+    color: {t['sys_color_alert']};
+    font-size: 11px;
+}}
+
+QFrame#intelSuggestion {{
+    background-color: {t['sys_color_primary_dim']};
+    border-left: 2px solid {t['sys_color_primary']};
+}}
+
+QLabel#intelSuggestionText {{
+    color: {t['sys_color_text_secondary']};
+    font-size: 11px;
+}}
+
+QLabel#intelState {{
+    color: {t['sys_color_text_secondary']};
+    font-size: 13px;
+}}
+
+QPushButton#intelChip {{
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: normal;
+    background-color: transparent;
+}}
+
+QPushButton#intelChip:checked {{
+    background-color: {t['sys_color_primary_pressed']};
+    color: {t['sys_color_text_highlight']};
+    border: 1px solid {t['sys_color_primary']};
+}}
+
+QPushButton#intelAction {{
+    padding: 4px 8px;
+    font-size: 11px;
+    font-weight: normal;
+}}
+
+QPushButton#intelAction:checked {{
+    background-color: {t['sys_color_primary_pressed']};
+    color: {t['sys_color_text_highlight']};
+    border: 1px solid {t['sys_color_primary']};
+}}
+
+QProgressBar#intelProgress {{
+    border: 1px solid {t['sys_color_border']};
+    background-color: {t['sys_color_surface_raised']};
+    height: 4px;
+    text-align: center;
+}}
+
+QProgressBar#intelProgress::chunk {{
+    background-color: {t['sys_color_primary']};
+}}
+
 /* --- Tooltips --- */
 QToolTip {{
     background-color: {t['sys_color_surface_raised']};

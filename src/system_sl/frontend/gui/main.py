@@ -41,7 +41,8 @@ from system_sl.utils import (
 )
 from system_sl.core import GoogleSyncEngine, TasksProvider
 from system_sl.core.onboarding import PersonaStorageHandler
-from system_sl.services import BackgroundServiceController
+from system_sl.intel import get_intel_service
+from system_sl.services import BackgroundServiceController, DailyIntelScheduler
 from system_sl.utils.audio_manager import (
     play_sound,
     set_sound_setting,
@@ -127,6 +128,9 @@ class MainWindow(QMainWindow):
         self.notifier_controller = None
         self.tasks_window = None
         self.onboarding_window = None
+        self.intel_window = None
+        self.intel_scheduler = None
+        self.intel_service = get_intel_service()
         self.update_thread = None
         self._sync_thread = None
         self._sync_worker = None
@@ -170,6 +174,10 @@ class MainWindow(QMainWindow):
         self.task_button.setIcon(get_icon("tasks"))
         self.task_button.clicked.connect(self.open_tasks_window)
 
+        self.intel_button = QPushButton("Daily Intel")
+        self.intel_button.setIcon(get_icon("intel"))
+        self.intel_button.clicked.connect(self.open_intel_window)
+
         self.google_button = QPushButton("Google")
         self.google_button.setIcon(get_icon("google"))
         self.google_button.clicked.connect(self.sync_google_tasks)
@@ -180,13 +188,14 @@ class MainWindow(QMainWindow):
 
         # These stay visible in the collapsed rail, reduced to their icons.
         self._sidebar_labels = {}
-        for btn in (self.task_button, self.google_button, self.settings_button):
+        for btn in (self.task_button, self.intel_button, self.google_button, self.settings_button):
             btn.setFixedHeight(SIDEBAR_BUTTON_SIZE)
             btn.setCursor(Qt.PointingHandCursor)
             self._sidebar_labels[btn] = btn.text()
             btn.setAccessibleName(btn.text())
 
         left_layout.addWidget(self.task_button)
+        left_layout.addWidget(self.intel_button)
         left_layout.addWidget(self.google_button)
 
         # Google sign-in only works for accounts allowed on the OAuth client,
@@ -238,6 +247,13 @@ class MainWindow(QMainWindow):
         self._settings_window = None
 
         self._apply_sidebar_state()
+
+        # Daily Intel prepares at most one briefing per local day. The timer
+        # lives in the GUI process, so a long-running session rolls over to a
+        # new day without needing a restart.
+        self.intel_scheduler = DailyIntelScheduler(self.intel_service, self)
+        self.intel_scheduler.briefingReady.connect(self._on_intel_briefing_ready)
+        QTimer.singleShot(10000, self.intel_scheduler.check)
 
         # The reminder used to start unconditionally, so merely opening the
         # app produced a popup even with autostart off. Start it only when the
@@ -353,6 +369,28 @@ class MainWindow(QMainWindow):
         self.reset_settings_btn.setIcon(get_icon("refresh"))
         self.reset_settings_btn.clicked.connect(self._reset_all_settings)
 
+        self.intel_enabled_check = QCheckBox("Daily Intel")
+        self.intel_enabled_check.setToolTip(
+            "Build a daily briefing from trusted technology and industry feeds.\n"
+            "Works without a persona or active quests."
+        )
+        self.intel_enabled_check.setChecked(
+            bool(self.intel_service.get_config().get("enabled", True))
+        )
+        self.intel_enabled_check.toggled.connect(self._toggle_daily_intel)
+
+        self.intel_open_button = QPushButton("Open Daily Intel")
+        self.intel_open_button.setIcon(get_icon("intel"))
+        self.intel_open_button.clicked.connect(self.open_intel_window)
+
+        self.intel_preferences_button = QPushButton("Daily Intel Sources & Topics")
+        self.intel_preferences_button.setIcon(get_icon("settings"))
+        self.intel_preferences_button.clicked.connect(self._open_intel_preferences)
+
+        self.intel_reset_button = QPushButton("Reset News Preferences")
+        self.intel_reset_button.setIcon(get_icon("remove_task"))
+        self.intel_reset_button.clicked.connect(self._reset_news_preferences)
+
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setSpacing(SIDEBAR_SPACING)
@@ -360,6 +398,15 @@ class MainWindow(QMainWindow):
         sections = (
             ("Notifications", (self.notifications_check, self.check_box, self.sound_button)),
             ("Appearance", (self.theme_combo, self.theme_preview, self.theme_status)),
+            (
+                "Daily Intel",
+                (
+                    self.intel_enabled_check,
+                    self.intel_open_button,
+                    self.intel_preferences_button,
+                    self.intel_reset_button,
+                ),
+            ),
             ("Player", (self.profile_button,)),
             (
                 "App",
@@ -560,6 +607,8 @@ class MainWindow(QMainWindow):
             chat.refresh_theme(tokens)
         if self.onboarding_window is not None:
             self.onboarding_window.refresh_theme(tokens)
+        if self.intel_window is not None:
+            self.intel_window.refresh_theme(tokens)
 
     def _on_theme_status(self, message: str) -> None:
         self._theme_status_text = message
@@ -601,8 +650,15 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def _shutdown_intel(self) -> None:
+        if self.intel_scheduler is not None:
+            self.intel_scheduler.stop()
+        if self.intel_window is not None:
+            self.intel_window.shutdown(wait_ms=12000)
+
     def _exit_from_tray(self):
         self._allow_exit = True
+        self._shutdown_intel()
         self.tray_icon.hide()
         QApplication.instance().quit()
 
@@ -635,6 +691,7 @@ class MainWindow(QMainWindow):
             return
         event.accept()
         if not self._allow_exit:
+            self._shutdown_intel()
             # The app disables Qt's last-window auto-quit to support tray mode,
             # so explicitly quit when the user has opted out of tray behavior.
             QTimer.singleShot(0, QApplication.instance().quit)
@@ -690,6 +747,69 @@ class MainWindow(QMainWindow):
             # A profile now exists, so drop the urgency-only explanation.
             self._profile_missing = False
             self._update_profile_hint()
+
+    def open_intel_window(self):
+        """Open the daily briefing, creating it on first use."""
+        from system_sl.frontend.gui.intel_window import DailyIntelWindow
+
+        if self.intel_window is None:
+            self.intel_window = DailyIntelWindow(self.intel_service)
+            self.intel_window.persona_requested.connect(self.open_onboarding)
+            self.intel_window.tasks_requested.connect(self.open_tasks_window)
+            self.intel_window.settings_requested.connect(lambda: self.open_settings())
+            self.intel_window.enabled_changed.connect(self._sync_intel_enabled_check)
+        self.intel_window.show()
+        self.intel_window.raise_()
+        self.intel_window.activateWindow()
+
+    def _on_intel_briefing_ready(self, briefing):
+        if self.intel_window is not None:
+            self.intel_window.handle_background_briefing(briefing)
+
+    def _toggle_daily_intel(self, enabled: bool) -> None:
+        self.intel_service.set_enabled(enabled)
+        if enabled:
+            if self.intel_scheduler is not None:
+                self.intel_scheduler.check()
+            if self.intel_window is not None:
+                self.intel_window.reload()
+        elif self.intel_window is not None:
+            self.intel_window.reload()
+
+    def _sync_intel_enabled_check(self, enabled: bool) -> None:
+        check = getattr(self, "intel_enabled_check", None)
+        if check is None:
+            return
+        check.blockSignals(True)
+        check.setChecked(bool(enabled))
+        check.blockSignals(False)
+
+    def _open_intel_preferences(self) -> None:
+        from system_sl.frontend.gui.intel_window import IntelPreferencesDialog
+
+        dialog = IntelPreferencesDialog(self.intel_service, self)
+        if dialog.exec():
+            self._sync_intel_enabled_check(
+                bool(self.intel_service.get_config().get("enabled", True))
+            )
+            if self.intel_window is not None:
+                self.intel_window.reload()
+
+    def _reset_news_preferences(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Reset News Preferences",
+            "Clear Daily Intel likes, dislikes, saved articles and topic choices?\n"
+            "Your Player Profile and quests will not be changed.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.intel_service.reset_preferences()
+        if self.intel_window is not None:
+            self.intel_window.reload()
+        QMessageBox.information(self, "Daily Intel", "News preferences have been reset.")
 
     def notification_autostart(self):
         self.autostart.toggle()
