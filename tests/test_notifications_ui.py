@@ -1,4 +1,4 @@
-"""The reminder is a small toast that does not steal focus."""
+"""The reminder is a centred window that stays until the player dismisses it."""
 
 import os
 
@@ -9,21 +9,29 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from system_sl.utils import notifications_ui  # noqa: E402
 
 
-def test_toast_adds_each_line_once_and_does_not_activate():
+def test_notification_is_the_centred_window_with_a_dismiss_button():
     app = QApplication.instance() or QApplication([])
     notifications_ui.play_sound = lambda *a, **k: None
+    notifications_ui.get_current_sound = lambda *a, **k: "dummy.wav"
 
-    toast = notifications_ui.SystemNotification()
-    toast.display_message(["First task", "Second task"])
+    window = notifications_ui.SystemNotification()
+    window.display_message(["First task", "Second task"])
 
-    assert toast.content_layout.count() == 2
-    assert toast.windowFlags() & notifications_ui.Qt.WindowType.WindowDoesNotAcceptFocus
-    assert not toast.isActiveWindow()
-    # It must not be the old 800x500 centred window.
-    assert toast.width() <= 500
-    assert toast.height() <= 300
+    # The old window, not the corner toast.
+    assert window.width() == 800
+    assert window.height() == 500
+    assert window.header_text.text() == "NOTIFICATION"
+    assert window.dismiss_btn.text() == "DISMISS"
+    assert window.dismiss_btn.isVisible()
+    # It stays open until dismissed: no auto-dismiss timer.
+    assert not hasattr(window, "_auto_dismiss")
 
-    toast.display_message(["First task", "Second task"])
-    assert toast.content_layout.count() == 2  # rebuilt, not appended twice
-    toast.close()
+    # It never takes focus away from what the player is doing.
+    assert window.windowFlags() & notifications_ui.Qt.WindowType.WindowDoesNotAcceptFocus
+    assert not window.isActiveWindow()
+
+    assert window.content_layout.count() == 2
+    window.display_message(["First task", "Second task"])
+    assert window.content_layout.count() == 2  # rebuilt, not appended twice
+    window.close()
     app.processEvents()
