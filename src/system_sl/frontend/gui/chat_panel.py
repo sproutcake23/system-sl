@@ -3388,7 +3388,7 @@ class ChatPanel(QWidget):
                 errors.append(f"{title}: could not save: {e}")
                 failed_tasks.append((title, category))
 
-        # No re-ranking here: it is slow (spaCy, spell checking) and would
+        # No re-ranking here: it is slow (the embedding model, spell checking) and would
         # freeze the chat. The Tasks window ranks off the GUI thread when it
         # refreshes, as it does for a single confirmed task.
 

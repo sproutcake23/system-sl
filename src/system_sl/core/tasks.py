@@ -4,6 +4,7 @@ import random
 import uuid
 from datetime import datetime
 
+from system_sl.core.ranking_config import DEFAULT_IMPORTANCE
 from system_sl.utils import get_tasks_file_path
 from system_sl.utils import load_data, save_data
 from system_sl.utils.atomic_json import LoadStatus
@@ -60,19 +61,76 @@ def _new_task_id() -> str:
     return uuid.uuid4().hex
 
 
+# Optional prioritisation fields. A task missing any of them predates the
+# importance schema and is filled in by the read migration below.
+_IMPORTANCE_SOURCES = ("user", "suggested", "default")
+_SCHEMA_DEFAULTS = {
+    "importance": DEFAULT_IMPORTANCE,
+    "importance_source": "default",
+    "matched_goal": None,
+    "effort_minutes": None,
+}
+
+
+def _clean_importance(importance) -> int:
+    """Return a whole importance in 1..5, rejecting other types outright."""
+    if isinstance(importance, bool) or not isinstance(importance, int):
+        raise ValueError("importance must be an integer from 1 to 5")
+    return max(1, min(5, importance))
+
+
+def _clean_importance_source(source) -> str:
+    if not isinstance(source, str) or source not in _IMPORTANCE_SOURCES:
+        raise ValueError(
+            "importance_source must be 'user', 'suggested' or 'default'"
+        )
+    return source
+
+
+def _clean_matched_goal(matched_goal):
+    if matched_goal is not None and not isinstance(matched_goal, str):
+        raise ValueError("matched_goal must be a string or None")
+    return matched_goal
+
+
+def _clean_effort_minutes(effort_minutes):
+    """Return a positive whole number of minutes, or None."""
+    if effort_minutes is None:
+        return None
+    if (
+        isinstance(effort_minutes, bool)
+        or not isinstance(effort_minutes, int)
+        or effort_minutes <= 0
+    ):
+        raise ValueError("effort_minutes must be a positive integer or None")
+    return effort_minutes
+
+
 def _needs_migration(tasks: list) -> bool:
-    return any(isinstance(t, dict) and not t.get("id") for t in tasks)
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if not task.get("id"):
+            return True
+        if any(field not in task for field in _SCHEMA_DEFAULTS):
+            return True
+    return False
 
 
 def _migrate_tasks(tasks: list) -> bool:
-    """Give every task an id and undo old HTML escaping. Returns True if changed.
+    """Give every task an id and the optional priority fields.
 
     Tasks stored before ids existed were also stored HTML-escaped, so a task
     without an id is the marker for "unescape this title once". Tasks that
     already have an id hold their literal title ("Fix &amp; bug" stays as
     typed) and are never unescaped again.
+
+    Missing importance fields are added with their defaults. Existing values,
+    including ``source_id``, are never replaced. Returns True only when the
+    list actually changed, so callers can skip writing the file otherwise.
     """
     changed = False
+    structural_changed = False
     renamed: dict[str, str] = {}
     for task in tasks:
         if not isinstance(task, dict):
@@ -80,6 +138,7 @@ def _migrate_tasks(tasks: list) -> bool:
         if not task.get("id"):
             task["id"] = _new_task_id()
             changed = True
+            structural_changed = True
             title = task.get("title")
             if isinstance(title, str):
                 unescaped = html.unescape(title)
@@ -90,7 +149,14 @@ def _migrate_tasks(tasks: list) -> bool:
         if task.get("source_id") and not isinstance(task.get("source_id"), str):
             task["source_id"] = str(task["source_id"])
             changed = True
-    if changed:
+            structural_changed = True
+        for field, default in _SCHEMA_DEFAULTS.items():
+            if field not in task:
+                task[field] = default
+                changed = True
+    # Only the id/title migration has work to do in the side files; adding
+    # schema defaults must not rewrite completed_tasks.json.
+    if structural_changed:
         _migrate_side_files(renamed)
     return changed
 
@@ -217,6 +283,11 @@ def add_tasks(
     task_title: str = "none",
     deadline: str = None,
     source_id: str | None = None,
+    *,
+    importance: int | None = None,
+    importance_source: str | None = None,
+    matched_goal: str | None = None,
+    effort_minutes: int | None = None,
 ):
     """Register a task, or update the deadline of an existing one.
 
@@ -226,6 +297,13 @@ def add_tasks(
         deadline: Optional deadline.
         source_id: Stable id from an external source (Google Tasks). A task
             with the same source id is updated instead of duplicated.
+        importance: Optional 1-5 importance. ``None`` stores
+            ``DEFAULT_IMPORTANCE`` with source ``"default"``.
+        importance_source: ``"user"``, ``"suggested"`` or ``"default"``.
+            Ignored when ``importance`` is ``None``; otherwise it defaults to
+            ``"user"``.
+        matched_goal: Goal text behind a suggested importance.
+        effort_minutes: Optional positive whole number of minutes.
 
     Returns:
         str: The title that was saved.
@@ -234,6 +312,20 @@ def add_tasks(
         raise ValueError("Task title must be a non-empty string")
 
     task_title = sanitize_title(task_title)
+
+    if importance is None:
+        importance_value = DEFAULT_IMPORTANCE
+        source_value = "default"
+        goal_value = None
+    else:
+        importance_value = _clean_importance(importance)
+        source_value = (
+            _clean_importance_source(importance_source)
+            if importance_source is not None
+            else "user"
+        )
+        goal_value = _clean_matched_goal(matched_goal)
+    effort_value = _clean_effort_minutes(effort_minutes)
 
     with file_lock(TASKS_LOCK_PATH):
         _require_readable(TASKS_FILE_PATH)
@@ -278,6 +370,10 @@ def add_tasks(
             "created_at": datetime.now().isoformat(),
             "deadline": deadline,
             "category": task_type,
+            "importance": importance_value,
+            "importance_source": source_value,
+            "matched_goal": goal_value,
+            "effort_minutes": effort_value,
         }
         if source_id:
             new_task["source_id"] = str(source_id)
@@ -512,6 +608,11 @@ def edit_task(
     new_category: str | None = None,
     *,
     task_id: str | None = None,
+    importance: int | None = None,
+    importance_source: str | None = None,
+    matched_goal: str | None = None,
+    effort_minutes: int | None = None,
+    clear_effort: bool = False,
 ) -> str:
     """Edit a task by stable id (preferred) or by title.
 
@@ -519,6 +620,12 @@ def edit_task(
     ``new_category=None`` means "leave the category unchanged"; passing a
     category replaces it. This distinction matters because the edit dialog
     used to send ``None`` for an untouched field and wiped the category.
+
+    The priority fields follow the same rule: ``None`` leaves them unchanged.
+    Importance cannot be cleared, only set to 1-5. ``clear_effort=True`` sets
+    ``effort_minutes`` to ``None`` and wins over a supplied value. A
+    ``matched_goal`` is kept only while ``importance_source`` is
+    ``"suggested"``; moving the source away clears it.
 
     Returns:
         str: The new task title.
@@ -530,6 +637,18 @@ def edit_task(
         raise ValueError("New task title must be a non-empty string")
 
     new_title = sanitize_title(new_title)
+
+    new_importance = None if importance is None else _clean_importance(importance)
+    new_source = (
+        _clean_importance_source(importance_source)
+        if importance_source is not None
+        else None
+    )
+    new_goal = None if matched_goal is None else _clean_matched_goal(matched_goal)
+    set_effort = clear_effort or effort_minutes is not None
+    new_effort = (
+        None if clear_effort else _clean_effort_minutes(effort_minutes)
+    )
 
     with file_lock(TASKS_LOCK_PATH):
         _require_readable(TASKS_FILE_PATH)
@@ -554,6 +673,18 @@ def edit_task(
                 if isinstance(new_category, str)
                 else "none"
             )
+        if new_importance is not None:
+            task["importance"] = new_importance
+        if new_source is not None:
+            task["importance_source"] = new_source
+        if new_goal is not None:
+            task["matched_goal"] = new_goal
+        # A goal only explains a suggested importance; any other source
+        # leaves it meaningless, so clear it rather than keep stale text.
+        if task.get("importance_source") != "suggested":
+            task["matched_goal"] = None
+        if set_effort:
+            task["effort_minutes"] = new_effort
 
         save_tasks(tasks)
         # The order file may still hold the old title; ids are stable.

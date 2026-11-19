@@ -1,3 +1,5 @@
+import logging
+
 from PySide6.QtCore import (
     QDate,
     QObject,
@@ -5,14 +7,17 @@ from PySide6.QtCore import (
     Qt,
     QThread,
     Signal,
+    Slot,
     QTimer,
     QRegularExpression,
 )
 from pathlib import Path
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDateEdit,
     QDialog,
     QDialogButtonBox,
@@ -25,6 +30,9 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QStackedWidget,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -32,9 +40,11 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QMessageBox,
 )
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPalette
 from system_sl.frontend.gui.icons import get_icon
+from system_sl.core.importance import suggest_importance
 from system_sl.core.onboarding import ONBOARDING_QUESTIONS, PersonaStorageHandler
+from system_sl.core.ranking_config import DEFAULT_IMPORTANCE, QUADRANTS
 from system_sl.core.tasks import (
     add_tasks,
     edit_task,
@@ -60,38 +70,217 @@ from system_sl.utils.i18n import tr
 # later. Until then they land in this default bucket.
 DEFAULT_CATEGORY = "general"
 
+log = logging.getLogger(__name__)
+
+_QUADRANT_ORDER = ("Q1", "Q2", "Q3", "Q4")
+
+# Extra item roles. Qt.UserRole holds the stable task id/key.
+_ROW_KIND_ROLE = Qt.UserRole + 1
+_QUADRANT_ROLE = Qt.UserRole + 2
+_REASON_ROLE = Qt.UserRole + 3
+
+_EFFORT_OPTIONS = (
+    ("unknown", None),
+    ("15 minutes", 15),
+    ("30 minutes", 30),
+    ("60 minutes", 60),
+    ("120 minutes", 120),
+    ("240 minutes", 240),
+)
+
+
+def _select_combo_value(combo: QComboBox, value) -> None:
+    index = combo.findData(value)
+    combo.setCurrentIndex(index if index >= 0 else 0)
+
+
+def _make_importance_combo(value) -> QComboBox:
+    combo = QComboBox()
+    for level in range(1, 6):
+        combo.addItem(str(level), level)
+    if not isinstance(value, int) or isinstance(value, bool):
+        value = DEFAULT_IMPORTANCE
+    _select_combo_value(combo, max(1, min(5, value)))
+    return combo
+
+
+def _make_effort_combo(value) -> QComboBox:
+    combo = QComboBox()
+    known = set()
+    for label, minutes in _EFFORT_OPTIONS:
+        combo.addItem(label, minutes)
+        known.add(minutes)
+    # Preserve a stored value the six standard choices cannot represent.
+    if value is not None and value not in known:
+        combo.addItem(f"{value} minutes", value)
+    _select_combo_value(combo, value)
+    return combo
+
+
+class _TaskRowDelegate(QStyledItemDelegate):
+    """Draw a task as a bold title line plus a smaller muted reason line."""
+
+    def paint(self, painter, option, index):
+        if index.data(_ROW_KIND_ROLE) != "task":
+            super().paint(painter, option, index)
+            return
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+        rect = opt.rect.adjusted(10, 4, -10, -4)
+        selected = bool(opt.state & QStyle.State_Selected)
+        title = str(index.data(Qt.DisplayRole) or "")
+        reason = str(index.data(_REASON_ROLE) or "")
+
+        title_font = QFont(opt.font)
+        title_font.setBold(True)
+        title_colour = opt.palette.color(
+            QPalette.HighlightedText if selected else QPalette.Text
+        )
+        painter.save()
+        painter.setFont(title_font)
+        painter.setPen(title_colour)
+        metrics = QFontMetrics(title_font)
+        painter.drawText(rect, Qt.AlignLeft | Qt.AlignTop, title)
+
+        if reason:
+            reason_font = QFont(opt.font)
+            if reason_font.pointSizeF() > 0:
+                reason_font.setPointSizeF(max(7.0, reason_font.pointSizeF() - 1.5))
+            painter.setFont(reason_font)
+            tokens = get_current_theme_tokens()
+            reason_colour = tokens.get(
+                "sys_color_text_muted" if not selected else "sys_color_text_main",
+                "#7a7a7a",
+            )
+            painter.setPen(QColor(reason_colour))
+            reason_rect = rect.adjusted(0, metrics.height(), 0, 0)
+            painter.drawText(reason_rect, Qt.AlignLeft | Qt.AlignTop, reason)
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        if index.data(_ROW_KIND_ROLE) == "task":
+            metrics = QFontMetrics(option.font)
+            size.setHeight(max(size.height(), metrics.height() * 2 + 10))
+        return size
+
+
+class _ImportanceSuggestionWorker(QObject):
+    """Run ``suggest_importance`` away from the GUI thread."""
+
+    finished = Signal(object)  # (title, importance | None, matched_goal | None)
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.title = title
+
+    def run(self) -> None:
+        try:
+            importance, matched_goal, _relevance = suggest_importance(self.title)
+        except Exception:
+            log.debug("importance suggestion failed", exc_info=True)
+            self.finished.emit((self.title, None, None))
+            return
+        self.finished.emit((self.title, importance, matched_goal))
+
+
+class _SuggestionReceiver(QObject):
+    """Queued GUI-thread target for a suggestion worker result."""
+
+    def __init__(self, handler, parent=None):
+        super().__init__(parent)
+        self._handler = handler
+        self.closed = False
+
+    @Slot(object)
+    def on_finished(self, payload) -> None:
+        if self.closed:
+            return
+        title, importance, matched_goal = payload
+        self._handler(title, importance, matched_goal)
+
+
+def _start_importance_suggestion(title: str, receiver: _SuggestionReceiver) -> None:
+    worker = _ImportanceSuggestionWorker(title)
+    thread = new_worker_thread(worker)
+    worker.finished.connect(receiver.on_finished)
+    thread.start()
+
 
 class ReorderableTaskList(QListWidget):
     """Task list the user can drag to re-rank.
 
     Emits ``reordered(moved_text, old_rank, new_rank, new_texts, new_titles)``
-    after a drag, where the ranks are 1-based positions, ``new_texts`` is the
-    full new order of the item display labels, and ``new_titles`` is the full
-    new order of the item titles (from Qt.UserRole).
+    after a valid same-quadrant drag. Ranks and the two lists contain only task
+    rows, never section headers. A drop into another quadrant emits
+    ``reorderRejected`` and the caller restores the previous order.
     """
 
     reordered = Signal(str, int, int, list, list)
+    reorderRejected = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setItemDelegate(_TaskRowDelegate(self))
+
+    def _task_items(self) -> list[QListWidgetItem]:
+        return [
+            self.item(row)
+            for row in range(self.count())
+            if self.item(row).data(_ROW_KIND_ROLE) == "task"
+        ]
+
+    def _quadrant_at(self, row: int):
+        """Return the quadrant of the nearest header at or above ``row``."""
+        for current in range(row, -1, -1):
+            item = self.item(current)
+            if item is not None and item.data(_ROW_KIND_ROLE) == "header":
+                return item.data(_QUADRANT_ROLE)
+        return None
 
     def dropEvent(self, event):
         moved_item = self.currentItem()
-        if moved_item is None:
-            super().dropEvent(event)
+        if moved_item is None or moved_item.data(_ROW_KIND_ROLE) != "task":
+            event.ignore()
             return
-        moved_text = moved_item.text()
-        old_texts = [self.item(i).text() for i in range(self.count())]
+
+        moved_key = moved_item.data(Qt.UserRole)
+        source_quadrant = moved_item.data(_QUADRANT_ROLE)
+        old_keys = [item.data(Qt.UserRole) for item in self._task_items()]
+
         super().dropEvent(event)
-        new_texts = [self.item(i).text() for i in range(self.count())]
-        new_titles = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
-        if moved_text not in old_texts or moved_text not in new_texts:
+
+        keyed_rows = [
+            (row, self.item(row))
+            for row in range(self.count())
+            if self.item(row).data(_ROW_KIND_ROLE) == "task"
+            and self.item(row).data(Qt.UserRole) == moved_key
+        ]
+        if not keyed_rows:
             return
-        old_rank = old_texts.index(moved_text) + 1
-        new_rank = new_texts.index(moved_text) + 1
+        moved_row, moved_item = keyed_rows[0]
+        if self._quadrant_at(moved_row) != source_quadrant:
+            self.reorderRejected.emit()
+            return
+
+        items = self._task_items()
+        new_keys = [item.data(Qt.UserRole) for item in items]
+        new_texts = [item.text() for item in items]
+        try:
+            old_rank = old_keys.index(moved_key) + 1
+            new_rank = new_keys.index(moved_key) + 1
+        except ValueError:
+            return
         if old_rank != new_rank:
-            self.reordered.emit(moved_text, old_rank, new_rank, new_texts, new_titles)
+            self.reordered.emit(
+                moved_item.text(), old_rank, new_rank, new_texts, new_keys
+            )
 
 
 class _RankingWorker(QObject):
@@ -123,6 +312,19 @@ class TasksWindow(QWidget):
         # item's label back to its task dict, kept in sync by _render().
         self._order = []
         self._text_to_task = {}
+        # Ranked results are grouped by quadrant; the degraded fallback is not.
+        self._grouped = False
+
+        # Add-form suggestion state. The selector is only auto-filled while
+        # the player has not changed it by hand.
+        self._suggestion_title = None
+        self._suggestion_value = None
+        self._suggestion_goal = None
+        self._importance_touched = False
+        self._setting_importance = False
+        self._suggestion_receiver = _SuggestionReceiver(
+            self._on_add_suggestion, self
+        )
 
         # Status text is split in two so a transient "Added: x" message is not
         # wiped by, nor endlessly appended to, a standing ranking notice.
@@ -142,6 +344,7 @@ class TasksWindow(QWidget):
 
         self.tasks_list_widget = ReorderableTaskList()
         self.tasks_list_widget.reordered.connect(self._on_reordered)
+        self.tasks_list_widget.reorderRejected.connect(self._on_reorder_rejected)
         root.addWidget(self.tasks_list_widget, stretch=1)
 
         action_row = QHBoxLayout()
@@ -168,6 +371,8 @@ class TasksWindow(QWidget):
         add_row = QHBoxLayout()
         self.title_input = QLineEdit()
         self.title_input.setPlaceholderText("Title")
+        self.title_input.textEdited.connect(self._on_title_edited)
+        self.title_input.editingFinished.connect(self._on_title_editing_finished)
 
         self.deadline_checkbox = QCheckBox("Deadline:")
         self.deadline_edit = QDateEdit()
@@ -178,6 +383,12 @@ class TasksWindow(QWidget):
         self.deadline_edit.setEnabled(False)
         self.deadline_checkbox.toggled.connect(self.deadline_edit.setEnabled)
 
+        self.effort_combo = _make_effort_combo(None)
+        self.importance_combo = _make_importance_combo(DEFAULT_IMPORTANCE)
+        self.importance_combo.currentIndexChanged.connect(
+            self._on_importance_changed
+        )
+
         self.add_button = QPushButton()
         self.add_button.setIcon(get_icon("add"))
         self.add_button.setText("Add")
@@ -185,8 +396,17 @@ class TasksWindow(QWidget):
         add_row.addWidget(self.title_input)
         add_row.addWidget(self.deadline_checkbox)
         add_row.addWidget(self.deadline_edit)
+        add_row.addWidget(QLabel("Effort:"))
+        add_row.addWidget(self.effort_combo)
+        add_row.addWidget(QLabel("Importance:"))
+        add_row.addWidget(self.importance_combo)
         add_row.addWidget(self.add_button)
         root.addLayout(add_row)
+
+        self.suggestion_label = QLabel("")
+        self.suggestion_label.setTextFormat(Qt.PlainText)
+        self.suggestion_label.setStyleSheet("font-size: 11px;")
+        root.addWidget(self.suggestion_label)
 
         self.status_label = QLabel("")
         # Task titles are stored literally; never let one render as HTML.
@@ -284,6 +504,7 @@ class TasksWindow(QWidget):
         self._priority_note = ""
         self._set_status(f"Ranking failed: {message}")
         if not self._order:
+            self._grouped = False
             self._order = self._unranked_tasks()
             self._render(self._order)
         self._report_data_issues()
@@ -322,23 +543,36 @@ class TasksWindow(QWidget):
 
     def _render_ranking(self, result: dict) -> None:
         """Apply a ranking result, falling back to the stored order."""
-        self._order = result.get("all_tasks_ranked", [])
+        ranked = result.get("all_tasks_ranked") or []
+        self._grouped = bool(ranked)
 
         # An empty ranking does not mean the player has no tasks. The ranking
         # depends on the player profile and the bundled NLP model, so when it
         # cannot be produced fall back to the stored list rather than showing a
         # blank window that makes tasks look lost even though they were saved.
-        if not self._order:
+        if not ranked:
             self._priority_note = self._explain(result.get("_reason"))
             self._order = self._unranked_tasks()
-        elif result.get("_reason"):
-            # Ranked, but only partially: point the player at what unlocks the
-            # full ordering instead of leaving the degraded score unexplained.
-            self._priority_note = (
-                f"{result['_reason']} — use 'Edit Player Profile' to improve it"
-            )
         else:
-            self._priority_note = ""
+            if result.get("_reason"):
+                # Ranked, but only partially: point the player at what unlocks
+                # the full ordering instead of leaving the note unexplained.
+                self._priority_note = (
+                    f"{result['_reason']} — use 'Edit Player Profile' to improve it"
+                )
+            else:
+                self._priority_note = ""
+
+            quadrants = result.get("quadrants") or {}
+            self._order = [
+                task
+                for quadrant in _QUADRANT_ORDER
+                for task in (quadrants.get(quadrant) or {}).get("tasks", [])
+            ]
+            if not self._order:
+                # Malformed snapshot: keep the tasks visible in score order.
+                self._grouped = False
+                self._order = list(ranked)
 
         self._apply_status()
         self._render(self._order)
@@ -369,28 +603,61 @@ class TasksWindow(QWidget):
         )
 
     def _render(self, tasks):
-        """Render ``tasks`` (ordered list of dicts) as a numbered list."""
+        """Render tasks, grouped into quadrants when the result was ranked."""
         self.tasks_list_widget.clear()
         self._text_to_task = {}
-        for rank, task in enumerate(tasks, start=1):
-            task["rank"] = rank
-            title = task.get("title", "")
-            deadline = task.get("deadline")
-            p_score = task.get("P_final")  # absent when shown unranked
-            display = f"{rank}. {title}"
-            if deadline:
-                display += f"  → due {deadline}"
 
-            # Only claim a pull score when one was actually computed; the
-            # unranked fallback would otherwise read as a real score of zero.
-            if p_score is not None:
-                display += f" [P={p_score:.3f}]"
-            item = QListWidgetItem(display)
-            # Key by the stable task id: titles can be edited or duplicated.
-            key = task.get("id") or title
-            item.setData(Qt.UserRole, key)
-            self.tasks_list_widget.addItem(item)
-            self._text_to_task[key] = task
+        if self._grouped:
+            for quadrant in _QUADRANT_ORDER:
+                quadrant_tasks = [
+                    task for task in tasks if task.get("quadrant") == quadrant
+                ]
+                self._add_quadrant_header(quadrant, len(quadrant_tasks))
+                for task in quadrant_tasks:
+                    self._add_task_row(task)
+            return
+
+        for task in tasks:
+            self._add_task_row(task)
+
+    def _add_quadrant_header(self, quadrant: str, count: int) -> None:
+        name = QUADRANTS.get(quadrant, {}).get("name", quadrant)
+        item = QListWidgetItem(f"{quadrant} · {name} ({count})")
+        item.setData(_ROW_KIND_ROLE, "header")
+        item.setData(_QUADRANT_ROLE, quadrant)
+        item.setFlags(Qt.ItemIsEnabled)
+        font = QFont(item.font())
+        font.setBold(True)
+        item.setFont(font)
+        item.setSizeHint(QSize(0, 28))
+        self.tasks_list_widget.addItem(item)
+
+    def _add_task_row(self, task: dict) -> None:
+        title = str(task.get("title") or "untitled")
+        deadline = task.get("deadline")
+        display = title
+        if deadline:
+            display += f"  → due {deadline}"
+
+        item = QListWidgetItem(display)
+        # Key by the stable task id: titles can be edited or duplicated.
+        key = task.get("id") or title
+        item.setData(Qt.UserRole, key)
+        item.setData(_ROW_KIND_ROLE, "task")
+        item.setData(_QUADRANT_ROLE, task.get("quadrant"))
+        item.setData(_REASON_ROLE, str(task.get("reason") or ""))
+        item.setFlags(
+            Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled
+        )
+        reason = str(task.get("reason") or "")
+        if reason:
+            item.setToolTip(reason)
+        self.tasks_list_widget.addItem(item)
+        self._text_to_task[key] = task
+
+    def _on_reorder_rejected(self) -> None:
+        self._set_status("Tasks can only be reordered within their quadrant.")
+        QTimer.singleShot(0, lambda: self._render(self._order))
 
     def _on_reordered(self, moved_text, old_rank, new_rank, new_texts, new_titles):
         # new_titles contains the actual task titles from Qt.UserRole (no parsing needed)
@@ -423,9 +690,72 @@ class TasksWindow(QWidget):
         # 4. Render safely outside the drop event loop
         QTimer.singleShot(0, lambda: self._render(self._order))
 
+    def _set_importance_value(self, value) -> None:
+        """Select ``value`` without looking like a manual choice."""
+        self._setting_importance = True
+        try:
+            _select_combo_value(self.importance_combo, value)
+        finally:
+            self._setting_importance = False
+
+    def _on_importance_changed(self, _index: int) -> None:
+        # A suggestion must never override a value the player picked.
+        if self._setting_importance:
+            return
+        self._importance_touched = True
+
+    def _clear_add_suggestion(self) -> None:
+        self._suggestion_title = None
+        self._suggestion_value = None
+        self._suggestion_goal = None
+        self.suggestion_label.clear()
+
+    def _on_title_edited(self, text: str) -> None:
+        """Drop a suggestion that belongs to the previous title."""
+        if self._suggestion_title is None or text.strip() == self._suggestion_title:
+            return
+        if (
+            not self._importance_touched
+            and self._suggestion_value is not None
+            and self.importance_combo.currentData() == self._suggestion_value
+        ):
+            # The visible value came from the stale suggestion, not the player.
+            self._set_importance_value(DEFAULT_IMPORTANCE)
+        self._clear_add_suggestion()
+
+    def _on_title_editing_finished(self) -> None:
+        if self._shut_down:
+            return
+        title = self.title_input.text().strip()
+        if title:
+            _start_importance_suggestion(title, self._suggestion_receiver)
+
+    def _on_add_suggestion(self, title, importance, matched_goal) -> None:
+        """Show and maybe apply a suggestion on the GUI thread."""
+        if self._shut_down:
+            return
+        if title != self.title_input.text().strip():
+            # The title changed while the model was running; this answer is
+            # about a different task.
+            return
+        if importance is None or matched_goal is None:
+            self._clear_add_suggestion()
+            if not self._importance_touched:
+                self._set_importance_value(DEFAULT_IMPORTANCE)
+            return
+
+        self._suggestion_title = title
+        self._suggestion_value = importance
+        self._suggestion_goal = matched_goal
+        self.suggestion_label.setText(
+            f"Suggested: {importance} (matches goal: {matched_goal})"
+        )
+        if not self._importance_touched:
+            self._set_importance_value(importance)
+
     def _selected(self):
         item = self.tasks_list_widget.currentItem()
-        if item is None:
+        if item is None or item.data(_ROW_KIND_ROLE) != "task":
             self._set_status("Select a task first.")
             return None
         return item.data(Qt.UserRole)
@@ -461,7 +791,7 @@ class TasksWindow(QWidget):
         self._refresh_list()
 
     def _on_edit(self):
-        """Open a dialog to edit the selected task's title and deadline."""
+        """Open a dialog to edit a task, including its priority fields."""
         task_id = self._selected()
         if task_id is None:
             return
@@ -473,6 +803,21 @@ class TasksWindow(QWidget):
         title = task.get("title", "")
 
         current_deadline = task.get("deadline")
+        stored_importance = task.get("importance")
+        if (
+            not isinstance(stored_importance, int)
+            or isinstance(stored_importance, bool)
+            or not 1 <= stored_importance <= 5
+        ):
+            stored_importance = DEFAULT_IMPORTANCE
+        stored_source = task.get("importance_source")
+        if stored_source not in ("user", "suggested", "default"):
+            stored_source = "default"
+        stored_goal = task.get("matched_goal")
+        if stored_source != "suggested" or not isinstance(stored_goal, str):
+            stored_goal = None
+        if stored_goal is not None and not stored_goal.strip():
+            stored_goal = None
 
         dialog = QDialog(self)
         dialog.setWindowTitle(tr("Edit Task"))
@@ -489,7 +834,6 @@ class TasksWindow(QWidget):
         # A task with a deadline opens with it already checked and filled in.
         # Google-synced deadlines are "yyyy-MM-dd HH:mm": the date is the
         # first ten characters and the time is kept when the date changes.
-        from PySide6.QtCore import QDate
         current_deadline = current_deadline if isinstance(current_deadline, str) else ""
         deadline_date = current_deadline[:10]
         deadline_time = current_deadline[10:]
@@ -501,12 +845,106 @@ class TasksWindow(QWidget):
         deadline_check.toggled.connect(deadline_edit.setEnabled)
         form.addRow(deadline_check, deadline_edit)
 
+        effort_combo = _make_effort_combo(task.get("effort_minutes"))
+        form.addRow(tr("Effort:"), effort_combo)
+
+        importance_combo = _make_importance_combo(stored_importance)
+        form.addRow(tr("Importance:"), importance_combo)
+
+        suggestion_label = QLabel("")
+        suggestion_label.setTextFormat(Qt.PlainText)
+        suggestion_label.setStyleSheet("font-size: 11px;")
+        form.addRow(tr("Suggestion:"), suggestion_label)
+
+        # A stored suggestion stays valid until the player edits the title or
+        # the importance, so saving an untouched task preserves its source.
+        suggestion_title = (
+            title if stored_source == "suggested" and stored_goal else None
+        )
+        suggestion_value = stored_importance if suggestion_title else None
+        suggestion_goal = stored_goal if suggestion_title else None
+        if suggestion_title is not None:
+            suggestion_label.setText(
+                f"Suggested: {suggestion_value} (matches goal: {suggestion_goal})"
+            )
+
+        touched = False
+        setting_importance = False
+
+        def set_importance(value) -> None:
+            nonlocal setting_importance
+            setting_importance = True
+            try:
+                _select_combo_value(importance_combo, value)
+            finally:
+                setting_importance = False
+
+        def on_importance_changed(_index: int) -> None:
+            nonlocal touched
+            if setting_importance:
+                return
+            touched = True
+
+        importance_combo.currentIndexChanged.connect(on_importance_changed)
+
+        def on_suggestion(result_title, importance, matched_goal) -> None:
+            nonlocal suggestion_title, suggestion_value, suggestion_goal
+            if result_title != title_edit.text().strip():
+                return
+            if importance is None or matched_goal is None:
+                suggestion_title = None
+                suggestion_value = None
+                suggestion_goal = None
+                suggestion_label.clear()
+                return
+
+            suggestion_title = result_title
+            suggestion_value = importance
+            suggestion_goal = matched_goal
+            suggestion_label.setText(
+                f"Suggested: {importance} (matches goal: {matched_goal})"
+            )
+            # A value the player set is theirs; an existing "user" importance
+            # is never replaced by a suggestion.
+            if not touched and stored_source != "user":
+                set_importance(importance)
+
+        receiver = _SuggestionReceiver(on_suggestion, dialog)
+
+        def on_title_edited(text: str) -> None:
+            nonlocal suggestion_title, suggestion_value, suggestion_goal
+            if suggestion_title is None or text.strip() == suggestion_title:
+                return
+            if (
+                not touched
+                and suggestion_value is not None
+                and importance_combo.currentData() == suggestion_value
+            ):
+                # The visible value came from the stale suggestion.
+                set_importance(DEFAULT_IMPORTANCE)
+            suggestion_title = None
+            suggestion_value = None
+            suggestion_goal = None
+            suggestion_label.clear()
+
+        title_edit.textEdited.connect(on_title_edited)
+
+        def on_title_finished() -> None:
+            candidate = title_edit.text().strip()
+            if candidate:
+                _start_importance_suggestion(candidate, receiver)
+
+        title_edit.editingFinished.connect(on_title_finished)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
 
-        if dialog.exec() != QDialog.Accepted:
+        accepted = dialog.exec()
+        # Ignore a result that was still in flight when the dialog closed.
+        receiver.closed = True
+        if accepted != QDialog.Accepted:
             return
 
         new_title = title_edit.text().strip()
@@ -523,9 +961,35 @@ class TasksWindow(QWidget):
         if not new_title:
             self._set_status(tr("Title is required."))
             return
+
+        importance = importance_combo.currentData()
+        if not isinstance(importance, int) or isinstance(importance, bool):
+            importance = DEFAULT_IMPORTANCE
+        suggested = (
+            not touched
+            and stored_source != "user"
+            and suggestion_goal is not None
+            and suggestion_title == new_title
+            and suggestion_value == importance
+        )
+        source = "suggested" if suggested else "user"
+        matched_goal = suggestion_goal if suggested else None
+        effort_minutes = effort_combo.currentData()
+
         try:
-            edit_task(task_id=task_id, old_title=title, new_title=new_title,
-                      new_deadline=new_deadline)
+            edit_task(
+                task_id=task_id,
+                old_title=title,
+                new_title=new_title,
+                new_deadline=new_deadline,
+                importance=importance,
+                importance_source=source,
+                matched_goal=matched_goal,
+                effort_minutes=effort_minutes,
+                # edit_task treats None as "leave unchanged"; the selector's
+                # "unknown" must therefore clear the stored value explicitly.
+                clear_effort=effort_minutes is None,
+            )
             self._set_status(f"Edited: {new_title}")
         except ValueError as e:
             self._set_status(str(e))
@@ -543,13 +1007,42 @@ class TasksWindow(QWidget):
         if not title:
             self._set_status(tr("Title is required."))
             return
+
+        importance = self.importance_combo.currentData()
+        if not isinstance(importance, int) or isinstance(importance, bool):
+            importance = DEFAULT_IMPORTANCE
+
+        # "Suggested" only describes the exact value the model proposed when
+        # the player did not choose a value of their own.
+        suggested = (
+            not self._importance_touched
+            and self._suggestion_goal is not None
+            and self._suggestion_title == title
+            and self._suggestion_value == importance
+        )
+        source = "suggested" if suggested else "user"
+        matched_goal = self._suggestion_goal if suggested else None
+        effort_minutes = self.effort_combo.currentData()
+
         try:
             # Category is assigned by the model later; default for now.
-            add_tasks(DEFAULT_CATEGORY,title,  deadline)
+            add_tasks(
+                DEFAULT_CATEGORY,
+                title,
+                deadline,
+                importance=importance,
+                importance_source=source,
+                matched_goal=matched_goal,
+                effort_minutes=effort_minutes,
+            )
             self._set_status(f"Added: {title}")
             self.title_input.clear()
             self.deadline_checkbox.setChecked(False)
             self.deadline_edit.setDate(QDate.currentDate())
+            self._importance_touched = False
+            self._set_importance_value(DEFAULT_IMPORTANCE)
+            _select_combo_value(self.effort_combo, None)
+            self._clear_add_suggestion()
         except ValueError as e:
             self._set_status(str(e))
         except OSError as e:

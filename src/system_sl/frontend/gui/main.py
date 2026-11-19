@@ -935,6 +935,60 @@ def _run_theme_check():
     _finish_check("--check-theme", not problems, details)
 
 
+def _run_vector_check():
+    """Verify the frozen build can build persona vectors offline.
+
+    This is the embedding-model equivalent of ``--check-ocr``: it proves the
+    model and torch made it into the bundle, and that the retired spaCy
+    backend did not.
+    """
+    problems = []
+    description = "embedding model"
+    try:
+        from system_sl.core.vector_converter import (
+            SENTENCE_TRANSFORMER_MODEL,
+            _setup_instance,
+            model_source,
+        )
+
+        description = SENTENCE_TRANSFORMER_MODEL
+        source = model_source()
+        if not Path(source).is_dir():
+            # In a release build the model must be bundled. Falling back to the
+            # HuggingFace id means the app would need the network on first run.
+            problems.append(f"model is not bundled (resolved to {source!r})")
+        else:
+            model = _setup_instance.get_model()
+            vector = model.encode(
+                "build the priority engine", normalize_embeddings=True
+            )
+            if len(vector) != 384:
+                problems.append(f"embedding dimension {len(vector)} != 384")
+            norm = float((vector ** 2).sum() ** 0.5)
+            if abs(norm - 1.0) > 1e-3:
+                problems.append(f"embedding is not normalized (norm={norm:.4f})")
+
+        try:
+            import spacy  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            problems.append("spaCy is still bundled")
+    except Exception as exc:
+        problems.append(f"{type(exc).__name__}: {exc}")
+        cause = exc.__cause__
+        while cause is not None:
+            problems.append(f"caused by {type(cause).__name__}: {cause}")
+            cause = cause.__cause__
+
+    details = (
+        "Vector check failed: " + "; ".join(problems)
+        if problems
+        else f"Vector check passed ({description})"
+    )
+    _finish_check("--check-vector", not problems, details)
+
+
 def _run_gui_check():
     """Exercise what trimming the bundle could break, and exit with the result."""
     from googleapiclient.discovery_cache import get_static_doc
@@ -995,6 +1049,8 @@ def main():
         _run_gui_check()
     if "--check-theme" in sys.argv:
         _run_theme_check()
+    if "--check-vector" in sys.argv:
+        _run_vector_check()
 
     # The background notifier. The frozen binary and the console script reach
     # this through entry.py, which dispatches before importing the GUI stack.

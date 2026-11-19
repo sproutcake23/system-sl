@@ -98,11 +98,60 @@ else:
     binaries.append((str(wallust), "."))
 
 datas += collect_data_files("spellchecker")
-for package in ("en_core_web_md", "certifi", "pillow_heif"):
+
+# Persona vectors use all-MiniLM-L6-v2 via sentence-transformers. spaCy is no
+# longer a dependency; exclude it so a build machine that happens to have it
+# cannot add ~100 MB of dead weight to the bundle.
+EXCLUDED_PACKAGES = ["spacy", "spacy_legacy", "thinc", "en_core_web_md"]
+
+for package in ("certifi", "pillow_heif"):
     package_datas, package_binaries, package_imports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_imports
+
+# The embedding stack needs its compiled libraries (libtorch, tokenizers,
+# safetensors) and package data (tokenizer configs). collect_all also adds the
+# submodules that the static import scanner cannot follow. Failure is a warning
+# rather than a build error: a source checkout without the optional model still
+# produces a working app, it just fetches the model on first run.
+try:
+    # scipy's vendored array_api_compat imports each backend with
+    # __import__(__package__ + ".fft"), which the static scanner cannot see.
+    hiddenimports += collect_submodules("scipy._external.array_api_compat")
+except Exception as exc:  # pragma: no cover - build-time only
+    print(f"[build] WARNING: could not collect array_api_compat: {exc}", file=sys.stderr)
+
+for package in (
+    "sentence_transformers",
+    "transformers",
+    "torch",
+    "tokenizers",
+    "safetensors",
+    "huggingface_hub",
+):
+    try:
+        package_datas, package_binaries, package_imports = collect_all(package)
+    except Exception as exc:  # pragma: no cover - build-time only
+        print(f"[build] WARNING: could not collect {package}: {exc}", file=sys.stderr)
+        continue
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_imports
+
+# Ship the model itself so a frozen build works offline. release.yml downloads
+# it into vendor/models; vector_converter.model_source() looks for it under
+# sys._MEIPASS/models/all-MiniLM-L6-v2.
+MINILM_MODEL = ROOT / "vendor" / "models" / "all-MiniLM-L6-v2"
+MINILM_BUNDLE_DIR = Path("models") / "all-MiniLM-L6-v2"
+if MINILM_MODEL.is_dir():
+    datas.append((str(MINILM_MODEL), str(MINILM_BUNDLE_DIR)))
+else:
+    print(
+        "[build] WARNING: vendor/models/all-MiniLM-L6-v2 is missing; the frozen "
+        "build will download the model from HuggingFace on first run",
+        file=sys.stderr,
+    )
 
 # pillow-heif loads libheif from a sibling directory rather than importing it,
 # so PyInstaller's scanner does not find it. Copy it in explicitly or HEIC
@@ -132,6 +181,7 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
+    excludes=EXCLUDED_PACKAGES,
 )
 
 # There is no separate notifier binary. The --bg mode used to be built as

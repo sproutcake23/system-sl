@@ -42,6 +42,24 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra build
 
+      # The persona embedding model is shipped inside the binary so ranking
+      # works offline. Download it into the path the spec bundles from.
+      - name: Download MiniLM embedding model
+        run: |
+          mkdir -p vendor/models
+          uv run python - <<'EOF'
+          from huggingface_hub import snapshot_download
+
+          snapshot_download(
+              repo_id="sentence-transformers/all-MiniLM-L6-v2",
+              local_dir="vendor/models/all-MiniLM-L6-v2",
+              ignore_patterns=["onnx/*", "openvino/*", "*.onnx"],
+          )
+          EOF
+          test -f vendor/models/all-MiniLM-L6-v2/config.json
+          test -f vendor/models/all-MiniLM-L6-v2/tokenizer.json
+          test -f vendor/models/all-MiniLM-L6-v2/model.safetensors
+
       - name: Bundle wallust 3.5.2
         run: |
           mkdir -p vendor/wallust
@@ -98,12 +116,13 @@ jobs:
         run: |
           uv run python -m PyInstaller packaging/system-sl.spec --noconfirm --clean
 
-      - name: Check Qt xcb libraries and OAuth client are bundled
+      - name: Check libraries, OCR tools, wallust, OAuth client and the model are bundled
         run: |
           uv run python - <<'EOF'
           from PyInstaller.archive.readers import CArchiveReader
 
-          bundled = {name.rsplit("/", 1)[-1] for name in CArchiveReader("dist/system-sl").toc}
+          names = {name.replace("\\", "/") for name in CArchiveReader("dist/system-sl").toc}
+          bundled = {name.rsplit("/", 1)[-1] for name in names}
           required = [
               "libxcb-cursor.so.0", "libxcb-icccm.so.4", "libxcb-image.so.0",
               "libxcb-keysyms.so.1", "libxcb-render-util.so.0", "libxcb-shape.so.0",
@@ -117,13 +136,30 @@ jobs:
           ocr_required = [
               "tesseract", "pdftoppm", "pdfinfo",
           ]
+          # Persona vectors must work offline, so the model has to be inside the
+          # archive, not downloaded from HuggingFace on first run.
+          model_required = [
+              "models/all-MiniLM-L6-v2/config.json",
+              "models/all-MiniLM-L6-v2/tokenizer.json",
+              "models/all-MiniLM-L6-v2/model.safetensors",
+          ]
           missing = [lib for lib in required if lib not in bundled]
           missing += [lib for lib in ocr_required if lib not in bundled]
+          missing += [path for path in model_required if path not in names]
           if "google_oauth_client.json" not in bundled:
               missing.append("google_oauth_client.json")
+          # spaCy was retired; a stale build must not ship it again.
+          legacy = sorted(
+              name for name in names
+              if "en_core_web_md" in name
+              or name.startswith("spacy/")
+              or "/spacy/" in name
+          )
+          if legacy:
+              raise SystemExit(f"spaCy leaked into the bundle: {', '.join(legacy[:5])}")
           if missing:
               raise SystemExit(f"Not bundled: {', '.join(missing)}")
-          print("All Qt xcb libraries, OCR tools, wallust and the Google OAuth client are bundled.")
+          print("Qt xcb libraries, OCR tools, wallust, the Google OAuth client and the MiniLM model are bundled.")
           EOF
 
       - name: Package binary (tar.xz)
@@ -176,6 +212,19 @@ jobs:
           HOME="$test_home" dist/system-sl --check-theme
           HOME="$test_home" dist/system-sl-*-x86_64.AppImage --appimage-extract-and-run --check-theme
 
+      # The embedding model must load from the bundle with no network. Forcing
+      # offline mode makes any HuggingFace fallback fail instead of passing by
+      # downloading the model.
+      - name: Check persona vectors work offline in the frozen builds
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          test_home="$RUNNER_TEMP/vector-home"
+          mkdir -p "$test_home"
+          HOME="$test_home" dist/system-sl --check-vector
+          HOME="$test_home" dist/system-sl-*-x86_64.AppImage --appimage-extract-and-run --check-vector
+
       - name: Upload Linux binary
         uses: actions/upload-artifact@v7
         with:
@@ -207,6 +256,27 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --extra build
+
+      # The persona embedding model is shipped inside the binary so ranking
+      # works offline. Download it into the path the spec bundles from.
+      - name: Download MiniLM embedding model
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force vendor/models | Out-Null
+          @'
+          from huggingface_hub import snapshot_download
+
+          snapshot_download(
+              repo_id="sentence-transformers/all-MiniLM-L6-v2",
+              local_dir="vendor/models/all-MiniLM-L6-v2",
+              ignore_patterns=["onnx/*", "openvino/*", "*.onnx"],
+          )
+          '@ | uv run python -
+          foreach ($file in "config.json", "tokenizer.json", "model.safetensors") {
+            if (-not (Test-Path "vendor/models/all-MiniLM-L6-v2/$file")) {
+              throw "MiniLM model is missing $file"
+            }
+          }
 
       - name: Bundle wallust 3.5.2
         shell: pwsh
@@ -295,6 +365,23 @@ jobs:
           if (Test-Path $report) { Get-Content $report }
           if ($run.ExitCode -ne 0) {
             Write-Output "::error::Theme check failed with exit code $($run.ExitCode)."
+            exit 1
+          }
+
+      # The embedding model must load from the bundle with no network. Forcing
+      # offline mode makes any HuggingFace fallback fail instead of passing by
+      # downloading the model.
+      - name: Check persona vectors work offline in the frozen build
+        shell: pwsh
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "vector-report.txt"
+          $run = Start-Process dist/system-sl.exe -ArgumentList "--check-vector", "`"$report`"" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if ($run.ExitCode -ne 0) {
+            Write-Output "::error::Vector check failed with exit code $($run.ExitCode)."
             exit 1
           }
 

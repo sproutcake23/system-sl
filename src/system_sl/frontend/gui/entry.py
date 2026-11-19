@@ -15,6 +15,11 @@ from system_sl.utils.logging_setup import configure_logging
 def main() -> int:
     """Run the background notifier or the full GUI, depending on the flags."""
     configure_logging()
+    # Old pip/editable installs still have the retired spaCy packages. Remove
+    # them before any GUI or model import; frozen builds skip this internally.
+    from system_sl.utils.nlp_migration import cleanup_legacy_nlp
+
+    cleanup_legacy_nlp()
     from system_sl.utils.audio_manager import initialize_audio
 
     initialize_audio()

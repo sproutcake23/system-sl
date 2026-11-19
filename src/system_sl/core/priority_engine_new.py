@@ -23,15 +23,24 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 # ── Import Shared Dependencies to avoid repetition ──────────────────────
-from system_sl.core.vector_converter import Setup, Fusion
+from system_sl.core import scoring
+from system_sl.core.importance import load_goals, suggest_importance
+from system_sl.core.ranking_config import QUADRANTS
+from system_sl.core.vector_converter import Setup, Fusion, encode, get_vector_dim
+from system_sl.utils import get_tasks_file_path
 from system_sl.utils.atomic_json import atomic_write_json
 
 log = logging.getLogger(__name__)
 
+# Where the newest ranking snapshot lives. Kept as a module constant so tests
+# can point it at a temporary config directory without touching the real one.
+PRIORITIZE_FILE_PATH = get_tasks_file_path("prioritize.json")
+
 
 # ── Shared SpellChecker ─────────────────────────────────────────────────
 # Building the dictionary is expensive, and PriorityPipeline is constructed
-# on every ranking run, so the checker is process-wide like Setup._nlp.
+# on every ranking run, so the checker is process-wide like the embedding
+# model in Setup.
 # pyspellchecker only reads its word frequencies after construction, which
 # makes one shared instance safe for the GUI and the ranking worker.
 _CUSTOM_WORDS = [
@@ -134,11 +143,56 @@ class TaskAnalyzer:
 
     def __init__(self):
         self.setup = Setup()
-        self._nlp = self.setup._get_model()
+        # The embedding model (all-MiniLM-L6-v2) is loaded lazily on first
+        # use, so constructing the engine stays cheap until ranking runs.
 
     def _get_spell(self):
         """Return the process-wide SpellChecker (loaded once per process)."""
         return get_spellchecker()
+
+    @staticmethod
+    def _verb_forms(word: str) -> set[str]:
+        """Return likely base forms for an inflected word.
+
+        spaCy's lemmatizer is gone, so this folds the common English
+        inflections back to the forms used by ``_HEAVY_VERBS`` and
+        ``_LIGHT_VERBS``: ``writing -> write``, ``studies -> study``,
+        ``submitting -> submit``, ``updates -> update``.
+        """
+        forms: set[str] = set()
+        stems = []
+        if word.endswith("ies") and len(word) > 4:
+            forms.add(word[:-3] + "y")
+        if word.endswith("ing") and len(word) > 5:
+            stems.append(word[:-3])
+        if word.endswith("ed") and len(word) > 4:
+            stems.append(word[:-2])
+        if word.endswith("es") and len(word) > 4:
+            stems.append(word[:-2])
+        if word.endswith("s") and len(word) > 3:
+            stems.append(word[:-1])
+        for stem in stems:
+            forms.add(stem)
+            forms.add(stem + "e")
+            if len(stem) > 3 and stem[-1] == stem[-2]:
+                forms.add(stem[:-1])
+        return forms
+
+    @classmethod
+    def _tokenize(cls, title: str) -> set[str]:
+        """Split a title into raw words and their likely base forms.
+
+        This replaces spaCy's POS tagging and lemmatizer: the heavy/light verb
+        sets only need to know which verbs appear, not their grammatical role.
+        """
+        words: set[str] = set()
+        for raw in title.replace("-", " ").replace("_", " ").split():
+            word = "".join(ch for ch in raw if ch.isalpha())
+            if not word:
+                continue
+            words.add(word)
+            words.update(cls._verb_forms(word))
+        return words
    
     def correct_typos(self, text: str) -> str:
         """Fixes spelling mistakes in a string before NLP processing."""
@@ -181,16 +235,18 @@ class TaskAnalyzer:
         return None
 
     def infer_cognitive_weight(self, title: str) -> float:
-        """Infer cognitive load of a task from its title using spaCy POS tagging."""
+        """Infer cognitive load of a task from its title.
+
+        Replaces spaCy POS tagging with plain token matching against the
+        heavy/light verb sets: the only thing POS tagging was used for was
+        deciding which verbs appear in the title.
+        """
         try:
             clean_title = self.correct_typos(title.lower())  # Typo correction
+            words = self._tokenize(clean_title)
 
-            nlp = self._nlp
-            doc = nlp(clean_title)
-            verbs = {token.lemma_ for token in doc if token.pos_ == "VERB"}
-
-            heavy_hits = len(verbs & self._HEAVY_VERBS)
-            light_hits = len(verbs & self._LIGHT_VERBS)
+            heavy_hits = len(words & self._HEAVY_VERBS)
+            light_hits = len(words & self._LIGHT_VERBS)
 
             W = 0.5 + (heavy_hits * 0.15) - (light_hits * 0.10)
             return round(max(0.1, min(1.0, W)), 4)
@@ -204,13 +260,11 @@ class TaskAnalyzer:
         """Compute semantic alignment with the user's vector."""
         try:
             clean_title = self.correct_typos(title.lower())  # typo correction
-            nlp = self._nlp
-            doc = nlp(clean_title)
+            task_vec = encode(clean_title).astype(np.float64)
 
-            if not doc.has_vector:
+            if not task_vec.any():
                 return 0.5
 
-            task_vec = doc.vector.astype(np.float64)
             user_vec = user_vector.astype(np.float64)
 
             magnitude = np.linalg.norm(task_vec) * np.linalg.norm(user_vec)
@@ -540,27 +594,167 @@ class PriorityPipeline:
 
 
 def empty_ranking(reason: str) -> dict:
-    """Build the degraded-result payload without instantiating the pipeline.
-
-    PriorityPipeline.__init__ eagerly loads the NLP model through
-    TaskAnalyzer, so constructing one raises in precisely the situations where
-    we still owe the caller a well-formed "no ranking" result.
-    """
+    """Build the degraded-result payload without loading any model."""
     return {
         "generated_at": datetime.now().isoformat(),
-        "context": "GROWTH",
-        "context_description": reason,
-        "bandit_confidence": 0.0,
-        "bandit_weights": {},
         "task_count": 0,
-        "quadrant_counts": {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0},
+        "quadrant_counts": {q: 0 for q in QUADRANTS},
         "quadrants": {
-            q: {**PriorityPipeline.QUADRANTS[q], "tasks": []}
-            for q in PriorityPipeline.QUADRANTS
+            q: {
+                "name": QUADRANTS[q]["name"],
+                "icon": QUADRANTS[q]["icon"],
+                "subtitle": QUADRANTS[q]["subtitle"],
+                "tasks": [],
+            }
+            for q in QUADRANTS
         },
         "all_tasks_ranked": [],
         "_reason": reason,
     }
+
+
+def ensure_importance_suggestions(tasks: list[dict], *, model=None, goals=None) -> bool:
+    """Fill in suggested importance for tasks still carrying the default.
+
+    Only tasks whose ``importance_source`` is ``"default"`` are considered;
+    values the player set, or suggestions already accepted by an earlier run,
+    are never touched. A persona with no usable goals is a no-op. All changes
+    are saved in a single write, and the function reports whether it wrote.
+
+    ``model`` and ``goals`` exist so tests can inject a fake embedder and a
+    fixed goal list. The app calls this with neither and uses the shared model.
+    """
+    try:
+        goal_list = load_goals() if goals is None else list(goals)
+    except Exception as exc:
+        log.warning("Could not load persona goals: %s", exc)
+        return False
+
+    if not goal_list:
+        return False
+
+    changed = False
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if task.get("importance_source") != "default":
+            continue
+        title = task.get("title")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        try:
+            importance, matched_goal, _relevance = suggest_importance(
+                title, model=model, goals=goal_list
+            )
+        except Exception as exc:
+            log.warning("Could not suggest importance for %r: %s", title, exc)
+            continue
+
+        task["importance"] = importance
+        task["matched_goal"] = matched_goal
+        task["importance_source"] = "suggested"
+        changed = True
+
+    if changed:
+        from system_sl.core.tasks import save_tasks
+
+        save_tasks(tasks)
+    return changed
+
+
+def _task_key(task: dict):
+    return task.get("id") or task.get("title")
+
+
+def _ranked_task_payload(task: dict, raw_importance: dict) -> dict:
+    """Keep only the fields the ranking snapshot promises.
+
+    ``scoring.rank_tasks`` returns a normalized ``importance``. The stored
+    task's raw 1..5 value is looked up separately so the payload keeps the
+    number the player actually sees.
+    """
+    return {
+        "id": task.get("id"),
+        "title": task.get("title", "untitled"),
+        "category": task.get("category", ""),
+        "deadline": task.get("deadline"),
+        "created_at": task.get("created_at"),
+        "importance": raw_importance.get(
+            _task_key(task), task.get("importance")
+        ),
+        "importance_source": task.get("importance_source"),
+        "matched_goal": task.get("matched_goal"),
+        "effort_minutes": task.get("effort_minutes"),
+        "urgency": task.get("urgency"),
+        "quick_win": task.get("quick_win"),
+        "score": task.get("score"),
+        "quadrant": task.get("quadrant"),
+        "reason": task.get("reason"),
+    }
+
+
+def _write_prioritization(payload: dict) -> None:
+    atomic_write_json(PRIORITIZE_FILE_PATH, payload)
+
+
+def load_latest_prioritization() -> dict:
+    """Return the newest ranking snapshot, or a degraded payload.
+
+    Read-only: no writes, no model loading. A missing or unreadable file is
+    reported through the same shape every caller already knows.
+    """
+    try:
+        raw = Path(PRIORITIZE_FILE_PATH).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except FileNotFoundError:
+        return empty_ranking("No prioritization found")
+    except (OSError, TypeError, ValueError):
+        log.debug("could not read the prioritization file", exc_info=True)
+        return empty_ranking("Could not read prioritize.json")
+
+    if not isinstance(data, dict):
+        return empty_ranking("Could not read prioritize.json")
+    return data
+
+
+def get_quadrant(task_id_or_title: str) -> str | None:
+    """Return ``Q1``..``Q4`` for a task in the latest snapshot, if present."""
+    if not isinstance(task_id_or_title, str) or not task_id_or_title:
+        return None
+
+    key = task_id_or_title
+    ranked = load_latest_prioritization().get("all_tasks_ranked")
+    if not isinstance(ranked, list):
+        return None
+
+    for task in ranked:
+        if isinstance(task, dict) and str(task.get("id")) == key:
+            return task.get("quadrant")
+    for task in ranked:
+        if isinstance(task, dict) and str(task.get("title")) == key:
+            return task.get("quadrant")
+    return None
+
+
+def get_task_summary_for_chat(top_n: int = 5) -> str:
+    """Return one plain-text line per top-ranked task, for the chat prompt."""
+    ranked = load_latest_prioritization().get("all_tasks_ranked")
+    if not isinstance(ranked, list):
+        ranked = []
+    tasks_list = [task for task in ranked if isinstance(task, dict)]
+    lines = []
+    for index, task in enumerate(tasks_list[:top_n], start=1):
+        quadrant = str(task.get("quadrant") or "").strip()
+        label = quadrant
+        if quadrant in QUADRANTS:
+            label = f"{quadrant} {QUADRANTS[quadrant]['name']}"
+        title = str(task.get("title") or "untitled")
+        reason = str(task.get("reason") or "")
+        lines.append(f"{index}. [{label}] {title} | {reason}")
+
+    if not lines:
+        return "No ranked tasks are available yet."
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -594,6 +788,25 @@ def apply_manual_order(ranked: list, manual: list) -> list:
     return result
 
 
+def _order_quadrant(tasks: list, manual: list) -> list:
+    """Put dragged tasks first in their saved order, then score order.
+
+    ``apply_manual_order`` keeps the dragged tasks in their saved relative
+    order; extracting that relative order first lets the untouched tasks keep
+    the score order the ranker gave them.
+    """
+    if not manual:
+        return list(tasks)
+
+    manual_keys = set(manual)
+
+    def dragged(task) -> bool:
+        return task.get("id") in manual_keys or task.get("title") in manual_keys
+
+    ordered = apply_manual_order(tasks, manual)
+    return [t for t in ordered if dragged(t)] + [t for t in tasks if not dragged(t)]
+
+
 def load_manual_order() -> list:
     """Return the player's drag order. See core.tasks for the file layout."""
     from system_sl.core.tasks import load_manual_order as _load
@@ -616,50 +829,64 @@ def save_ranked_order(tasks: list) -> None:
 
 
 def run_prioritization(display: bool = True) -> dict:
-    """Rank every task and save the result to ``prioritize.json``."""
-    degradation = None
-    fusion = Fusion()
+    """Rank every task and save the result to ``prioritize.json``.
 
-    # Checked explicitly rather than by catching FileNotFoundError, so that a
-    # genuinely broken NLP model still surfaces as an error instead of being
-    # mistaken for "this player skipped onboarding".
-    if not fusion.persona_path.exists():
-        # A player profile is an enhancement, not a prerequisite. Skipping
-        # onboarding is a supported choice, so rank with a neutral vector
-        # rather than refusing to produce any ranking at all: urgency and
-        # momentum still order the list, only the semantic term is flat.
-        log.info("No player profile at %s — ranking with a neutral vector.", fusion.persona_path)
-        user_vec = np.zeros(300, dtype=np.float32)
-        degradation = "No player profile — ranked by urgency only"
-    else:
-        try:
-            # Prevent spacy overhead unless actually running
-            user_vec = fusion.build_user_vector()
-        except Exception as e:
-            # Deliberately leave task_order.json untouched. Wiping it here
-            # would throw away the player's drag order over a transient
-            # failure such as an unreadable model. get_topn_task() rebuilds
-            # the order from the active tasks whenever it is empty.
-            log.warning("Could not build user vector: %s", e)
-            return empty_ranking("Vector generation failed")
+    Importance suggestions are filled in for untouched default tasks before
+    scoring. The score order is global, while the player's drag order is
+    applied separately inside each quadrant. Any failure still produces and
+    writes the degraded payload so callers never receive a partial dict.
+    """
+    try:
+        from system_sl.core.tasks import load_tasks
+
+        tasks = [t for t in load_tasks() if isinstance(t, dict)]
+        if not tasks:
+            result = empty_ranking("No tasks found")
+        else:
+            ensure_importance_suggestions(tasks)
+
+            # Scoring replaces ``importance`` with a normalized value, so keep
+            # the raw 1..5 numbers separately for the payload.
+            raw_importance = {
+                _task_key(task): task.get("importance") for task in tasks
+            }
+            ranked = scoring.rank_tasks(tasks, now=datetime.now())
+            payload_tasks = [
+                _ranked_task_payload(task, raw_importance) for task in ranked
+            ]
+
+            quadrant_tasks = {q: [] for q in QUADRANTS}
+            for task in payload_tasks:
+                quadrant_tasks[task["quadrant"]].append(task)
+
+            manual_order = load_manual_order()
+            result = {
+                "generated_at": datetime.now().isoformat(),
+                "task_count": len(payload_tasks),
+                "quadrant_counts": {
+                    q: len(q_tasks) for q, q_tasks in quadrant_tasks.items()
+                },
+                "quadrants": {
+                    q: {
+                        "name": QUADRANTS[q]["name"],
+                        "icon": QUADRANTS[q]["icon"],
+                        "subtitle": QUADRANTS[q]["subtitle"],
+                        "tasks": _order_quadrant(q_tasks, manual_order),
+                    }
+                    for q, q_tasks in quadrant_tasks.items()
+                },
+                # The global list is score order only; the drag order lives
+                # inside the quadrant lists.
+                "all_tasks_ranked": payload_tasks,
+            }
+    except Exception as exc:
+        log.warning("Prioritization failed: %s", exc, exc_info=True)
+        result = empty_ranking(f"Prioritization failed: {exc}")
 
     try:
-        # Constructed inside the guard on purpose: the constructor eagerly
-        # loads the NLP model and can raise for a broken bundle.
-        pipeline = PriorityPipeline()
-        result = pipeline.run(user_vec)
-    except Exception as e:
-        # A failure inside the pipeline must not propagate into the Qt slot
-        # that called us, or the caller keeps rendering whatever stale list it
-        # already had. Report it as an empty ranking instead so the caller can
-        # decide how to degrade.
-        log.warning("Prioritization pipeline failed: %s", e)
-        result = empty_ranking("Prioritization failed")
-
-    # empty_ranking() already carries a reason for an empty ranking; never
-    # overwrite it with the softer "no profile" note.
-    if degradation and not result.get("_reason"):
-        result["_reason"] = degradation
+        _write_prioritization(result)
+    except Exception as exc:
+        log.warning("Could not write prioritize.json: %s", exc, exc_info=True)
 
     if display:
         display_prioritized_tasks(result)
@@ -669,14 +896,11 @@ def run_prioritization(display: bool = True) -> dict:
 
 def display_prioritized_tasks(result: dict) -> None:
     log.info("\n══ ⚔ SYSTEM TASK PRIORITIZATION ══")
-    log.info(f"Context : {result.get('context')} - {result.get('context_description')}")
-    log.info(f"Bandit  : {result.get('bandit_confidence'):.1%} confidence\n")
-
     for q_key, data in result.get("quadrants", {}).items():
         if not data["tasks"]:
             continue
         log.info(f"── {data['icon']} {data['name']} ──")
-        for t in data["tasks"]:
-            bar = "█" * int(t["pull_normalized"] * 20)
-            log.info(f" [{bar:<20}] {t['title'][:40]} (P={t['P_final']:.4f})")
+        for task in data["tasks"]:
+            score = float(task.get("score") or 0.0)
+            log.info(f" {task['title'][:40]} (score={score:.4f})")
     log.info("\n")

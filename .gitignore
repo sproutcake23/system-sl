@@ -18,6 +18,8 @@ system_sl.egg-info/
 !packaging/system-sl.spec
 # wallust binaries downloaded by the release workflow
 vendor/wallust/
+# all-MiniLM-L6-v2 model downloaded by the release workflow
+vendor/models/
 
 # Local Environment Variables & Secrets (CRITICAL)
 .env

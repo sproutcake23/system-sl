@@ -97,8 +97,37 @@ def load_persona_summary() -> str:
 # TASKS
 # =============================================================================
 
+def _ranked_key(entry: Any) -> Optional[str]:
+    """Return the id a ranked entry should be indexed by.
+
+    Snapshots written before task ids were included fall back to the title.
+    """
+    if not isinstance(entry, dict):
+        return None
+    task_id = entry.get("id")
+    if task_id:
+        return str(task_id)
+    title = entry.get("title")
+    if title:
+        return str(title)
+    return None
+
+
+def _ranked_entry(task: dict, priorities: dict[str, dict]) -> Optional[dict]:
+    """Find a task's ranked entry by id first, then title (old snapshots)."""
+    task_id = task.get("id")
+    if task_id is not None:
+        ranked = priorities.get(str(task_id))
+        if ranked is not None:
+            return ranked
+    title = task.get("title")
+    if title is not None:
+        return priorities.get(str(title))
+    return None
+
+
 def _priority_index() -> dict[str, dict]:
-    """Return the ranking engine's scores, keyed by task title."""
+    """Return the ranking engine's scores, keyed by task id where possible."""
     try:
         from system_sl.utils import load_data, get_tasks_file_path
 
@@ -110,8 +139,9 @@ def _priority_index() -> dict[str, dict]:
         return {}
     index: dict[str, dict] = {}
     for entry in data.get("all_tasks_ranked") or []:
-        if isinstance(entry, dict) and entry.get("title"):
-            index[str(entry["title"])] = entry
+        key = _ranked_key(entry)
+        if key is not None:
+            index[key] = entry
     return index
 
 
@@ -151,10 +181,10 @@ def load_top_tasks(top_n: int = TOP_TASK_COUNT) -> list[dict]:
 
     def sort_key(task: dict) -> tuple:
         title = str(task.get("title") or "")
-        ranked = priorities.get(title)
+        ranked = _ranked_entry(task, priorities)
         if ranked:
             try:
-                score = float(ranked.get("P_final") or 0)
+                score = float(ranked.get("score") or 0)
             except (TypeError, ValueError):
                 score = 0.0
             return (0, -score, title)
@@ -168,7 +198,7 @@ def load_top_tasks(top_n: int = TOP_TASK_COUNT) -> list[dict]:
 
 def _task_priority(task: dict, priorities: dict[str, dict]) -> str:
     """Return the priority label of one task."""
-    ranked = priorities.get(str(task.get("title") or ""))
+    ranked = _ranked_entry(task, priorities)
     if not ranked:
         return "unranked"
     quadrant = str(ranked.get("quadrant") or "").strip().upper()
